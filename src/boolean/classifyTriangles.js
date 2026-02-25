@@ -11,82 +11,16 @@ import { queryGrid } from "../intersect/spatialGrid.js";
 import { retriangulateWithSteinerPoints } from "./splitTriangles.js";
 
 /**
- * Cast a ray along one axis and count crossings with a triangle soup.
+ * Classify a point as inside or outside the other surface using Z-ray casting
+ * with jittered XY to avoid coplanar and edge-hit artifacts.
  *
- * @param {{ x: number, y: number, z: number }} point
- * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} otherTris
- * @param {Object} otherGrid - Spatial grid over otherTris
- * @param {number} otherCellSize
- * @param {string} axis - "z", "x", or "y"
- * @returns {number} crossing count
- */
-function castRayAlongAxis(point, otherTris, otherGrid, otherCellSize, axis) {
-	var px, py, pMain;
-	var count = 0;
-
-	if (axis === "z") {
-		px = point.x; py = point.y; pMain = point.z;
-	} else if (axis === "x") {
-		px = point.y; py = point.z; pMain = point.x;
-	} else {
-		px = point.x; py = point.z; pMain = point.y;
-	}
-
-	// Query the spatial grid (XY-based) — for non-Z axes we must check all triangles
-	var candidates;
-	if (axis === "z") {
-		var bb = { minX: px, maxX: px, minY: py, maxY: py };
-		candidates = queryGrid(otherGrid, bb, otherCellSize);
-	} else {
-		// For X/Y rays, iterate all triangles (grid is XY-oriented)
-		candidates = [];
-		for (var i = 0; i < otherTris.length; i++) candidates.push(i);
-	}
-
-	for (var c = 0; c < candidates.length; c++) {
-		var tri = otherTris[candidates[c]];
-
-		// Project triangle vertices onto the 2D plane perpendicular to the ray
-		var a0, a1, b0, b1, c0, c1, aM, bM, cM;
-		if (axis === "z") {
-			a0 = tri.v0.x; a1 = tri.v0.y; aM = tri.v0.z;
-			b0 = tri.v1.x; b1 = tri.v1.y; bM = tri.v1.z;
-			c0 = tri.v2.x; c1 = tri.v2.y; cM = tri.v2.z;
-		} else if (axis === "x") {
-			a0 = tri.v0.y; a1 = tri.v0.z; aM = tri.v0.x;
-			b0 = tri.v1.y; b1 = tri.v1.z; bM = tri.v1.x;
-			c0 = tri.v2.y; c1 = tri.v2.z; cM = tri.v2.x;
-		} else {
-			a0 = tri.v0.x; a1 = tri.v0.z; aM = tri.v0.y;
-			b0 = tri.v1.x; b1 = tri.v1.z; bM = tri.v1.y;
-			c0 = tri.v2.x; c1 = tri.v2.z; cM = tri.v2.y;
-		}
-
-		// Barycentric coordinates
-		var d = (b1 - c1) * (a0 - c0) + (c0 - b0) * (a1 - c1);
-		if (Math.abs(d) < 1e-12) continue;
-
-		var u = ((b1 - c1) * (px - c0) + (c0 - b0) * (py - c1)) / d;
-		var v = ((c1 - a1) * (px - c0) + (a0 - c0) * (py - c1)) / d;
-		var w = 1 - u - v;
-
-		if (u < -1e-10 || v < -1e-10 || w < -1e-10) continue;
-
-		var hitMain = u * aM + v * bM + w * cM;
-		if (hitMain > pMain + 1e-10) count++;
-	}
-
-	return count;
-}
-
-/**
- * Classify a point as inside or outside the other surface using multi-directional
- * ray casting with majority vote.
+ * Casts a ray from the point in the +Z direction, counts how many triangles
+ * of the other surface the ray passes through using barycentric coordinates.
+ * Odd crossings = inside, even = outside.
  *
- * Casts rays in +Z, +X, and +Y directions to handle coplanar cases (e.g. two
- * cubes sharing the same Z range). A single +Z ray fails when the test point
- * lies on a face coplanar with the other mesh's faces. Using 3 axes and taking
- * a majority vote gives a robust result.
+ * The test point's XY is jittered by small offsets to prevent the ray from
+ * hitting triangle edges, vertices, or being exactly coplanar with faces.
+ * Three jittered rays are cast and the majority vote is used for robustness.
  *
  * @param {{ x: number, y: number, z: number }} point - Point to classify
  * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} otherTris - Other surface triangles
@@ -95,25 +29,47 @@ function castRayAlongAxis(point, otherTris, otherGrid, otherCellSize, axis) {
  * @returns {number} 1 = inside, -1 = outside
  */
 export function classifyPointByRayCast(point, otherTris, otherGrid, otherCellSize) {
-	// Try Z-ray first (fastest, uses spatial grid)
-	var zCount = castRayAlongAxis(point, otherTris, otherGrid, otherCellSize, "z");
-	var zInside = (zCount % 2 === 1);
+	// Cast 3 Z-rays with different XY jitters to avoid edge/coplanar hits.
+	// Use deterministic offsets (not random) for reproducibility.
+	var jitters = [
+		{ dx: 0.0000537, dy: 0.0000241 },
+		{ dx: -0.0000319, dy: 0.0000673 },
+		{ dx: 0.0000157, dy: -0.0000489 }
+	];
 
-	// Try X-ray
-	var xCount = castRayAlongAxis(point, otherTris, otherGrid, otherCellSize, "x");
-	var xInside = (xCount % 2 === 1);
+	var insideVotes = 0;
+	for (var j = 0; j < jitters.length; j++) {
+		var px = point.x + jitters[j].dx;
+		var py = point.y + jitters[j].dy;
+		var pz = point.z;
 
-	// If Z and X agree, use that result (skip Y for speed)
-	if (zInside === xInside) {
-		return zInside ? 1 : -1;
+		var bb = { minX: px, maxX: px, minY: py, maxY: py };
+		var candidates = queryGrid(otherGrid, bb, otherCellSize);
+
+		var count = 0;
+		for (var c = 0; c < candidates.length; c++) {
+			var tri = otherTris[candidates[c]];
+
+			var x0 = tri.v0.x, y0 = tri.v0.y;
+			var x1 = tri.v1.x, y1 = tri.v1.y;
+			var x2 = tri.v2.x, y2 = tri.v2.y;
+
+			var d = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+			if (Math.abs(d) < 1e-12) continue;
+
+			var u = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / d;
+			var v = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / d;
+			var w = 1 - u - v;
+
+			if (u < -1e-10 || v < -1e-10 || w < -1e-10) continue;
+
+			var z = u * tri.v0.z + v * tri.v1.z + w * tri.v2.z;
+			if (z > pz) count++;
+		}
+
+		if (count % 2 === 1) insideVotes++;
 	}
 
-	// Tiebreaker: Y-ray
-	var yCount = castRayAlongAxis(point, otherTris, otherGrid, otherCellSize, "y");
-	var yInside = (yCount % 2 === 1);
-
-	// Majority vote
-	var insideVotes = (zInside ? 1 : 0) + (xInside ? 1 : 0) + (yInside ? 1 : 0);
 	return insideVotes >= 2 ? 1 : -1;
 }
 
