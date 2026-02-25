@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>trimesh-boolean — Live Demo</title>
+<style>
+	* { margin: 0; padding: 0; box-sizing: border-box; }
+	body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; }
+	header { padding: 16px 20px 8px; text-align: center; }
+	header h1 { font-size: 1.5rem; color: #00d4ff; }
+	header p { color: #888; margin-top: 2px; font-size: 0.9rem; }
+	.section { border: 1px solid #333; border-radius: 6px; margin: 12px; padding: 12px; background: #0f0f23; }
+	.section h2 { font-size: 1rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+	.section h2 .tag { font-size: 0.7rem; padding: 2px 8px; border-radius: 3px; font-weight: normal; }
+	.tag-closed { background: #00d4ff33; color: #00d4ff; border: 1px solid #00d4ff55; }
+	.tag-open { background: #ff884433; color: #ff8844; border: 1px solid #ff884455; }
+	.controls { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+	button { padding: 5px 14px; border: 1px solid #555; background: transparent; color: #ccc;
+		border-radius: 3px; cursor: pointer; font-size: 0.8rem; }
+	button:hover { background: #ffffff11; }
+	button.active { background: #00d4ff; color: #1a1a2e; border-color: #00d4ff; }
+	button.active-orange { background: #ff8844; color: #1a1a2e; border-color: #ff8844; }
+	.info { color: #aaa; font-size: 0.78rem; margin-top: 4px; min-height: 1.2em; }
+	canvas { display: block; width: 100%; background: #12122a; border-radius: 4px; }
+	.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+	@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+	footer { text-align: center; padding: 12px; color: #555; font-size: 0.75rem; }
+	footer a { color: #00d4ff; text-decoration: none; }
+	.install { text-align: center; padding: 8px; }
+	.install code { background: #ffffff11; padding: 6px 16px; border-radius: 4px; font-size: 0.9rem; color: #00d4ff; }
+</style>
+</head>
+<body>
+<header>
+	<h1>trimesh-boolean</h1>
+	<p>Triangle mesh boolean operations — the only JS library that supports open surfaces</p>
+</header>
+<div class="install"><code>npm install trimesh-boolean</code></div>
+
+<div class="grid" style="margin: 0 8px;">
+	<!-- Closed: Cube vs Cube -->
+	<div class="section" id="sec-cubes">
+		<h2>Cube vs Cube <span class="tag tag-closed">Closed Solid</span></h2>
+		<div class="controls">
+			<button onclick="run('cubes','input')">Inputs</button>
+			<button onclick="run('cubes','subtract')">Subtract</button>
+			<button onclick="run('cubes','union')">Union</button>
+			<button onclick="run('cubes','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-cubes" width="600" height="340"></canvas>
+		<div class="info" id="info-cubes">Click an operation</div>
+	</div>
+
+	<!-- Closed: Offset Cubes -->
+	<div class="section" id="sec-offset">
+		<h2>Offset Cubes <span class="tag tag-closed">Closed Solid</span></h2>
+		<div class="controls">
+			<button onclick="run('offset','input')">Inputs</button>
+			<button onclick="run('offset','subtract')">Subtract</button>
+			<button onclick="run('offset','union')">Union</button>
+			<button onclick="run('offset','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-offset" width="600" height="340"></canvas>
+		<div class="info" id="info-offset">Click an operation</div>
+	</div>
+
+	<!-- Open: Flat Patches -->
+	<div class="section" id="sec-flat">
+		<h2>Flat Terrain Patches <span class="tag tag-open">Open Surface</span></h2>
+		<div class="controls">
+			<button onclick="run('flat','input')">Inputs</button>
+			<button onclick="run('flat','subtract')">Subtract</button>
+			<button onclick="run('flat','union')">Union</button>
+			<button onclick="run('flat','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-flat" width="600" height="340"></canvas>
+		<div class="info" id="info-flat">Click an operation</div>
+	</div>
+
+	<!-- Open: Wavy Terrain -->
+	<div class="section" id="sec-wavy">
+		<h2>Wavy Terrain vs Flat Cut <span class="tag tag-open">Open Surface</span></h2>
+		<div class="controls">
+			<button onclick="run('wavy','input')">Inputs</button>
+			<button onclick="run('wavy','subtract')">Subtract</button>
+			<button onclick="run('wavy','union')">Union</button>
+			<button onclick="run('wavy','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-wavy" width="600" height="340"></canvas>
+		<div class="info" id="info-wavy">Click an operation</div>
+	</div>
+</div>
+
+<footer>
+	<a href="https://github.com/brentbuffham/trimesh-boolean">GitHub</a> &middot;
+	MIT License
+</footer>
+
+<script>
+// ── Inline library (self-contained for GitHub Pages — no bundler needed) ──
+// Mesh generators
+
+function createCube(cx, cy, cz, size) {
+	var h = size / 2;
+	var v = [
+		{x:cx-h,y:cy-h,z:cz-h},{x:cx+h,y:cy-h,z:cz-h},
+		{x:cx+h,y:cy+h,z:cz-h},{x:cx-h,y:cy+h,z:cz-h},
+		{x:cx-h,y:cy-h,z:cz+h},{x:cx+h,y:cy-h,z:cz+h},
+		{x:cx+h,y:cy+h,z:cz+h},{x:cx-h,y:cy+h,z:cz+h}
+	];
+	var faces=[[0,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],[2,3,7],[2,7,6],[0,4,7],[0,7,3],[1,2,6],[1,6,5]];
+	var soup=[];
+	for(var i=0;i<faces.length;i++){var f=faces[i];
+		soup.push({v0:{x:v[f[0]].x,y:v[f[0]].y,z:v[f[0]].z},v1:{x:v[f[1]].x,y:v[f[1]].y,z:v[f[1]].z},v2:{x:v[f[2]].x,y:v[f[2]].y,z:v[f[2]].z}});}
+	return soup;
+}
+
+function createFlatPatch(cx,cy,z,w,d,divX,divY){
+	var soup=[],dx=w/divX,dy=d/divY,sx=cx-w/2,sy=cy-d/2;
+	for(var ix=0;ix<divX;ix++){for(var iy=0;iy<divY;iy++){
+		var x0=sx+ix*dx,y0=sy+iy*dy,x1=x0+dx,y1=y0+dy;
+		soup.push({v0:{x:x0,y:y0,z:z},v1:{x:x1,y:y0,z:z},v2:{x:x1,y:y1,z:z}});
+		soup.push({v0:{x:x0,y:y0,z:z},v1:{x:x1,y:y1,z:z},v2:{x:x0,y:y1,z:z}});}}
+	return soup;
+}
+
+function createWavyPatch(cx,cy,baseZ,w,d,div,amp){
+	var soup=[],dx=w/div,dy=d/div,sx=cx-w/2,sy=cy-d/2;
+	function zAt(x,y){return baseZ+amp*Math.sin(x*0.8)*Math.cos(y*0.8);}
+	for(var ix=0;ix<div;ix++){for(var iy=0;iy<div;iy++){
+		var x0=sx+ix*dx,y0=sy+iy*dy,x1=x0+dx,y1=y0+dy;
+		soup.push({v0:{x:x0,y:y0,z:zAt(x0,y0)},v1:{x:x1,y:y0,z:zAt(x1,y0)},v2:{x:x1,y:y1,z:zAt(x1,y1)}});
+		soup.push({v0:{x:x0,y:y0,z:zAt(x0,y0)},v1:{x:x1,y:y1,z:zAt(x1,y1)},v2:{x:x0,y:y1,z:zAt(x0,y1)}});}}
+	return soup;
+}
+</script>
+<script src="trimesh-boolean.min.js"></script>
+<script>
+// ── Scene Definitions ──
+
+var scenes = {
+	cubes: { a:createCube(0,0,0,2), b:createCube(1,0,0,2),
+		labelA:'Cube A', labelB:'Cube B', scale:55, colorA:'#ff6644', colorB:'#44aaff', closed:true },
+	offset: { a:createCube(0,0,0,2.5), b:createCube(0.8,0.8,0.5,1.8),
+		labelA:'Large Cube', labelB:'Small Cube', scale:45, colorA:'#cc44ff', colorB:'#44ffaa', closed:true },
+	flat: { a:createFlatPatch(0,0,0,8,8,4,4), b:createFlatPatch(2,2,0.3,6,6,4,4),
+		labelA:'Patch A (z=0)', labelB:'Patch B (z=0.3)', scale:30, colorA:'#ff8844', colorB:'#44ccff', closed:false },
+	wavy: { a:createWavyPatch(0,0,0,8,8,6,1.5), b:createFlatPatch(0,0,0.5,7,7,4,4),
+		labelA:'Wavy Terrain', labelB:'Flat Cut Plane', scale:30, colorA:'#ff6688', colorB:'#88ddff', closed:false }
+};
+
+// ── Rendering ──
+
+function project(v,scale,cx,cy){
+	return {x:(v.x-v.y*0.4)*scale+cx, y:(-v.z+v.y*0.3)*scale+cy};}
+
+function drawSoup(ctx,soup,color,alpha,scale,cx,cy){
+	ctx.strokeStyle=color; ctx.globalAlpha=alpha; ctx.lineWidth=0.8;
+	for(var i=0;i<soup.length;i++){var tri=soup[i];
+		var a=project(tri.v0,scale,cx,cy),b=project(tri.v1,scale,cx,cy),c=project(tri.v2,scale,cx,cy);
+		ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.lineTo(c.x,c.y);ctx.closePath();ctx.stroke();}
+	ctx.globalAlpha=1;}
+
+function drawFilled(ctx,soup,fill,stroke,scale,cx,cy){
+	for(var i=0;i<soup.length;i++){var tri=soup[i];
+		var a=project(tri.v0,scale,cx,cy),b=project(tri.v1,scale,cx,cy),c=project(tri.v2,scale,cx,cy);
+		ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.lineTo(c.x,c.y);ctx.closePath();
+		ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle=stroke;ctx.lineWidth=0.5;ctx.stroke();}}
+
+var resultColors={subtract:{fill:'#ff884444',stroke:'#ff884488'},union:{fill:'#44ff8844',stroke:'#44ff8888'},intersect:{fill:'#ffcc4444',stroke:'#ffcc4488'}};
+
+window.run = function(sceneId, op) {
+	var scene = scenes[sceneId];
+	var canvas = document.getElementById('c-'+sceneId);
+	var ctx = canvas.getContext('2d');
+	var info = document.getElementById('info-'+sceneId);
+	var cx = canvas.width/2, cy = canvas.height/2;
+
+	var sec = document.getElementById('sec-'+sceneId);
+	sec.querySelectorAll('button').forEach(function(b){b.classList.remove('active','active-orange');});
+	var btns = sec.querySelectorAll('button');
+	for(var i=0;i<btns.length;i++){
+		if(btns[i].textContent.toLowerCase()===op || (btns[i].textContent==='Inputs' && op==='input'))
+			btns[i].classList.add(scene.closed?'active':'active-orange');}
+
+	ctx.clearRect(0,0,canvas.width,canvas.height);
+
+	if(op==='input'){
+		drawSoup(ctx,scene.a,scene.colorA,0.7,scene.scale,cx,cy);
+		drawSoup(ctx,scene.b,scene.colorB,0.7,scene.scale,cx,cy);
+		info.textContent=scene.labelA+': '+scene.a.length+' tris | '+scene.labelB+': '+scene.b.length+' tris'+(scene.closed?'':' (open surfaces)');
+		return;}
+
+	var t0=performance.now(), result;
+	try { result = TrimeshBoolean.boolean(scene.a, scene.b, op); }
+	catch(e){ info.textContent=op+': error — '+e.message;
+		drawSoup(ctx,scene.a,scene.colorA,0.3,scene.scale,cx,cy);
+		drawSoup(ctx,scene.b,scene.colorB,0.3,scene.scale,cx,cy); return; }
+	var dt=(performance.now()-t0).toFixed(1);
+
+	if(!result||!result.soup||result.soup.length===0){
+		info.textContent=op+': no result ('+dt+' ms)';
+		drawSoup(ctx,scene.a,'#333',0.3,scene.scale,cx,cy);
+		drawSoup(ctx,scene.b,'#333',0.3,scene.scale,cx,cy); return;}
+
+	var rc=resultColors[op];
+	drawFilled(ctx,result.soup,rc.fill,rc.stroke,scene.scale,cx,cy);
+
+	var openEdges='?';
+	try{var w=TrimeshBoolean.weldVertices(result.soup,0.0001);
+		var cl=TrimeshBoolean.weldedToSoup(w.triangles);
+		openEdges=TrimeshBoolean.countOpenEdges(cl).openEdges;}catch(e){}
+
+	info.textContent=op+': '+result.soup.length+' tris'+(result.points?', '+result.points.length+' verts':'')+', open edges: '+openEdges+' — '+dt+' ms';
+};
+
+// Auto-show inputs
+run('cubes','input'); run('offset','input'); run('flat','input'); run('wavy','input');
+</script>
+</body>
+</html>

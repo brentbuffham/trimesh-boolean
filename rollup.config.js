@@ -1,4 +1,5 @@
 import resolve from "@rollup/plugin-node-resolve";
+import terser from "@rollup/plugin-terser";
 
 export default [
 	// Core library (no Three.js)
@@ -15,6 +16,13 @@ export default [
 				format: "umd",
 				name: "TrimeshBoolean",
 				sourcemap: true
+			},
+			{
+				file: "build/trimesh-boolean.min.js",
+				format: "umd",
+				name: "TrimeshBoolean",
+				sourcemap: true,
+				plugins: [terser()]
 			}
 		],
 		plugins: [resolve()],
@@ -35,6 +43,14 @@ export default [
 				name: "TrimeshBooleanThree",
 				sourcemap: true,
 				globals: { three: "THREE" }
+			},
+			{
+				file: "build/trimesh-boolean-three.min.js",
+				format: "umd",
+				name: "TrimeshBooleanThree",
+				sourcemap: true,
+				globals: { three: "THREE" },
+				plugins: [terser()]
 			}
 		],
 		plugins: [resolve()],
