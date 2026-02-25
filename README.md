@@ -21,6 +21,15 @@ Every existing package requires **closed, manifold** input. If you're working wi
 npm install trimesh-boolean
 ```
 
+Or use the CDN for browser scripts:
+
+```html
+<script src="https://unpkg.com/trimesh-boolean/build/trimesh-boolean.min.js"></script>
+<!-- Exposes window.TrimeshBoolean -->
+```
+
+**Links:** [npm](https://www.npmjs.com/package/trimesh-boolean) · [GitHub](https://github.com/brentbuffham/trimesh-boolean) · [Live Demo](https://brentbuffham.github.io/trimesh-boolean/)
+
 ## Quick Start
 
 ```javascript
