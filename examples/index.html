@@ -167,45 +167,46 @@ var scenes = {
 		a: createCube(0, 0, 0, 2),
 		b: createCube(1, 0, 0, 2),
 		labelA: 'Cube A', labelB: 'Cube B',
-		scale: 55, colorA: '#ff6644', colorB: '#44aaff', closed: true
+		scale: 55, colorA: '#ff6644', colorB: '#44aaff', closed: true, tilt: 0.3
 	},
 	offset: {
 		a: createCube(0, 0, 0, 2.5),
 		b: createCube(0.8, 0.8, 0.5, 1.8),
 		labelA: 'Large Cube', labelB: 'Small Cube',
-		scale: 45, colorA: '#cc44ff', colorB: '#44ffaa', closed: true
+		scale: 45, colorA: '#cc44ff', colorB: '#44ffaa', closed: true, tilt: 0.3
 	},
 	flat: {
 		a: createFlatPatch(0, 0, 0, 8, 8, 4, 4),
 		b: createInclinedPatch(0, 0, 0, 8, 8, 4, 4, 0.2, 0.15),
 		labelA: 'Flat Patch (z=0)', labelB: 'Inclined Patch',
-		scale: 30, colorA: '#ff8844', colorB: '#44ccff', closed: false
+		scale: 30, colorA: '#ff8844', colorB: '#44ccff', closed: false, tilt: 0.55
 	},
 	wavy: {
 		a: createWavyPatch(0, 0, 0, 8, 8, 6, 1.5),
 		b: createFlatPatch(0, 0, 0.5, 7, 7, 4, 4),
 		labelA: 'Wavy Terrain', labelB: 'Flat Cut Plane',
-		scale: 30, colorA: '#ff6688', colorB: '#88ddff', closed: false
+		scale: 30, colorA: '#ff6688', colorB: '#88ddff', closed: false, tilt: 0.55
 	}
 };
 
 // ── Rendering ──
 
-function project(v, scale, cx, cy) {
+function project(v, scale, cx, cy, tilt) {
+	if (!tilt) tilt = 0.3;
 	var px = (v.x - v.y * 0.4) * scale + cx;
-	var py = (-v.z + v.y * 0.3) * scale + cy;
+	var py = (-v.z * (1 - tilt) + v.y * tilt) * scale + cy;
 	return { x: px, y: py };
 }
 
-function drawSoup(ctx, soup, color, alpha, scale, cx, cy) {
+function drawSoup(ctx, soup, color, alpha, scale, cx, cy, tilt) {
 	ctx.strokeStyle = color;
 	ctx.globalAlpha = alpha;
 	ctx.lineWidth = 0.8;
 	for (var i = 0; i < soup.length; i++) {
 		var tri = soup[i];
-		var a = project(tri.v0, scale, cx, cy);
-		var b = project(tri.v1, scale, cx, cy);
-		var c = project(tri.v2, scale, cx, cy);
+		var a = project(tri.v0, scale, cx, cy, tilt);
+		var b = project(tri.v1, scale, cx, cy, tilt);
+		var c = project(tri.v2, scale, cx, cy, tilt);
 		ctx.beginPath();
 		ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y);
 		ctx.closePath(); ctx.stroke();
@@ -213,12 +214,12 @@ function drawSoup(ctx, soup, color, alpha, scale, cx, cy) {
 	ctx.globalAlpha = 1;
 }
 
-function drawFilled(ctx, soup, fillColor, strokeColor, scale, cx, cy) {
+function drawFilled(ctx, soup, fillColor, strokeColor, scale, cx, cy, tilt) {
 	for (var i = 0; i < soup.length; i++) {
 		var tri = soup[i];
-		var a = project(tri.v0, scale, cx, cy);
-		var b = project(tri.v1, scale, cx, cy);
-		var c = project(tri.v2, scale, cx, cy);
+		var a = project(tri.v0, scale, cx, cy, tilt);
+		var b = project(tri.v1, scale, cx, cy, tilt);
+		var c = project(tri.v2, scale, cx, cy, tilt);
 		ctx.beginPath();
 		ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y);
 		ctx.closePath();
@@ -258,9 +259,11 @@ window.run = function(sceneId, op) {
 
 	ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+	var tilt = scene.tilt || 0.3;
+
 	if (op === 'input') {
-		drawSoup(ctx, scene.a, scene.colorA, 0.7, scene.scale, cx, cy);
-		drawSoup(ctx, scene.b, scene.colorB, 0.7, scene.scale, cx, cy);
+		drawSoup(ctx, scene.a, scene.colorA, 0.7, scene.scale, cx, cy, tilt);
+		drawSoup(ctx, scene.b, scene.colorB, 0.7, scene.scale, cx, cy, tilt);
 		info.textContent = scene.labelA + ': ' + scene.a.length + ' tris | ' +
 			scene.labelB + ': ' + scene.b.length + ' tris' +
 			(scene.closed ? '' : ' (open surfaces)');
@@ -273,21 +276,21 @@ window.run = function(sceneId, op) {
 		result = boolean(scene.a, scene.b, op);
 	} catch (e) {
 		info.textContent = op + ': error — ' + e.message;
-		drawSoup(ctx, scene.a, scene.colorA, 0.3, scene.scale, cx, cy);
-		drawSoup(ctx, scene.b, scene.colorB, 0.3, scene.scale, cx, cy);
+		drawSoup(ctx, scene.a, scene.colorA, 0.3, scene.scale, cx, cy, tilt);
+		drawSoup(ctx, scene.b, scene.colorB, 0.3, scene.scale, cx, cy, tilt);
 		return;
 	}
 	var dt = (performance.now() - t0).toFixed(1);
 
 	if (!result || !result.soup || result.soup.length === 0) {
 		info.textContent = op + ': no result (' + dt + ' ms)';
-		drawSoup(ctx, scene.a, '#333', 0.3, scene.scale, cx, cy);
-		drawSoup(ctx, scene.b, '#333', 0.3, scene.scale, cx, cy);
+		drawSoup(ctx, scene.a, '#333', 0.3, scene.scale, cx, cy, tilt);
+		drawSoup(ctx, scene.b, '#333', 0.3, scene.scale, cx, cy, tilt);
 		return;
 	}
 
 	var rc = resultColors[op];
-	drawFilled(ctx, result.soup, rc.fill, rc.stroke, scene.scale, cx, cy);
+	drawFilled(ctx, result.soup, rc.fill, rc.stroke, scene.scale, cx, cy, tilt);
 
 	// Stats
 	var openEdges = '?';
