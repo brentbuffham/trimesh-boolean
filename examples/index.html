@@ -65,7 +65,7 @@
 
 	<!-- Open: Flat Patches -->
 	<div class="section" id="sec-flat">
-		<h2>Flat Terrain Patches <span class="tag tag-open">Open Surface</span></h2>
+		<h2>Flat vs Inclined Terrain <span class="tag tag-open">Open Surface</span></h2>
 		<div class="controls">
 			<button onclick="run('flat','input')">Inputs</button>
 			<button onclick="run('flat','subtract')">Subtract</button>
@@ -132,6 +132,21 @@ function createFlatPatch(cx, cy, z, w, d, divX, divY) {
 	return soup;
 }
 
+function createInclinedPatch(cx, cy, z, w, d, divX, divY, slopeX, slopeY) {
+	var soup = [], dx = w/divX, dy = d/divY, sx = cx - w/2, sy = cy - d/2;
+	if (!slopeX) slopeX = 0;
+	if (!slopeY) slopeY = 0;
+	function zAt(x, y) { return z + (x - cx) * slopeX + (y - cy) * slopeY; }
+	for (var ix = 0; ix < divX; ix++) {
+		for (var iy = 0; iy < divY; iy++) {
+			var x0 = sx+ix*dx, y0 = sy+iy*dy, x1 = x0+dx, y1 = y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y0,z:zAt(x1,y0)}, v2:{x:x1,y:y1,z:zAt(x1,y1)} });
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y1,z:zAt(x1,y1)}, v2:{x:x0,y:y1,z:zAt(x0,y1)} });
+		}
+	}
+	return soup;
+}
+
 function createWavyPatch(cx, cy, baseZ, w, d, div, amp) {
 	var soup = [], dx = w/div, dy = d/div, sx = cx-w/2, sy = cy-d/2;
 	function zAt(x,y) { return baseZ + amp * Math.sin(x*0.8) * Math.cos(y*0.8); }
@@ -162,8 +177,8 @@ var scenes = {
 	},
 	flat: {
 		a: createFlatPatch(0, 0, 0, 8, 8, 4, 4),
-		b: createFlatPatch(2, 2, 0.3, 6, 6, 4, 4),
-		labelA: 'Patch A (z=0)', labelB: 'Patch B (z=0.3)',
+		b: createInclinedPatch(0, 0, 0, 8, 8, 4, 4, 0.2, 0.15),
+		labelA: 'Flat Patch (z=0)', labelB: 'Inclined Patch',
 		scale: 30, colorA: '#ff8844', colorB: '#44ccff', closed: false
 	},
 	wavy: {
