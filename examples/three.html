@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>trimesh-boolean — Three.js Demo</title>
+<style>
+	* { margin: 0; padding: 0; box-sizing: border-box; }
+	body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; overflow: hidden; }
+
+	/* ── Top toolbar ── */
+	#toolbar {
+		display: flex; align-items: center; gap: 12px; padding: 8px 16px;
+		background: #0f0f23; border-bottom: 1px solid #333; flex-wrap: wrap;
+	}
+	#toolbar h1 { font-size: 1rem; color: #00d4ff; white-space: nowrap; }
+	#toolbar label { font-size: 0.8rem; color: #aaa; }
+	#toolbar select, #toolbar button {
+		padding: 4px 10px; border: 1px solid #555; background: #1a1a2e; color: #ccc;
+		border-radius: 3px; font-size: 0.8rem; cursor: pointer;
+	}
+	#toolbar select:focus, #toolbar button:focus { outline: 1px solid #00d4ff; }
+	#toolbar button:hover { background: #ffffff11; }
+	#toolbar button.active { background: #00d4ff; color: #1a1a2e; border-color: #00d4ff; }
+	.sep { width: 1px; height: 24px; background: #333; }
+
+	/* ── 3D viewport ── */
+	#viewport { width: 100%; flex: 1; }
+
+	/* ── Info panel ── */
+	#info-panel {
+		position: absolute; bottom: 0; left: 0; right: 0;
+		background: #0f0f23ee; border-top: 1px solid #333;
+		padding: 10px 16px; font-size: 0.78rem; font-family: 'Courier New', monospace;
+		max-height: 220px; overflow-y: auto;
+		display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px;
+	}
+	#info-panel .col { }
+	#info-panel h3 { color: #00d4ff; font-size: 0.8rem; margin-bottom: 4px; }
+	#info-panel .stat { color: #aaa; line-height: 1.6; }
+	#info-panel .stat b { color: #e0e0e0; }
+	#info-panel .highlight { color: #ffcc44; }
+
+	/* ── Layout ── */
+	#app { display: flex; flex-direction: column; height: 100vh; }
+</style>
+</head>
+<body>
+<div id="app">
+	<div id="toolbar">
+		<h1>trimesh-boolean</h1>
+		<div class="sep"></div>
+
+		<label>Mesh A:</label>
+		<select id="meshA">
+			<option value="cube">Cube</option>
+			<option value="cube-large">Large Cube</option>
+			<option value="flat-terrain">Flat Terrain</option>
+			<option value="wavy-terrain">Wavy Terrain</option>
+			<option value="inclined-terrain">Inclined Terrain</option>
+		</select>
+
+		<label>Mesh B:</label>
+		<select id="meshB">
+			<option value="cube-offset" selected>Cube (offset)</option>
+			<option value="cube">Cube</option>
+			<option value="pit-shell">Steep Pit Shell</option>
+			<option value="flat-terrain">Flat Terrain</option>
+			<option value="flat-cut">Flat Cut Plane</option>
+		</select>
+
+		<div class="sep"></div>
+
+		<button id="btn-input" onclick="runOp('input')">Inputs</button>
+		<button id="btn-subtract" onclick="runOp('subtract')">A &minus; B</button>
+		<button id="btn-union" onclick="runOp('union')">A &cup; B</button>
+		<button id="btn-intersect" onclick="runOp('intersect')">A &cap; B</button>
+
+		<div class="sep"></div>
+		<label><input type="checkbox" id="chk-wireframe"> Wireframe</label>
+		<label><input type="checkbox" id="chk-edges" checked> Edges</label>
+	</div>
+
+	<div id="viewport"></div>
+
+	<div id="info-panel">
+		<div class="col" id="info-left">
+			<h3>Inputs</h3>
+			<div class="stat" id="stat-inputs">Select meshes and click an operation</div>
+		</div>
+		<div class="col" id="info-right">
+			<h3>Result</h3>
+			<div class="stat" id="stat-result">—</div>
+		</div>
+	</div>
+</div>
+
+<script type="importmap">
+{
+	"imports": {
+		"three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+		"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+	}
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import {
+	boolean, countOpenEdges, weldVertices, weldedToSoup,
+	intersectMeshPair, computeSignedVolume, compute3DSurfaceArea,
+	computeProjectedArea, estimateAvgEdge
+} from '../src/index.js';
+
+// ── Three.js setup ──
+
+var container = document.getElementById('viewport');
+var scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+var camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
+camera.position.set(5, 5, 5);
+
+var renderer = new THREE.WebGLRenderer({ antialias: true });
+container.appendChild(renderer.domElement);
+
+var controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+// Lighting
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+var dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(5, 10, 7);
+scene.add(dirLight);
+
+// Grid helper
+var gridHelper = new THREE.GridHelper(12, 12, 0x333355, 0x222244);
+gridHelper.rotation.x = Math.PI / 2; // XY plane (Z-up convention shown as Y-up in Three.js)
+scene.add(gridHelper);
+
+// Axes helper
+var axesHelper = new THREE.AxesHelper(2);
+scene.add(axesHelper);
+
+function resize() {
+	var w = container.clientWidth;
+	var h = container.clientHeight;
+	camera.aspect = w / h;
+	camera.updateProjectionMatrix();
+	renderer.setSize(w, h);
+}
+window.addEventListener('resize', resize);
+resize();
+
+function animate() {
+	requestAnimationFrame(animate);
+	controls.update();
+	renderer.render(scene, camera);
+}
+animate();
+
+// ── Mesh generators (triangle soup) ──
+
+function createCube(cx, cy, cz, size) {
+	var h = size / 2;
+	var v = [
+		{x:cx-h, y:cy-h, z:cz-h}, {x:cx+h, y:cy-h, z:cz-h},
+		{x:cx+h, y:cy+h, z:cz-h}, {x:cx-h, y:cy+h, z:cz-h},
+		{x:cx-h, y:cy-h, z:cz+h}, {x:cx+h, y:cy-h, z:cz+h},
+		{x:cx+h, y:cy+h, z:cz+h}, {x:cx-h, y:cy+h, z:cz+h}
+	];
+	var faces = [[0,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],[2,3,7],[2,7,6],[0,4,7],[0,7,3],[1,2,6],[1,6,5]];
+	var soup = [];
+	for (var i = 0; i < faces.length; i++) {
+		var f = faces[i];
+		soup.push({ v0:{x:v[f[0]].x,y:v[f[0]].y,z:v[f[0]].z}, v1:{x:v[f[1]].x,y:v[f[1]].y,z:v[f[1]].z}, v2:{x:v[f[2]].x,y:v[f[2]].y,z:v[f[2]].z} });
+	}
+	return soup;
+}
+
+function createFlatPatch(cx, cy, z, w, d, divX, divY) {
+	var soup = [], dx = w/divX, dy = d/divY, sx = cx - w/2, sy = cy - d/2;
+	for (var ix = 0; ix < divX; ix++) {
+		for (var iy = 0; iy < divY; iy++) {
+			var x0 = sx+ix*dx, y0 = sy+iy*dy, x1 = x0+dx, y1 = y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:z}, v1:{x:x1,y:y0,z:z}, v2:{x:x1,y:y1,z:z} });
+			soup.push({ v0:{x:x0,y:y0,z:z}, v1:{x:x1,y:y1,z:z}, v2:{x:x0,y:y1,z:z} });
+		}
+	}
+	return soup;
+}
+
+function createInclinedPatch(cx, cy, z, w, d, divX, divY, slopeX, slopeY) {
+	var soup = [], dx = w/divX, dy = d/divY, sx = cx - w/2, sy = cy - d/2;
+	function zAt(x, y) { return z + (x - cx) * slopeX + (y - cy) * slopeY; }
+	for (var ix = 0; ix < divX; ix++) {
+		for (var iy = 0; iy < divY; iy++) {
+			var x0 = sx+ix*dx, y0 = sy+iy*dy, x1 = x0+dx, y1 = y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y0,z:zAt(x1,y0)}, v2:{x:x1,y:y1,z:zAt(x1,y1)} });
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y1,z:zAt(x1,y1)}, v2:{x:x0,y:y1,z:zAt(x0,y1)} });
+		}
+	}
+	return soup;
+}
+
+function createWavyPatch(cx, cy, baseZ, w, d, div, amp) {
+	var soup = [], dx = w/div, dy = d/div, sx = cx-w/2, sy = cy-d/2;
+	function zAt(x,y) { return baseZ + amp * Math.sin(x*0.8) * Math.cos(y*0.8); }
+	for (var ix = 0; ix < div; ix++) {
+		for (var iy = 0; iy < div; iy++) {
+			var x0=sx+ix*dx, y0=sy+iy*dy, x1=x0+dx, y1=y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y0,z:zAt(x1,y0)}, v2:{x:x1,y:y1,z:zAt(x1,y1)} });
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y1,z:zAt(x1,y1)}, v2:{x:x0,y:y1,z:zAt(x0,y1)} });
+		}
+	}
+	return soup;
+}
+
+function createPitShell(cx, cy, topZ, bottomZ, topRadius, bottomRadius, segments) {
+	if (!segments) segments = 16;
+	var soup = [];
+	var angleStep = (2 * Math.PI) / segments;
+	for (var i = 0; i < segments; i++) {
+		var a0 = i * angleStep, a1 = (i + 1) * angleStep;
+		var tx0 = cx + topRadius * Math.cos(a0), ty0 = cy + topRadius * Math.sin(a0);
+		var tx1 = cx + topRadius * Math.cos(a1), ty1 = cy + topRadius * Math.sin(a1);
+		var bx0 = cx + bottomRadius * Math.cos(a0), by0 = cy + bottomRadius * Math.sin(a0);
+		var bx1 = cx + bottomRadius * Math.cos(a1), by1 = cy + bottomRadius * Math.sin(a1);
+		soup.push({ v0:{x:tx0,y:ty0,z:topZ}, v1:{x:tx1,y:ty1,z:topZ}, v2:{x:bx1,y:by1,z:bottomZ} });
+		soup.push({ v0:{x:tx0,y:ty0,z:topZ}, v1:{x:bx1,y:by1,z:bottomZ}, v2:{x:bx0,y:by0,z:bottomZ} });
+		soup.push({ v0:{x:cx,y:cy,z:bottomZ}, v1:{x:bx0,y:by0,z:bottomZ}, v2:{x:bx1,y:by1,z:bottomZ} });
+	}
+	return soup;
+}
+
+// ── Mesh catalogue ──
+
+var meshCatalogue = {
+	'cube':             function() { return { soup: createCube(0, 0, 0, 2), label: 'Cube (2x2x2)', closed: true }; },
+	'cube-large':       function() { return { soup: createCube(0, 0, 0, 3), label: 'Large Cube (3x3x3)', closed: true }; },
+	'cube-offset':      function() { return { soup: createCube(1, 0.5, 0, 2), label: 'Cube (offset +1,+0.5)', closed: true }; },
+	'flat-terrain':     function() { return { soup: createFlatPatch(0, 0, 0, 8, 8, 5, 5), label: 'Flat Terrain (z=0, 8x8)', closed: false }; },
+	'flat-cut':         function() { return { soup: createFlatPatch(0, 0, 0.5, 7, 7, 4, 4), label: 'Flat Cut (z=0.5, 7x7)', closed: false }; },
+	'inclined-terrain': function() { return { soup: createInclinedPatch(0, 0, 0, 8, 8, 5, 5, 0.2, 0.15), label: 'Inclined Terrain (8x8)', closed: false }; },
+	'wavy-terrain':     function() { return { soup: createWavyPatch(0, 0, 0, 8, 8, 8, 1.5), label: 'Wavy Terrain (8x8, amp 1.5)', closed: false }; },
+	'pit-shell':        function() { return { soup: createPitShell(0, 0, 2, -1, 3, 0.5, 16), label: 'Steep Pit Shell (80\u00b0 walls)', closed: false }; }
+};
+
+// ── Soup → Three.js mesh ──
+
+function soupToThreeMesh(soup, color, opacity) {
+	var positions = new Float32Array(soup.length * 9);
+	for (var i = 0; i < soup.length; i++) {
+		var tri = soup[i], off = i * 9;
+		positions[off]   = tri.v0.x; positions[off+1] = tri.v0.y; positions[off+2] = tri.v0.z;
+		positions[off+3] = tri.v1.x; positions[off+4] = tri.v1.y; positions[off+5] = tri.v1.z;
+		positions[off+6] = tri.v2.x; positions[off+7] = tri.v2.y; positions[off+8] = tri.v2.z;
+	}
+	var geo = new THREE.BufferGeometry();
+	geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+	geo.computeVertexNormals();
+
+	var mat = new THREE.MeshPhongMaterial({
+		color: color,
+		side: THREE.DoubleSide,
+		transparent: opacity < 1,
+		opacity: opacity,
+		depthWrite: opacity >= 1
+	});
+	return new THREE.Mesh(geo, mat);
+}
+
+function soupToEdges(soup, color) {
+	var positions = new Float32Array(soup.length * 18); // 3 edges * 2 verts * 3 components
+	for (var i = 0; i < soup.length; i++) {
+		var tri = soup[i], off = i * 18;
+		// edge 0-1
+		positions[off]    = tri.v0.x; positions[off+1]  = tri.v0.y; positions[off+2]  = tri.v0.z;
+		positions[off+3]  = tri.v1.x; positions[off+4]  = tri.v1.y; positions[off+5]  = tri.v1.z;
+		// edge 1-2
+		positions[off+6]  = tri.v1.x; positions[off+7]  = tri.v1.y; positions[off+8]  = tri.v1.z;
+		positions[off+9]  = tri.v2.x; positions[off+10] = tri.v2.y; positions[off+11] = tri.v2.z;
+		// edge 2-0
+		positions[off+12] = tri.v2.x; positions[off+13] = tri.v2.y; positions[off+14] = tri.v2.z;
+		positions[off+15] = tri.v0.x; positions[off+16] = tri.v0.y; positions[off+17] = tri.v0.z;
+	}
+	var geo = new THREE.BufferGeometry();
+	geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+	return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.4 }));
+}
+
+// ── State ──
+
+var resultGroup = new THREE.Group();
+resultGroup.name = 'result';
+scene.add(resultGroup);
+
+var currentOp = 'input';
+
+function clearResult() {
+	while (resultGroup.children.length > 0) {
+		var child = resultGroup.children[0];
+		resultGroup.remove(child);
+		if (child.geometry) child.geometry.dispose();
+		if (child.material) child.material.dispose();
+	}
+}
+
+// ── Stats helpers ──
+
+function soupStats(soup, label, closed) {
+	var lines = [];
+	lines.push('<b>' + label + '</b>');
+	lines.push('Triangles: <b>' + soup.length + '</b>');
+	lines.push('Type: <b>' + (closed ? 'Closed solid' : 'Open surface') + '</b>');
+
+	var area = compute3DSurfaceArea(soup);
+	lines.push('Surface area: <b>' + area.toFixed(3) + '</b>');
+
+	if (closed) {
+		var vol = computeSignedVolume(soup);
+		lines.push('Signed volume: <b>' + vol.toFixed(3) + '</b>');
+	}
+
+	var avg = estimateAvgEdge(soup);
+	lines.push('Avg edge length: <b>' + avg.toFixed(4) + '</b>');
+
+	try {
+		var welded = weldVertices(soup, 0.0001);
+		var clean = weldedToSoup(welded.triangles);
+		var stats = countOpenEdges(clean);
+		lines.push('Open edges: <b>' + stats.openEdges + '</b> | Non-manifold: <b>' + stats.nonManifoldEdges + '</b>');
+	} catch(e) { /* skip */ }
+
+	return lines.join('<br>');
+}
+
+function resultStats(result, op, dt) {
+	if (!result || !result.soup || result.soup.length === 0) {
+		return 'Operation <b>' + op + '</b>: <span class="highlight">no result</span> (' + dt + ' ms)';
+	}
+
+	var lines = [];
+	lines.push('Operation: <b>' + op + '</b> (' + dt + ' ms)');
+	lines.push('Result triangles: <b>' + result.soup.length + '</b>');
+	if (result.points) lines.push('Result vertices: <b>' + result.points.length + '</b>');
+
+	var area = compute3DSurfaceArea(result.soup);
+	lines.push('Surface area: <b>' + area.toFixed(3) + '</b>');
+
+	var vol = computeSignedVolume(result.soup);
+	lines.push('Signed volume: <b>' + vol.toFixed(3) + '</b>');
+
+	try {
+		var welded = weldVertices(result.soup, 0.0001);
+		var clean = weldedToSoup(welded.triangles);
+		var stats = countOpenEdges(clean);
+		lines.push('Open edges: <b>' + stats.openEdges + '</b> | Non-manifold: <b>' + stats.nonManifoldEdges + '</b>');
+	} catch(e) { /* skip */ }
+
+	// Math representation
+	lines.push('');
+	if (op === 'subtract') {
+		lines.push('<span class="highlight">R = A \\ B</span>  (keep A-outside-B + B-inside-A flipped)');
+	} else if (op === 'union') {
+		lines.push('<span class="highlight">R = A \u222a B</span>  (keep A-outside-B + B-outside-A)');
+	} else if (op === 'intersect') {
+		lines.push('<span class="highlight">R = A \u2229 B</span>  (keep A-inside-B + B-inside-A)');
+	}
+
+	return lines.join('<br>');
+}
+
+// ── Run operation ──
+
+var showWireframe = false;
+var showEdges = true;
+
+window.runOp = function(op) {
+	currentOp = op;
+	clearResult();
+
+	var selA = document.getElementById('meshA').value;
+	var selB = document.getElementById('meshB').value;
+	var dataA = meshCatalogue[selA]();
+	var dataB = meshCatalogue[selB]();
+
+	// Update active button
+	document.querySelectorAll('#toolbar button').forEach(function(b) { b.classList.remove('active'); });
+	var btnId = 'btn-' + op;
+	var btn = document.getElementById(btnId);
+	if (btn) btn.classList.add('active');
+
+	var statInputs = document.getElementById('stat-inputs');
+	var statResult = document.getElementById('stat-result');
+
+	statInputs.innerHTML = soupStats(dataA.soup, 'A: ' + dataA.label, dataA.closed) +
+		'<br><br>' + soupStats(dataB.soup, 'B: ' + dataB.label, dataB.closed);
+
+	if (op === 'input') {
+		// Show both inputs
+		var meshA = soupToThreeMesh(dataA.soup, 0xff6644, 0.7);
+		var meshB = soupToThreeMesh(dataB.soup, 0x4488ff, 0.7);
+		meshA.material.wireframe = showWireframe;
+		meshB.material.wireframe = showWireframe;
+		resultGroup.add(meshA);
+		resultGroup.add(meshB);
+
+		if (showEdges) {
+			resultGroup.add(soupToEdges(dataA.soup, 0xff6644));
+			resultGroup.add(soupToEdges(dataB.soup, 0x4488ff));
+		}
+
+		// Intersection segments
+		try {
+			var segs = intersectMeshPair(dataA.soup, dataB.soup);
+			if (segs && segs.length > 0) {
+				var segPositions = new Float32Array(segs.length * 6);
+				for (var s = 0; s < segs.length; s++) {
+					segPositions[s*6]   = segs[s].p0.x; segPositions[s*6+1] = segs[s].p0.y; segPositions[s*6+2] = segs[s].p0.z;
+					segPositions[s*6+3] = segs[s].p1.x; segPositions[s*6+4] = segs[s].p1.y; segPositions[s*6+5] = segs[s].p1.z;
+				}
+				var segGeo = new THREE.BufferGeometry();
+				segGeo.setAttribute('position', new THREE.BufferAttribute(segPositions, 3));
+				var segLines = new THREE.LineSegments(segGeo, new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 }));
+				resultGroup.add(segLines);
+
+				statResult.innerHTML = 'Showing inputs<br>Intersection segments: <b>' + segs.length + '</b> (yellow lines)';
+			} else {
+				statResult.innerHTML = 'Showing inputs<br>No intersection detected';
+			}
+		} catch(e) {
+			statResult.innerHTML = 'Showing inputs';
+		}
+
+		fitCamera();
+		return;
+	}
+
+	// Boolean operation
+	var t0 = performance.now();
+	var result;
+	try {
+		result = boolean(dataA.soup, dataB.soup, op);
+	} catch(e) {
+		statResult.innerHTML = '<span class="highlight">Error: ' + e.message + '</span>';
+		return;
+	}
+	var dt = (performance.now() - t0).toFixed(1);
+
+	statResult.innerHTML = resultStats(result, op, dt);
+
+	if (!result || !result.soup || result.soup.length === 0) {
+		// Show ghost inputs
+		var ghostA = soupToThreeMesh(dataA.soup, 0x444444, 0.2);
+		var ghostB = soupToThreeMesh(dataB.soup, 0x444444, 0.2);
+		resultGroup.add(ghostA);
+		resultGroup.add(ghostB);
+		fitCamera();
+		return;
+	}
+
+	// Result mesh
+	var colors = { subtract: 0xff8844, union: 0x44ff88, intersect: 0xffcc44 };
+	var resultMesh = soupToThreeMesh(result.soup, colors[op], 1.0);
+	resultMesh.material.wireframe = showWireframe;
+	resultGroup.add(resultMesh);
+
+	if (showEdges) {
+		var edgeColors = { subtract: 0xcc6633, union: 0x33cc66, intersect: 0xcc9933 };
+		resultGroup.add(soupToEdges(result.soup, edgeColors[op]));
+	}
+
+	fitCamera();
+};
+
+function fitCamera() {
+	var box = new THREE.Box3();
+	resultGroup.traverse(function(child) {
+		if (child.isMesh || child.isLineSegments) {
+			child.geometry.computeBoundingBox();
+			var childBox = child.geometry.boundingBox.clone();
+			box.union(childBox);
+		}
+	});
+
+	if (box.isEmpty()) return;
+
+	var center = new THREE.Vector3();
+	box.getCenter(center);
+	var size = new THREE.Vector3();
+	box.getSize(size);
+	var maxDim = Math.max(size.x, size.y, size.z);
+	var dist = maxDim * 1.8;
+
+	controls.target.copy(center);
+	camera.position.set(center.x + dist * 0.6, center.y + dist * 0.4, center.z + dist * 0.7);
+	controls.update();
+}
+
+// ── UI event handlers ──
+
+document.getElementById('meshA').addEventListener('change', function() { runOp(currentOp); });
+document.getElementById('meshB').addEventListener('change', function() { runOp(currentOp); });
+
+document.getElementById('chk-wireframe').addEventListener('change', function(e) {
+	showWireframe = e.target.checked;
+	resultGroup.traverse(function(child) {
+		if (child.isMesh) child.material.wireframe = showWireframe;
+	});
+});
+
+document.getElementById('chk-edges').addEventListener('change', function(e) {
+	showEdges = e.target.checked;
+	runOp(currentOp);
+});
+
+// ── Initial display ──
+runOp('input');
+
+</script>
+</body>
+</html>

@@ -7,8 +7,8 @@
  *
  * 1. Find tagged intersection segments between mesh A and mesh B
  * 2. Build crossed-triangle sets from segment tags
- * 3. Build spatial grids for both meshes
- * 4. Classify via flood fill (BFS with ray-cast seeds)
+ * 3. Build multi-axis spatial grids for both meshes (XY, YZ, XZ)
+ * 4. Classify via flood fill (BFS with multi-axis majority-vote seeds)
  * 5. Split straddling triangles and classify sub-triangles
  * 6. Deduplicate seam vertices
  * 7. Propagate normals (BFS winding or Z-up fallback)
@@ -17,7 +17,7 @@
  */
 
 import { intersectMeshPairTagged } from "../intersect/intersectMeshPair.js";
-import { buildSpatialGrid, estimateAvgEdge } from "../intersect/spatialGrid.js";
+import { buildSpatialGrid, buildSpatialGridOnAxes, estimateAvgEdge } from "../intersect/spatialGrid.js";
 import { classifyByFloodFill, splitStraddlingAndClassify } from "./classifyTriangles.js";
 import { deduplicateSeamVertices } from "../repair/deduplicateVertices.js";
 import { weldVertices, weldedToSoup } from "../repair/weldVertices.js";
@@ -236,16 +236,26 @@ export function boolean(soupA, soupB, operation) {
 	var cellSizeA = Math.max(avgEdgeA * 2, 0.1);
 	var cellSizeB = Math.max(avgEdgeB * 2, 0.1);
 
-	var gridA = buildSpatialGrid(soupA, cellSizeA);
-	var gridB = buildSpatialGrid(soupB, cellSizeB);
+	// Build 3 spatial grids per surface for multi-axis ray-cast classification:
+	//   XY grid (Z-ray), YZ grid (X-ray), XZ grid (Y-ray)
+	var gridsA = {
+		xy: { grid: buildSpatialGrid(soupA, cellSizeA), cellSize: cellSizeA },
+		yz: { grid: buildSpatialGridOnAxes(soupA, cellSizeA, function (v) { return v.y; }, function (v) { return v.z; }), cellSize: cellSizeA },
+		xz: { grid: buildSpatialGridOnAxes(soupA, cellSizeA, function (v) { return v.x; }, function (v) { return v.z; }), cellSize: cellSizeA }
+	};
+	var gridsB = {
+		xy: { grid: buildSpatialGrid(soupB, cellSizeB), cellSize: cellSizeB },
+		yz: { grid: buildSpatialGridOnAxes(soupB, cellSizeB, function (v) { return v.y; }, function (v) { return v.z; }), cellSize: cellSizeB },
+		xz: { grid: buildSpatialGridOnAxes(soupB, cellSizeB, function (v) { return v.x; }, function (v) { return v.z; }), cellSize: cellSizeB }
+	};
 
 	// Step 4) Flood-fill classify: each connected non-crossed region gets one seed
-	var classA = classifyByFloodFill(soupA, crossedSetA, soupB, gridB, cellSizeB);
-	var classB = classifyByFloodFill(soupB, crossedSetB, soupA, gridA, cellSizeA);
+	var classA = classifyByFloodFill(soupA, crossedSetA, soupB, gridsB);
+	var classB = classifyByFloodFill(soupB, crossedSetB, soupA, gridsA);
 
 	// Step 5) Split straddling triangles and classify sub-triangles
-	var groupsA = splitStraddlingAndClassify(soupA, classA, crossedSetA, soupB, gridB, cellSizeB);
-	var groupsB = splitStraddlingAndClassify(soupB, classB, crossedSetB, soupA, gridA, cellSizeA);
+	var groupsA = splitStraddlingAndClassify(soupA, classA, crossedSetA, soupB, gridsB);
+	var groupsB = splitStraddlingAndClassify(soupB, classB, crossedSetB, soupA, gridsA);
 
 	// Step 6) Deduplicate seam vertices
 	if (groupsA.inside.length > 0) groupsA.inside = deduplicateSeamVertices(groupsA.inside, 1e-4);

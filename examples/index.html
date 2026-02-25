@@ -76,6 +76,19 @@
 		<div class="info" id="info-flat">Click an operation</div>
 	</div>
 
+	<!-- Open: Steep Pit Shell -->
+	<div class="section" id="sec-pit">
+		<h2>Steep Pit Shell vs Terrain <span class="tag tag-open">Open Surface — Steep Walls</span></h2>
+		<div class="controls">
+			<button onclick="run('pit','input')">Inputs</button>
+			<button onclick="run('pit','subtract')">Subtract</button>
+			<button onclick="run('pit','union')">Union</button>
+			<button onclick="run('pit','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-pit" width="600" height="220"></canvas>
+		<div class="info" id="info-pit">Click an operation — tests multi-axis classification on steep walls</div>
+	</div>
+
 	<!-- Open: Wavy Terrain -->
 	<div class="section" id="sec-wavy">
 		<h2>Wavy Terrain vs Flat Cut <span class="tag tag-open">Open Surface</span></h2>
@@ -160,6 +173,55 @@ function createWavyPatch(cx, cy, baseZ, w, d, div, amp) {
 	return soup;
 }
 
+/**
+ * Create an open pit shell — a bowl/cup shape with steep (80 deg) walls.
+ * The shell is open at the top. Tests multi-axis classification since
+ * Z-only ray casting fails on near-vertical walls.
+ */
+function createPitShell(cx, cy, topZ, bottomZ, topRadius, bottomRadius, segments) {
+	if (!segments) segments = 12;
+	var soup = [];
+	var angleStep = (2 * Math.PI) / segments;
+
+	for (var i = 0; i < segments; i++) {
+		var a0 = i * angleStep;
+		var a1 = (i + 1) * angleStep;
+
+		// Top ring vertices
+		var tx0 = cx + topRadius * Math.cos(a0);
+		var ty0 = cy + topRadius * Math.sin(a0);
+		var tx1 = cx + topRadius * Math.cos(a1);
+		var ty1 = cy + topRadius * Math.sin(a1);
+
+		// Bottom ring vertices
+		var bx0 = cx + bottomRadius * Math.cos(a0);
+		var by0 = cy + bottomRadius * Math.sin(a0);
+		var bx1 = cx + bottomRadius * Math.cos(a1);
+		var by1 = cy + bottomRadius * Math.sin(a1);
+
+		// Wall quad: 2 triangles
+		soup.push({
+			v0: { x: tx0, y: ty0, z: topZ },
+			v1: { x: tx1, y: ty1, z: topZ },
+			v2: { x: bx1, y: by1, z: bottomZ }
+		});
+		soup.push({
+			v0: { x: tx0, y: ty0, z: topZ },
+			v1: { x: bx1, y: by1, z: bottomZ },
+			v2: { x: bx0, y: by0, z: bottomZ }
+		});
+
+		// Bottom cap triangle (fan from center)
+		soup.push({
+			v0: { x: cx, y: cy, z: bottomZ },
+			v1: { x: bx0, y: by0, z: bottomZ },
+			v2: { x: bx1, y: by1, z: bottomZ }
+		});
+	}
+
+	return soup;
+}
+
 // ── Scene Definitions ──
 
 var scenes = {
@@ -180,6 +242,12 @@ var scenes = {
 		b: createInclinedPatch(0, 0, 0, 8, 8, 4, 4, 0.2, 0.15),
 		labelA: 'Flat Patch (z=0)', labelB: 'Inclined Patch',
 		scale: 30, colorA: '#ff8844', colorB: '#44ccff', closed: false, tilt: 0.55
+	},
+	pit: {
+		a: createFlatPatch(0, 0, 2, 10, 10, 4, 4),
+		b: createPitShell(0, 0, 3, -1, 3, 0.5, 16),
+		labelA: 'Flat Terrain (z=2)', labelB: 'Steep Pit Shell (80° walls)',
+		scale: 25, colorA: '#ff8844', colorB: '#44ffcc', closed: false, tilt: 0.5
 	},
 	wavy: {
 		a: createWavyPatch(0, 0, 0, 8, 8, 6, 1.5),
@@ -311,6 +379,7 @@ window.run = function(sceneId, op) {
 window.run('cubes', 'input');
 window.run('offset', 'input');
 window.run('flat', 'input');
+window.run('pit', 'input');
 window.run('wavy', 'input');
 </script>
 </body>

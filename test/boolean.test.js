@@ -4,33 +4,52 @@ import {
 	countOpenEdges,
 	weldVertices,
 	weldedToSoup,
-	classifyPointByRayCast,
+	classifyPointMultiAxis,
 	buildSpatialGrid,
+	buildSpatialGridOnAxes,
 	estimateAvgEdge
 } from "../src/index.js";
 import { createCube, createFlatPatch, createWavyPatch } from "./fixtures/meshes.js";
 
-describe("classifyPointByRayCast", function () {
+/**
+ * Helper: build the 3-grid object expected by classifyPointMultiAxis.
+ */
+function buildGrids(tris) {
+	var avgEdge = estimateAvgEdge(tris);
+	var cellSize = Math.max(avgEdge * 2, 0.1);
+	return {
+		xy: { grid: buildSpatialGrid(tris, cellSize), cellSize: cellSize },
+		yz: { grid: buildSpatialGridOnAxes(tris, cellSize, function (v) { return v.y; }, function (v) { return v.z; }), cellSize: cellSize },
+		xz: { grid: buildSpatialGridOnAxes(tris, cellSize, function (v) { return v.x; }, function (v) { return v.z; }), cellSize: cellSize }
+	};
+}
+
+describe("classifyPointMultiAxis", function () {
 	it("classifies point inside cube as inside", function () {
 		var cube = createCube(0, 0, 0, 2);
-		var avgEdge = estimateAvgEdge(cube);
-		var cellSize = Math.max(avgEdge * 2, 0.1);
-		var grid = buildSpatialGrid(cube, cellSize);
+		var grids = buildGrids(cube);
 
 		// Use off-axis point to avoid hitting the diagonal edge between 2 top-face triangles
-		// (axis-aligned point would hit both triangles = 2 hits = even = "outside")
-		var inside = classifyPointByRayCast({ x: 0.3, y: 0.2, z: -0.5 }, cube, grid, cellSize);
+		var inside = classifyPointMultiAxis({ x: 0.3, y: 0.2, z: -0.5 }, cube, grids);
 		expect(inside).toBe(1);
 	});
 
 	it("classifies point outside cube as outside", function () {
 		var cube = createCube(0, 0, 0, 2);
-		var avgEdge = estimateAvgEdge(cube);
-		var cellSize = Math.max(avgEdge * 2, 0.1);
-		var grid = buildSpatialGrid(cube, cellSize);
+		var grids = buildGrids(cube);
 
-		var outside = classifyPointByRayCast({ x: 5, y: 5, z: 0 }, cube, grid, cellSize);
+		var outside = classifyPointMultiAxis({ x: 5, y: 5, z: 0 }, cube, grids);
 		expect(outside).toBe(-1);
+	});
+
+	it("classifies point inside cube using multiple axes", function () {
+		var cube = createCube(0, 0, 0, 4);
+		var grids = buildGrids(cube);
+
+		// Use off-diagonal point — axis-aligned cubes have diagonal edges
+		// at x=y, y=z, x=z in each face, so avoid those lines
+		var inside = classifyPointMultiAxis({ x: 0.7, y: 0.3, z: -0.2 }, cube, grids);
+		expect(inside).toBe(1);
 	});
 });
 

@@ -17,7 +17,9 @@ export { triTriIntersection, triTriIntersectionDetailed } from "./intersect/triT
 export { chainSegments, simplifyPolyline } from "./intersect/chainSegments.js";
 export {
 	buildSpatialGrid,
+	buildSpatialGridOnAxes,
 	queryGrid,
+	queryGridOnAxes,
 	computeBBox,
 	triBBox,
 	bboxOverlap,
@@ -48,7 +50,7 @@ export {
 } from "./normals/classifyDirection.js";
 
 // ── Boolean internals (advanced) ──
-export { classifyPointByRayCast, classifyByFloodFill } from "./boolean/classifyTriangles.js";
+export { classifyPointMultiAxis, classifyByFloodFill } from "./boolean/classifyTriangles.js";
 export { retriangulateWithSteinerPoints } from "./boolean/splitTriangles.js";
 export { buildCurtainAndCap, generateClosingTriangles } from "./boolean/closeBoundary.js";
 

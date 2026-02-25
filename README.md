@@ -143,8 +143,20 @@ Individual repair steps, usable standalone:
 | `triTriIntersectionDetailed(triA, triB)` | With signed distances |
 | `chainSegments(segments, threshold)` | Chain segments into polylines |
 | `simplifyPolyline(points, spacing)` | Distance-based simplification |
-| `buildSpatialGrid(tris, cellSize)` | Build XY spatial hash |
-| `queryGrid(grid, bb, cellSize)` | Query spatial hash |
+| `buildSpatialGrid(tris, cellSize)` | Build XY spatial hash (for Z-ray) |
+| `buildSpatialGridOnAxes(tris, cellSize, getA, getB)` | Build spatial hash on arbitrary axes |
+| `queryGrid(grid, bb, cellSize)` | Query XY spatial hash |
+| `queryGridOnAxes(grid, a, b, cellSize)` | Query arbitrary-axis spatial hash |
+
+### Boolean Internals (Advanced)
+
+| Function | Description |
+|----------|-------------|
+| `classifyPointMultiAxis(point, otherTris, grids)` | Classify inside/outside via 3-axis majority vote |
+| `classifyByFloodFill(tris, crossedMap, otherTris, otherGrids)` | BFS flood-fill classification with multi-axis seeds |
+| `retriangulateWithSteinerPoints(tri, segments)` | CDT split of crossed triangle |
+| `buildCurtainAndCap(tris, floorOffset)` | Extrude boundary to floor + cap |
+| `generateClosingTriangles(tris, maxDist)` | Iteratively close boundary gaps |
 
 ### Utility Functions
 
@@ -181,10 +193,11 @@ The library uses plain JavaScript objects — no classes, no Three.js types:
 ### Boolean Operations
 
 1. **Moller intersection** — find all triangle-triangle intersection segments between mesh A and mesh B
-2. **Spatial grid acceleration** — XY hash grid for O(n) triangle-pair candidate filtering
-3. **Flood-fill classification** — BFS from intersection boundary, classify connected regions as inside/outside via Z-ray casting
+2. **Multi-axis spatial grids** — 3 grids per mesh (XY, YZ, XZ) for ray casting along Z, X, and Y axes
+3. **Flood-fill classification** — BFS from intersection boundary, classify connected regions as inside/outside via **multi-axis majority vote** (casts rays along all 3 axes, 2+ inside votes = inside — handles any wall angle 0-90 deg without thresholds)
 4. **Steiner re-triangulation** — split straddling triangles at intersection edges using Constrained Delaunay Triangulation
-5. **Group combination** — combine inside/outside groups based on operation type
+5. **Vertex-adjacency classification** — sub-triangles from CDT splits inherit classification from adjacent non-crossed triangles via shared vertices (no ray-casting at the boundary, eliminates misclassification near intersection edges)
+6. **Group combination** — combine inside/outside groups based on operation type
 
 ### Mesh Repair
 

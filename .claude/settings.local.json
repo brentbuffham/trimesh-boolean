@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:doc.cgal.org)",
+      "WebFetch(domain:deepwiki.com)"
+    ]
+  }
+}

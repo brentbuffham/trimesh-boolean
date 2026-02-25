@@ -20,6 +20,75 @@
 import { dist3 } from "../util/math.js";
 
 /**
+ * Build a 2-D spatial hash grid on arbitrary axes.
+ *
+ * Unlike {@link buildSpatialGrid} which always hashes on XY,
+ * this function accepts accessor functions to extract the two
+ * bucketing coordinates.  For example, pass `v => v.y, v => v.z`
+ * to build a YZ grid suitable for X-direction ray casting.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
+ * @param {number} cellSize - Width/height of each grid cell (world units)
+ * @param {function(Object): number} getA - Extracts first axis value from vertex
+ * @param {function(Object): number} getB - Extracts second axis value from vertex
+ * @returns {Object.<string, number[]>} Grid mapping cell keys to triangle index arrays
+ */
+export function buildSpatialGridOnAxes(tris, cellSize, getA, getB) {
+	var grid = {};
+
+	for (var i = 0; i < tris.length; i++) {
+		var t = tris[i];
+		var verts = [t.v0, t.v1, t.v2];
+
+		var minA = Infinity, maxA = -Infinity;
+		var minB = Infinity, maxB = -Infinity;
+		for (var j = 0; j < 3; j++) {
+			var a = getA(verts[j]), b = getB(verts[j]);
+			if (a < minA) minA = a;
+			if (a > maxA) maxA = a;
+			if (b < minB) minB = b;
+			if (b > maxB) maxB = b;
+		}
+
+		var a0 = Math.floor(minA / cellSize);
+		var b0 = Math.floor(minB / cellSize);
+		var a1 = Math.floor(maxA / cellSize);
+		var b1 = Math.floor(maxB / cellSize);
+
+		for (var ga = a0; ga <= a1; ga++) {
+			for (var gb = b0; gb <= b1; gb++) {
+				var key = ga + "," + gb;
+				if (!grid[key]) grid[key] = [];
+				grid[key].push(i);
+			}
+		}
+	}
+
+	return grid;
+}
+
+/**
+ * Query a grid built by {@link buildSpatialGridOnAxes} for a single point.
+ *
+ * Returns the triangle indices stored in the cell containing the
+ * given (a, b) coordinates.  No deduplication is needed because
+ * point queries always hit exactly one cell.
+ *
+ * @param {Object.<string, number[]>} grid - Grid built by buildSpatialGridOnAxes
+ * @param {number} a - First axis coordinate of the query point
+ * @param {number} b - Second axis coordinate of the query point
+ * @param {number} cellSize - Same cell size used when building the grid
+ * @returns {number[]} Triangle indices (empty array if cell is empty)
+ */
+export function queryGridOnAxes(grid, a, b, cellSize) {
+	var ga = Math.floor(a / cellSize);
+	var gb = Math.floor(b / cellSize);
+	var key = ga + "," + gb;
+	var cell = grid[key];
+	return cell ? cell : [];
+}
+
+/**
  * Build a 2-D spatial hash grid from an array of triangles.
  *
  * Each triangle is inserted into every XY cell that its axis-aligned
