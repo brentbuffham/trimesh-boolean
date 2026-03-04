@@ -2,262 +2,1180 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>trimesh-boolean — Live Demo</title>
+<title>trimesh-boolean — Three.js Demo</title>
 <style>
 	* { margin: 0; padding: 0; box-sizing: border-box; }
-	body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; }
-	header { padding: 16px 20px 8px; text-align: center; }
-	header h1 { font-size: 1.5rem; color: #00d4ff; }
-	header p { color: #888; margin-top: 2px; font-size: 0.9rem; }
-	.section { border: 1px solid #333; border-radius: 6px; margin: 6px; padding: 8px; background: #0f0f23; }
-	.section h2 { font-size: 0.9rem; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
-	.section h2 .tag { font-size: 0.7rem; padding: 2px 8px; border-radius: 3px; font-weight: normal; }
-	.tag-closed { background: #00d4ff33; color: #00d4ff; border: 1px solid #00d4ff55; }
-	.tag-open { background: #ff884433; color: #ff8844; border: 1px solid #ff884455; }
-	.controls { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
-	button { padding: 5px 14px; border: 1px solid #555; background: transparent; color: #ccc;
-		border-radius: 3px; cursor: pointer; font-size: 0.8rem; }
-	button:hover { background: #ffffff11; }
-	button.active { background: #00d4ff; color: #1a1a2e; border-color: #00d4ff; }
-	button.active-orange { background: #ff8844; color: #1a1a2e; border-color: #ff8844; }
-	.info { color: #aaa; font-size: 0.78rem; margin-top: 4px; min-height: 1.2em; }
-	canvas { display: block; width: 100%; background: #12122a; border-radius: 4px; }
-	.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-	@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
-	footer { text-align: center; padding: 12px; color: #555; font-size: 0.75rem; }
-	footer a { color: #00d4ff; text-decoration: none; }
-	.install { text-align: center; padding: 8px; }
-	.install code { background: #ffffff11; padding: 6px 16px; border-radius: 4px; font-size: 0.9rem; color: #00d4ff; }
+	body { font-family: system-ui, sans-serif; background: #1a1a1a; color: #d0d0d0; overflow: hidden; }
+
+	/* ── Top toolbar ── */
+	#toolbar {
+		display: flex; align-items: center; gap: 12px; padding: 8px 16px;
+		background: #111; border-bottom: 1px solid #333; flex-wrap: wrap;
+	}
+	#toolbar h1 { font-size: 1rem; color: #cc2222; white-space: nowrap; }
+	#toolbar label { font-size: 0.8rem; color: #999; }
+	#toolbar select, #toolbar button {
+		padding: 4px 10px; border: 1px solid #444; background: #222; color: #bbb;
+		border-radius: 3px; font-size: 0.8rem; cursor: pointer;
+	}
+	#toolbar select:focus, #toolbar button:focus { outline: 1px solid #cc2222; }
+	#toolbar button:hover { background: #333; }
+	#toolbar button.active { background: #cc2222; color: #fff; border-color: #cc2222; }
+	.nav-link {
+		padding: 4px 12px; background: #cc2222; color: #fff; font-weight: 600;
+		font-size: 0.8rem; border-radius: 3px; text-decoration: none; transition: background 0.2s;
+	}
+	.nav-link:hover { background: #ee3333; }
+	.sep { width: 1px; height: 24px; background: #333; }
+
+	/* ── Layout ── */
+	#app { display: flex; flex-direction: column; height: 100vh; }
+	#main-row { display: flex; flex: 1; overflow: hidden; }
+
+	/* ── 3D viewport ── */
+	#viewport { flex: 1; }
+
+	/* ── Right info panel ── */
+	#info-panel {
+		width: 280px; min-width: 220px;
+		background: #111; border-left: 1px solid #333;
+		padding: 10px 12px; font-size: 0.75rem; font-family: 'Courier New', monospace;
+		overflow-y: auto; display: flex; flex-direction: column; gap: 12px;
+	}
+	#info-panel h3 { color: #cc2222; font-size: 0.8rem; margin-bottom: 4px; }
+	#info-panel .stat { color: #999; line-height: 1.6; }
+	#info-panel .stat b { color: #d0d0d0; }
+	#info-panel .highlight { color: #cc2222; }
+	#info-panel hr { border: none; border-top: 1px solid #333; margin: 4px 0; }
+	.split-legend { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+	.split-swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+	.highlight { color: #cc2222; font-weight: bold; }
+	.comp-list { margin: 4px 0; padding: 0; list-style: none; font-size: 11px; }
+	.comp-item { display: flex; align-items: center; gap: 4px; padding: 2px 0; cursor: pointer; user-select: none; }
+	.comp-item:hover { background: rgba(255,255,255,0.07); }
+	.comp-eye { width: 18px; text-align: center; font-size: 13px; opacity: 0.8; }
+	.comp-eye.off { opacity: 0.25; }
+	.comp-swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.2); }
+	.comp-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
 <body>
-<header>
-	<h1>trimesh-boolean</h1>
-	<p>Triangle mesh boolean operations — the only JS library that supports open surfaces</p>
-</header>
-<div class="install">
-	<code>npm install trimesh-boolean</code>
-	<span style="color:#555; margin: 0 8px;">or</span>
-	<code>&lt;script src="https://unpkg.com/trimesh-boolean/build/trimesh-boolean.min.js"&gt;&lt;/script&gt;</code>
-</div>
+<div id="app">
+	<div id="toolbar">
+		<h1>trimesh-boolean</h1>
+		<a href="https://github.com/brentbuffham/trimesh-boolean" class="nav-link">&larr; GitHub</a>
+		<div class="sep"></div>
 
-<div class="grid" style="margin: 0 8px;">
-	<!-- Closed: Cube vs Cube -->
-	<div class="section" id="sec-cubes">
-		<h2>Cube vs Cube <span class="tag tag-closed">Closed Solid</span></h2>
-		<div class="controls">
-			<button onclick="run('cubes','input')">Inputs</button>
-			<button onclick="run('cubes','subtract')">Subtract</button>
-			<button onclick="run('cubes','union')">Union</button>
-			<button onclick="run('cubes','intersect')">Intersect</button>
-		</div>
-		<canvas id="c-cubes" width="600" height="220"></canvas>
-		<div class="info" id="info-cubes">Click an operation</div>
+		<label>Mesh A:</label>
+		<select id="meshA">
+			<optgroup label="Kirra Surfaces">
+				<option value="kirra-terrain" selected>Kirra Terrain (11200 tris)</option>
+				<option value="kirra-cup">Kirra Cup (16 tris)</option>
+				<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
+				<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
+			</optgroup>
+			<optgroup label="Procedural">
+				<option value="cube">Cube</option>
+				<option value="cube-large">Large Cube</option>
+				<option value="flat-terrain">Flat Terrain</option>
+				<option value="wavy-terrain">Wavy Terrain</option>
+				<option value="inclined-terrain">Inclined Terrain</option>
+			</optgroup>
+		</select>
+
+		<label>Mesh B:</label>
+		<select id="meshB">
+			<optgroup label="Kirra Surfaces">
+				<option value="kirra-convoluted" selected>Kirra Convoluted (32 tris)</option>
+				<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
+				<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
+				<option value="kirra-cup">Kirra Cup (16 tris)</option>
+			</optgroup>
+			<optgroup label="Procedural">
+				<option value="cube-offset">Cube (offset)</option>
+				<option value="cube">Cube</option>
+				<option value="pit-shell">Steep Pit Shell</option>
+				<option value="flat-terrain">Flat Terrain</option>
+				<option value="flat-cut">Flat Cut Plane</option>
+			</optgroup>
+		</select>
+
+		<div class="sep"></div>
+
+		<button id="btn-input" onclick="runOp('input')">Inputs</button>
+		<button id="btn-splits" onclick="runOp('splits')">Splits</button>
+		<button id="btn-subtract" onclick="runOp('subtract')">A &minus; B</button>
+		<button id="btn-subtract-inv" onclick="runOp('subtract-inv')">B &minus; A</button>
+		<button id="btn-union" onclick="runOp('union')">A &cup; B</button>
+		<button id="btn-intersect" onclick="runOp('intersect')">A &cap; B</button>
+		<button id="btn-custom" onclick="runOp('custom')">Custom</button>
+
+		<div class="sep"></div>
+		<label><input type="checkbox" id="chk-wireframe"> Wireframe</label>
+		<label><input type="checkbox" id="chk-edges" checked> Edges</label>
+		<label><input type="checkbox" id="chk-open-edges"> Open Edges</label>
+		<label><input type="checkbox" id="chk-nonmanifold"> Non-Manifold</label>
+		<label><input type="checkbox" id="chk-fan-tris"> Fan Tris</label>
+		<div class="sep"></div>
+		<label><input type="checkbox" id="chk-prerepair" checked> Fix T-Junctions</label>
+		<label><input type="checkbox" id="chk-fill-gaps"> Fill Gaps (Fan)</label>
+		<label><input type="checkbox" id="chk-force-close"> Force Close (Idx)</label>
+		<label><input type="checkbox" id="chk-merge-small"> Merge Small</label>
 	</div>
 
-	<!-- Closed: Offset Cubes -->
-	<div class="section" id="sec-offset">
-		<h2>Offset Cubes <span class="tag tag-closed">Closed Solid</span></h2>
-		<div class="controls">
-			<button onclick="run('offset','input')">Inputs</button>
-			<button onclick="run('offset','subtract')">Subtract</button>
-			<button onclick="run('offset','union')">Union</button>
-			<button onclick="run('offset','intersect')">Intersect</button>
+	<div id="main-row">
+		<div id="viewport"></div>
+		<div id="info-panel">
+			<h3>Inputs</h3>
+			<div class="stat" id="stat-inputs">Select meshes and click an operation</div>
+			<hr>
+			<h3>Result</h3>
+			<div class="stat" id="stat-result">&mdash;</div>
 		</div>
-		<canvas id="c-offset" width="600" height="220"></canvas>
-		<div class="info" id="info-offset">Click an operation</div>
-	</div>
-
-	<!-- Open: Flat Patches -->
-	<div class="section" id="sec-flat">
-		<h2>Flat vs Inclined Terrain <span class="tag tag-open">Open Surface</span></h2>
-		<div class="controls">
-			<button onclick="run('flat','input')">Inputs</button>
-			<button onclick="run('flat','subtract')">Subtract</button>
-			<button onclick="run('flat','union')">Union</button>
-			<button onclick="run('flat','intersect')">Intersect</button>
-		</div>
-		<canvas id="c-flat" width="600" height="220"></canvas>
-		<div class="info" id="info-flat">Click an operation</div>
-	</div>
-
-	<!-- Open: Steep Pit Shell -->
-	<div class="section" id="sec-pit">
-		<h2>Steep Pit Shell vs Terrain <span class="tag tag-open">Open Surface — Steep Walls</span></h2>
-		<div class="controls">
-			<button onclick="run('pit','input')">Inputs</button>
-			<button onclick="run('pit','subtract')">Subtract</button>
-			<button onclick="run('pit','union')">Union</button>
-			<button onclick="run('pit','intersect')">Intersect</button>
-		</div>
-		<canvas id="c-pit" width="600" height="220"></canvas>
-		<div class="info" id="info-pit">Click an operation — tests multi-axis classification on steep walls</div>
-	</div>
-
-	<!-- Open: Wavy Terrain -->
-	<div class="section" id="sec-wavy">
-		<h2>Wavy Terrain vs Flat Cut <span class="tag tag-open">Open Surface</span></h2>
-		<div class="controls">
-			<button onclick="run('wavy','input')">Inputs</button>
-			<button onclick="run('wavy','subtract')">Subtract</button>
-			<button onclick="run('wavy','union')">Union</button>
-			<button onclick="run('wavy','intersect')">Intersect</button>
-		</div>
-		<canvas id="c-wavy" width="600" height="220"></canvas>
-		<div class="info" id="info-wavy">Click an operation</div>
 	</div>
 </div>
 
-<footer>
-	<a href="https://github.com/brentbuffham/trimesh-boolean">GitHub</a> &middot;
-	MIT License
-</footer>
+<script type="importmap">
+{
+	"imports": {
+		"three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+		"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+	}
+}
+</script>
 
-<script>
-// ── Inline library (self-contained for GitHub Pages — no bundler needed) ──
-// Mesh generators
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import {
+	boolean, splitMeshPair, mergeSplitGroups, selectSplits,
+	splitToComponents, mergeSmallComponents, mergeComponents,
+	countOpenEdges, weldVertices, weldedToSoup,
+	intersectMeshPair, chainSegments, computeSignedVolume, compute3DSurfaceArea,
+	computeProjectedArea, estimateAvgEdge,
+	resolveTJunctions, weldBoundaryVertices,
+	fillOpenEdgeLoops, forceCloseIndexedMesh
+} from './trimesh-boolean.esm.js';
+
+// ── Load Kirra surfaces from pre-extracted JSON ──
+var kirraSurfaces = {};
+try {
+	var resp = await fetch('./kirra-surfaces.json');
+	var kirraData = await resp.json();
+	for (var key in kirraData) {
+		if (key === '_meta') continue;
+		kirraSurfaces[key] = kirraData[key];
+	}
+	console.log("Loaded Kirra surfaces:", Object.keys(kirraSurfaces).join(", "));
+} catch (e) {
+	console.warn("Could not load kirra-surfaces.json:", e.message);
+}
+
+// ── Three.js setup ──
+
+var container = document.getElementById('viewport');
+var scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a1a);
+
+var camera = new THREE.PerspectiveCamera(50, 1, 0.1, 10000);
+camera.up.set(0, 0, 1);
+camera.position.set(5, -5, 5);
+
+var renderer = new THREE.WebGLRenderer({ antialias: true });
+container.appendChild(renderer.domElement);
+
+var controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+// Lighting
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+var dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(5, -7, 10);
+scene.add(dirLight);
+
+// Grid helper — XY plane (Z-up)
+var gridHelper = new THREE.GridHelper(300, 30, 0x333333, 0x222222);
+gridHelper.rotation.x = Math.PI / 2;
+scene.add(gridHelper);
+
+var axesHelper = new THREE.AxesHelper(20);
+scene.add(axesHelper);
+
+function resize() {
+	var w = container.clientWidth;
+	var h = container.clientHeight;
+	camera.aspect = w / h;
+	camera.updateProjectionMatrix();
+	renderer.setSize(w, h);
+	// Update fat line resolution on resize
+	if (typeof resultGroup !== 'undefined') {
+		resultGroup.traverse(function(child) {
+			if (child.material && child.material.resolution) {
+				child.material.resolution.set(w, h);
+			}
+		});
+	}
+}
+window.addEventListener('resize', resize);
+resize();
+
+function animate() {
+	requestAnimationFrame(animate);
+	controls.update();
+	renderer.render(scene, camera);
+}
+animate();
+
+// ── Mesh generators (triangle soup) ──
 
 function createCube(cx, cy, cz, size) {
 	var h = size / 2;
 	var v = [
-		{x:cx-h,y:cy-h,z:cz-h},{x:cx+h,y:cy-h,z:cz-h},
-		{x:cx+h,y:cy+h,z:cz-h},{x:cx-h,y:cy+h,z:cz-h},
-		{x:cx-h,y:cy-h,z:cz+h},{x:cx+h,y:cy-h,z:cz+h},
-		{x:cx+h,y:cy+h,z:cz+h},{x:cx-h,y:cy+h,z:cz+h}
+		{x:cx-h, y:cy-h, z:cz-h}, {x:cx+h, y:cy-h, z:cz-h},
+		{x:cx+h, y:cy+h, z:cz-h}, {x:cx-h, y:cy+h, z:cz-h},
+		{x:cx-h, y:cy-h, z:cz+h}, {x:cx+h, y:cy-h, z:cz+h},
+		{x:cx+h, y:cy+h, z:cz+h}, {x:cx-h, y:cy+h, z:cz+h}
 	];
-	var faces=[[0,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],[2,3,7],[2,7,6],[0,4,7],[0,7,3],[1,2,6],[1,6,5]];
-	var soup=[];
-	for(var i=0;i<faces.length;i++){var f=faces[i];
-		soup.push({v0:{x:v[f[0]].x,y:v[f[0]].y,z:v[f[0]].z},v1:{x:v[f[1]].x,y:v[f[1]].y,z:v[f[1]].z},v2:{x:v[f[2]].x,y:v[f[2]].y,z:v[f[2]].z}});}
+	var faces = [[0,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],[2,3,7],[2,7,6],[0,4,7],[0,7,3],[1,2,6],[1,6,5]];
+	var soup = [];
+	for (var i = 0; i < faces.length; i++) {
+		var f = faces[i];
+		soup.push({ v0:{x:v[f[0]].x,y:v[f[0]].y,z:v[f[0]].z}, v1:{x:v[f[1]].x,y:v[f[1]].y,z:v[f[1]].z}, v2:{x:v[f[2]].x,y:v[f[2]].y,z:v[f[2]].z} });
+	}
 	return soup;
 }
 
-function createFlatPatch(cx,cy,z,w,d,divX,divY){
-	var soup=[],dx=w/divX,dy=d/divY,sx=cx-w/2,sy=cy-d/2;
-	for(var ix=0;ix<divX;ix++){for(var iy=0;iy<divY;iy++){
-		var x0=sx+ix*dx,y0=sy+iy*dy,x1=x0+dx,y1=y0+dy;
-		soup.push({v0:{x:x0,y:y0,z:z},v1:{x:x1,y:y0,z:z},v2:{x:x1,y:y1,z:z}});
-		soup.push({v0:{x:x0,y:y0,z:z},v1:{x:x1,y:y1,z:z},v2:{x:x0,y:y1,z:z}});}}
+function createFlatPatch(cx, cy, z, w, d, divX, divY) {
+	var soup = [], dx = w/divX, dy = d/divY, sx = cx - w/2, sy = cy - d/2;
+	for (var ix = 0; ix < divX; ix++) {
+		for (var iy = 0; iy < divY; iy++) {
+			var x0 = sx+ix*dx, y0 = sy+iy*dy, x1 = x0+dx, y1 = y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:z}, v1:{x:x1,y:y0,z:z}, v2:{x:x1,y:y1,z:z} });
+			soup.push({ v0:{x:x0,y:y0,z:z}, v1:{x:x1,y:y1,z:z}, v2:{x:x0,y:y1,z:z} });
+		}
+	}
 	return soup;
 }
 
-function createInclinedPatch(cx,cy,z,w,d,divX,divY,slopeX,slopeY){
-	var soup=[],dx=w/divX,dy=d/divY,sx=cx-w/2,sy=cy-d/2;
-	if(!slopeX)slopeX=0;if(!slopeY)slopeY=0;
-	function zAt(x,y){return z+(x-cx)*slopeX+(y-cy)*slopeY;}
-	for(var ix=0;ix<divX;ix++){for(var iy=0;iy<divY;iy++){
-		var x0=sx+ix*dx,y0=sy+iy*dy,x1=x0+dx,y1=y0+dy;
-		soup.push({v0:{x:x0,y:y0,z:zAt(x0,y0)},v1:{x:x1,y:y0,z:zAt(x1,y0)},v2:{x:x1,y:y1,z:zAt(x1,y1)}});
-		soup.push({v0:{x:x0,y:y0,z:zAt(x0,y0)},v1:{x:x1,y:y1,z:zAt(x1,y1)},v2:{x:x0,y:y1,z:zAt(x0,y1)}});}}
+function createInclinedPatch(cx, cy, z, w, d, divX, divY, slopeX, slopeY) {
+	var soup = [], dx = w/divX, dy = d/divY, sx = cx - w/2, sy = cy - d/2;
+	function zAt(x, y) { return z + (x - cx) * slopeX + (y - cy) * slopeY; }
+	for (var ix = 0; ix < divX; ix++) {
+		for (var iy = 0; iy < divY; iy++) {
+			var x0 = sx+ix*dx, y0 = sy+iy*dy, x1 = x0+dx, y1 = y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y0,z:zAt(x1,y0)}, v2:{x:x1,y:y1,z:zAt(x1,y1)} });
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y1,z:zAt(x1,y1)}, v2:{x:x0,y:y1,z:zAt(x0,y1)} });
+		}
+	}
 	return soup;
 }
 
-function createPitShell(cx,cy,topZ,bottomZ,topR,bottomR,segs){
-	if(!segs)segs=12;var soup=[],step=2*Math.PI/segs;
-	for(var i=0;i<segs;i++){var a0=i*step,a1=(i+1)*step;
-		var tx0=cx+topR*Math.cos(a0),ty0=cy+topR*Math.sin(a0),tx1=cx+topR*Math.cos(a1),ty1=cy+topR*Math.sin(a1);
-		var bx0=cx+bottomR*Math.cos(a0),by0=cy+bottomR*Math.sin(a0),bx1=cx+bottomR*Math.cos(a1),by1=cy+bottomR*Math.sin(a1);
-		soup.push({v0:{x:tx0,y:ty0,z:topZ},v1:{x:tx1,y:ty1,z:topZ},v2:{x:bx1,y:by1,z:bottomZ}});
-		soup.push({v0:{x:tx0,y:ty0,z:topZ},v1:{x:bx1,y:by1,z:bottomZ},v2:{x:bx0,y:by0,z:bottomZ}});
-		soup.push({v0:{x:cx,y:cy,z:bottomZ},v1:{x:bx0,y:by0,z:bottomZ},v2:{x:bx1,y:by1,z:bottomZ}});}
-	return soup;}
-
-function createWavyPatch(cx,cy,baseZ,w,d,div,amp){
-	var soup=[],dx=w/div,dy=d/div,sx=cx-w/2,sy=cy-d/2;
-	function zAt(x,y){return baseZ+amp*Math.sin(x*0.8)*Math.cos(y*0.8);}
-	for(var ix=0;ix<div;ix++){for(var iy=0;iy<div;iy++){
-		var x0=sx+ix*dx,y0=sy+iy*dy,x1=x0+dx,y1=y0+dy;
-		soup.push({v0:{x:x0,y:y0,z:zAt(x0,y0)},v1:{x:x1,y:y0,z:zAt(x1,y0)},v2:{x:x1,y:y1,z:zAt(x1,y1)}});
-		soup.push({v0:{x:x0,y:y0,z:zAt(x0,y0)},v1:{x:x1,y:y1,z:zAt(x1,y1)},v2:{x:x0,y:y1,z:zAt(x0,y1)}});}}
+function createWavyPatch(cx, cy, baseZ, w, d, div, amp) {
+	var soup = [], dx = w/div, dy = d/div, sx = cx-w/2, sy = cy-d/2;
+	function zAt(x,y) { return baseZ + amp * Math.sin(x*0.8) * Math.cos(y*0.8); }
+	for (var ix = 0; ix < div; ix++) {
+		for (var iy = 0; iy < div; iy++) {
+			var x0=sx+ix*dx, y0=sy+iy*dy, x1=x0+dx, y1=y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y0,z:zAt(x1,y0)}, v2:{x:x1,y:y1,z:zAt(x1,y1)} });
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y1,z:zAt(x1,y1)}, v2:{x:x0,y:y1,z:zAt(x0,y1)} });
+		}
+	}
 	return soup;
 }
-</script>
-<script src="trimesh-boolean.min.js"></script>
-<script>
-// ── Scene Definitions ──
 
-var scenes = {
-	cubes: { a:createCube(0,0,0,2), b:createCube(1,0,0,2),
-		labelA:'Cube A', labelB:'Cube B', scale:55, colorA:'#ff6644', colorB:'#44aaff', closed:true, tilt:0.3 },
-	offset: { a:createCube(0,0,0,2.5), b:createCube(0.8,0.8,0.5,1.8),
-		labelA:'Large Cube', labelB:'Small Cube', scale:45, colorA:'#cc44ff', colorB:'#44ffaa', closed:true, tilt:0.3 },
-	flat: { a:createFlatPatch(0,0,0,8,8,4,4), b:createInclinedPatch(0,0,0,8,8,4,4,0.2,0.15),
-		labelA:'Flat Patch (z=0)', labelB:'Inclined Patch', scale:30, colorA:'#ff8844', colorB:'#44ccff', closed:false, tilt:0.55 },
-	pit: { a:createFlatPatch(0,0,2,10,10,4,4), b:createPitShell(0,0,3,-1,3,0.5,16),
-		labelA:'Flat Terrain (z=2)', labelB:'Steep Pit Shell (80° walls)', scale:25, colorA:'#ff8844', colorB:'#44ffcc', closed:false, tilt:0.5 },
-	wavy: { a:createWavyPatch(0,0,0,8,8,6,1.5), b:createFlatPatch(0,0,0.5,7,7,4,4),
-		labelA:'Wavy Terrain', labelB:'Flat Cut Plane', scale:30, colorA:'#ff6688', colorB:'#88ddff', closed:false, tilt:0.55 }
+function createPitShell(cx, cy, topZ, bottomZ, topRadius, bottomRadius, segments) {
+	if (!segments) segments = 16;
+	var soup = [];
+	var angleStep = (2 * Math.PI) / segments;
+	for (var i = 0; i < segments; i++) {
+		var a0 = i * angleStep, a1 = (i + 1) * angleStep;
+		var tx0 = cx + topRadius * Math.cos(a0), ty0 = cy + topRadius * Math.sin(a0);
+		var tx1 = cx + topRadius * Math.cos(a1), ty1 = cy + topRadius * Math.sin(a1);
+		var bx0 = cx + bottomRadius * Math.cos(a0), by0 = cy + bottomRadius * Math.sin(a0);
+		var bx1 = cx + bottomRadius * Math.cos(a1), by1 = cy + bottomRadius * Math.sin(a1);
+		soup.push({ v0:{x:tx0,y:ty0,z:topZ}, v1:{x:tx1,y:ty1,z:topZ}, v2:{x:bx1,y:by1,z:bottomZ} });
+		soup.push({ v0:{x:tx0,y:ty0,z:topZ}, v1:{x:bx1,y:by1,z:bottomZ}, v2:{x:bx0,y:by0,z:bottomZ} });
+		soup.push({ v0:{x:cx,y:cy,z:bottomZ}, v1:{x:bx0,y:by0,z:bottomZ}, v2:{x:bx1,y:by1,z:bottomZ} });
+	}
+	return soup;
+}
+
+// ── Mesh catalogue ──
+
+var meshCatalogue = {
+	'cube':             function() { return { soup: createCube(0, 0, 0, 2), label: 'Cube (2x2x2)', closed: true }; },
+	'cube-large':       function() { return { soup: createCube(0, 0, 0, 3), label: 'Large Cube (3x3x3)', closed: true }; },
+	'cube-offset':      function() { return { soup: createCube(1, 0.5, 0, 2), label: 'Cube (offset +1,+0.5)', closed: true }; },
+	'flat-terrain':     function() { return { soup: createFlatPatch(0, 0, 0, 8, 8, 5, 5), label: 'Flat Terrain (z=0, 8x8)', closed: false }; },
+	'flat-cut':         function() { return { soup: createFlatPatch(0, 0, 0.5, 7, 7, 4, 4), label: 'Flat Cut (z=0.5, 7x7)', closed: false }; },
+	'inclined-terrain': function() { return { soup: createInclinedPatch(0, 0, 0, 8, 8, 5, 5, 0.2, 0.15), label: 'Inclined Terrain (8x8)', closed: false }; },
+	'wavy-terrain':     function() { return { soup: createWavyPatch(0, 0, 0, 8, 8, 8, 1.5), label: 'Wavy Terrain (8x8, amp 1.5)', closed: false }; },
+	'pit-shell':        function() { return { soup: createPitShell(0, 0, 2, -1, 3, 0.5, 16), label: 'Steep Pit Shell (80\u00b0 walls)', closed: false }; }
 };
 
-// ── Rendering ──
+// Add Kirra surfaces to the catalogue (loaded from kirra-surfaces.json)
+if (kirraSurfaces.terrain) {
+	meshCatalogue['kirra-terrain'] = function() { return { soup: kirraSurfaces.terrain.soup, label: kirraSurfaces.terrain.label, closed: kirraSurfaces.terrain.closed }; };
+}
+if (kirraSurfaces.cylinder) {
+	meshCatalogue['kirra-cylinder'] = function() { return { soup: kirraSurfaces.cylinder.soup, label: kirraSurfaces.cylinder.label, closed: kirraSurfaces.cylinder.closed }; };
+}
+if (kirraSurfaces.cup) {
+	meshCatalogue['kirra-cup'] = function() { return { soup: kirraSurfaces.cup.soup, label: kirraSurfaces.cup.label, closed: kirraSurfaces.cup.closed }; };
+}
+if (kirraSurfaces.convoluted) {
+	meshCatalogue['kirra-convoluted'] = function() { return { soup: kirraSurfaces.convoluted.soup, label: "convoluted (32 tris, from Kirra)", closed: false }; };
+}
 
-function project(v,scale,cx,cy,tilt){
-	if(!tilt)tilt=0.3;
-	return {x:(v.x-v.y*0.4)*scale+cx, y:(-v.z*(1-tilt)+v.y*tilt)*scale+cy};}
+// ── Soup → Three.js mesh ──
 
-function drawSoup(ctx,soup,color,alpha,scale,cx,cy,tilt){
-	ctx.strokeStyle=color; ctx.globalAlpha=alpha; ctx.lineWidth=0.8;
-	for(var i=0;i<soup.length;i++){var tri=soup[i];
-		var a=project(tri.v0,scale,cx,cy,tilt),b=project(tri.v1,scale,cx,cy,tilt),c=project(tri.v2,scale,cx,cy,tilt);
-		ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.lineTo(c.x,c.y);ctx.closePath();ctx.stroke();}
-	ctx.globalAlpha=1;}
+function soupToThreeMesh(soup, color, opacity) {
+	var positions = new Float32Array(soup.length * 9);
+	for (var i = 0; i < soup.length; i++) {
+		var tri = soup[i], off = i * 9;
+		positions[off]   = tri.v0.x; positions[off+1] = tri.v0.y; positions[off+2] = tri.v0.z;
+		positions[off+3] = tri.v1.x; positions[off+4] = tri.v1.y; positions[off+5] = tri.v1.z;
+		positions[off+6] = tri.v2.x; positions[off+7] = tri.v2.y; positions[off+8] = tri.v2.z;
+	}
+	var geo = new THREE.BufferGeometry();
+	geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+	geo.computeVertexNormals();
 
-function drawFilled(ctx,soup,fill,stroke,scale,cx,cy,tilt){
-	for(var i=0;i<soup.length;i++){var tri=soup[i];
-		var a=project(tri.v0,scale,cx,cy,tilt),b=project(tri.v1,scale,cx,cy,tilt),c=project(tri.v2,scale,cx,cy,tilt);
-		ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.lineTo(c.x,c.y);ctx.closePath();
-		ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle=stroke;ctx.lineWidth=0.5;ctx.stroke();}}
+	var mat = new THREE.MeshPhongMaterial({
+		color: color,
+		side: THREE.DoubleSide,
+		transparent: opacity < 1,
+		opacity: opacity,
+		depthWrite: opacity >= 1
+	});
+	return new THREE.Mesh(geo, mat);
+}
 
-var resultColors={subtract:{fill:'#ff884444',stroke:'#ff884488'},union:{fill:'#44ff8844',stroke:'#44ff8888'},intersect:{fill:'#ffcc4444',stroke:'#ffcc4488'}};
+function soupToEdges(soup, color) {
+	var positions = new Float32Array(soup.length * 18); // 3 edges * 2 verts * 3 components
+	for (var i = 0; i < soup.length; i++) {
+		var tri = soup[i], off = i * 18;
+		// edge 0-1
+		positions[off]    = tri.v0.x; positions[off+1]  = tri.v0.y; positions[off+2]  = tri.v0.z;
+		positions[off+3]  = tri.v1.x; positions[off+4]  = tri.v1.y; positions[off+5]  = tri.v1.z;
+		// edge 1-2
+		positions[off+6]  = tri.v1.x; positions[off+7]  = tri.v1.y; positions[off+8]  = tri.v1.z;
+		positions[off+9]  = tri.v2.x; positions[off+10] = tri.v2.y; positions[off+11] = tri.v2.z;
+		// edge 2-0
+		positions[off+12] = tri.v2.x; positions[off+13] = tri.v2.y; positions[off+14] = tri.v2.z;
+		positions[off+15] = tri.v0.x; positions[off+16] = tri.v0.y; positions[off+17] = tri.v0.z;
+	}
+	var geo = new THREE.BufferGeometry();
+	geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+	return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.4 }));
+}
 
-window.run = function(sceneId, op) {
-	var scene = scenes[sceneId];
-	var canvas = document.getElementById('c-'+sceneId);
-	var ctx = canvas.getContext('2d');
-	var info = document.getElementById('info-'+sceneId);
-	var cx = canvas.width/2, cy = canvas.height/2;
+// ── Open edge detection → fat Line2 segments ──
 
-	var sec = document.getElementById('sec-'+sceneId);
-	sec.querySelectorAll('button').forEach(function(b){b.classList.remove('active','active-orange');});
-	var btns = sec.querySelectorAll('button');
-	for(var i=0;i<btns.length;i++){
-		if(btns[i].textContent.toLowerCase()===op || (btns[i].textContent==='Inputs' && op==='input'))
-			btns[i].classList.add(scene.closed?'active':'active-orange');}
+function soupToOpenEdgeLines(soup, color, container) {
+	var PREC = 6;
+	function vk(v) { return v.x.toFixed(PREC) + "," + v.y.toFixed(PREC) + "," + v.z.toFixed(PREC); }
+	function ek(a, b) { return a < b ? a + "|" + b : b + "|" + a; }
 
-	ctx.clearRect(0,0,canvas.width,canvas.height);
-	var tilt=scene.tilt||0.3;
+	// Step 1) Count edge usage and store vertex pairs
+	var edgeCount = {};
+	var edgeVerts = {};
+	for (var i = 0; i < soup.length; i++) {
+		var tri = soup[i];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vk(vs[0]), vk(vs[1]), vk(vs[2])];
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var key = ek(ks[e], ks[ne]);
+			if (!edgeCount[key]) {
+				edgeCount[key] = 0;
+				edgeVerts[key] = [vs[e], vs[ne]];
+			}
+			edgeCount[key]++;
+		}
+	}
 
-	if(op==='input'){
-		drawSoup(ctx,scene.a,scene.colorA,0.7,scene.scale,cx,cy,tilt);
-		drawSoup(ctx,scene.b,scene.colorB,0.7,scene.scale,cx,cy,tilt);
-		info.textContent=scene.labelA+': '+scene.a.length+' tris | '+scene.labelB+': '+scene.b.length+' tris'+(scene.closed?'':' (open surfaces)');
-		return;}
+	// Step 2) Collect open edges (used by exactly 1 triangle)
+	var openPairs = [];
+	for (var k in edgeCount) {
+		if (edgeCount[k] === 1) {
+			openPairs.push(edgeVerts[k]);
+		}
+	}
+	if (openPairs.length === 0) return null;
 
-	var t0=performance.now(), result;
-	try { result = TrimeshBoolean.boolean(scene.a, scene.b, op); }
-	catch(e){ info.textContent=op+': error — '+e.message;
-		drawSoup(ctx,scene.a,scene.colorA,0.3,scene.scale,cx,cy,tilt);
-		drawSoup(ctx,scene.b,scene.colorB,0.3,scene.scale,cx,cy,tilt); return; }
-	var dt=(performance.now()-t0).toFixed(1);
+	// Step 3) Render each open edge as its own Line2 so they don't get
+	// connected into one continuous polyline across the mesh.
+	var group = new THREE.Group();
+	group.userData.isOpenEdge = true;
+	var mat = new LineMaterial({
+		color: color,
+		linewidth: 5,
+		worldUnits: false,
+		dashed: false,
+		resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+	});
+	for (var j = 0; j < openPairs.length; j++) {
+		var a = openPairs[j][0], b = openPairs[j][1];
+		var geo = new LineGeometry();
+		geo.setPositions([a.x, a.y, a.z, b.x, b.y, b.z]);
+		var line = new Line2(geo, mat);
+		line.computeLineDistances();
+		group.add(line);
+	}
+	return group;
+}
 
-	if(!result||!result.soup||result.soup.length===0){
-		info.textContent=op+': no result ('+dt+' ms)';
-		drawSoup(ctx,scene.a,'#333',0.3,scene.scale,cx,cy,tilt);
-		drawSoup(ctx,scene.b,'#333',0.3,scene.scale,cx,cy,tilt); return;}
+// ── Non-manifold triangle detection → highlighted mesh + edges ──
 
-	var rc=resultColors[op];
-	drawFilled(ctx,result.soup,rc.fill,rc.stroke,scene.scale,cx,cy,tilt);
+function findNonManifoldTriangles(soup) {
+	var PREC = 6;
+	function vk(v) { return v.x.toFixed(PREC) + "," + v.y.toFixed(PREC) + "," + v.z.toFixed(PREC); }
+	function ek(a, b) { return a < b ? a + "|" + b : b + "|" + a; }
 
-	var openEdges='?';
-	try{var w=TrimeshBoolean.weldVertices(result.soup,0.0001);
-		var cl=TrimeshBoolean.weldedToSoup(w.triangles);
-		openEdges=TrimeshBoolean.countOpenEdges(cl).openEdges;}catch(e){}
+	// Step 1) Build edge -> triangle indices map
+	var edgeMap = {};
+	for (var i = 0; i < soup.length; i++) {
+		var tri = soup[i];
+		var ks = [vk(tri.v0), vk(tri.v1), vk(tri.v2)];
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var key = ek(ks[e], ks[ne]);
+			if (!edgeMap[key]) edgeMap[key] = [];
+			edgeMap[key].push(i);
+		}
+	}
 
-	info.textContent=op+': '+result.soup.length+' tris'+(result.points?', '+result.points.length+' verts':'')+', open edges: '+openEdges+' — '+dt+' ms';
+	// Step 2) Collect unique triangle indices that touch a non-manifold edge
+	var nmSet = {};
+	var nmEdgeVerts = [];
+	for (var k in edgeMap) {
+		if (edgeMap[k].length > 2) {
+			var tris = edgeMap[k];
+			for (var t = 0; t < tris.length; t++) {
+				nmSet[tris[t]] = true;
+			}
+			// Also collect the edge endpoints for the edge highlight
+			var refTri = soup[tris[0]];
+			var rv = [refTri.v0, refTri.v1, refTri.v2];
+			var parts = k.split("|");
+			var ev0 = null, ev1 = null;
+			for (var r = 0; r < 3; r++) {
+				var rk = vk(rv[r]);
+				if (rk === parts[0]) ev0 = rv[r];
+				if (rk === parts[1]) ev1 = rv[r];
+			}
+			if (ev0 && ev1) nmEdgeVerts.push([ev0, ev1]);
+		}
+	}
+
+	var nmTris = [];
+	for (var idx in nmSet) nmTris.push(soup[Number(idx)]);
+	return { triangles: nmTris, edges: nmEdgeVerts };
+}
+
+function addNonManifoldOverlay(soup, container, resultGroup) {
+	var nm = findNonManifoldTriangles(soup);
+	if (nm.triangles.length === 0) return 0;
+
+	// Step 1) Render the non-manifold triangles as a bright overlay mesh
+	var nmMesh = soupToThreeMesh(nm.triangles, 0xC2185B, 0.6);
+	nmMesh.material.side = THREE.DoubleSide;
+	nmMesh.material.depthTest = false;
+	nmMesh.renderOrder = 999;
+	resultGroup.add(nmMesh);
+
+	// Step 2) Render the non-manifold edges as thick yellow lines
+	if (nm.edges.length > 0) {
+		var positions = [];
+		for (var j = 0; j < nm.edges.length; j++) {
+			var a = nm.edges[j][0], b = nm.edges[j][1];
+			positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+		}
+		var geo = new LineGeometry();
+		geo.setPositions(positions);
+		var mat = new LineMaterial({
+			color: 0xffffff,
+			linewidth: 6,
+			worldUnits: false,
+			dashed: false,
+			depthTest: false, transparent: true,
+			resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+		});
+		var line = new Line2(geo, mat);
+		line.computeLineDistances();
+		line.renderOrder = 1000;
+		resultGroup.add(line);
+	}
+
+	return nm.triangles.length;
+}
+
+// ── State ──
+
+var resultGroup = new THREE.Group();
+resultGroup.name = 'result';
+scene.add(resultGroup);
+
+var currentOp = 'input';
+
+function clearResult() {
+	while (resultGroup.children.length > 0) {
+		var child = resultGroup.children[0];
+		resultGroup.remove(child);
+		if (child.geometry) child.geometry.dispose();
+		if (child.material) child.material.dispose();
+	}
+}
+
+// ── Stats helpers ──
+
+function soupStats(soup, label, closed) {
+	var lines = [];
+	lines.push('<b>' + label + '</b>');
+	lines.push('Triangles: <b>' + soup.length + '</b>');
+	lines.push('Type: <b>' + (closed ? 'Closed solid' : 'Open surface') + '</b>');
+
+	var area = compute3DSurfaceArea(soup);
+	lines.push('Surface area: <b>' + area.toFixed(3) + '</b>');
+
+	if (closed) {
+		var vol = computeSignedVolume(soup);
+		lines.push('Signed volume: <b>' + vol.toFixed(3) + '</b>');
+	}
+
+	var avg = estimateAvgEdge(soup);
+	lines.push('Avg edge length: <b>' + avg.toFixed(4) + '</b>');
+
+	try {
+		var welded = weldVertices(soup, 0.0001);
+		var clean = weldedToSoup(welded.triangles);
+		var stats = countOpenEdges(clean);
+		lines.push('Open edges: <b>' + stats.openEdges + '</b> | Non-manifold: <b>' + stats.overShared + '</b>');
+	} catch(e) { /* skip */ }
+
+	return lines.join('<br>');
+}
+
+function resultStats(result, op, dt) {
+	if (!result || !result.soup || result.soup.length === 0) {
+		return 'Operation <b>' + op + '</b>: <span class="highlight">no result</span> (' + dt + ' ms)';
+	}
+
+	var lines = [];
+	var opLabel = op;
+	if (op === 'subtract-inv') opLabel = 'subtract (B\\A)';
+	lines.push('Operation: <b>' + opLabel + '</b> (' + dt + ' ms)');
+	lines.push('Result triangles: <b>' + result.soup.length + '</b>');
+	if (result.points) lines.push('Result vertices: <b>' + result.points.length + '</b>');
+
+	var area = compute3DSurfaceArea(result.soup);
+	lines.push('Surface area: <b>' + area.toFixed(3) + '</b>');
+
+	var vol = computeSignedVolume(result.soup);
+	lines.push('Signed volume: <b>' + vol.toFixed(3) + '</b>');
+
+	try {
+		var welded = weldVertices(result.soup, 0.0001);
+		var clean = weldedToSoup(welded.triangles);
+		var stats = countOpenEdges(clean);
+		lines.push('Open edges: <b>' + stats.openEdges + '</b> | Non-manifold: <b>' + stats.overShared + '</b>');
+	} catch(e) { /* skip */ }
+
+	// Math representation
+	lines.push('');
+	if (op === 'subtract') {
+		lines.push('<span class="highlight">R = A \\ B</span>  (keep A-outside-B + B-inside-A flipped)');
+	} else if (op === 'subtract-inv') {
+		lines.push('<span class="highlight">R = B \\ A</span>  (keep B-outside-A + A-inside-B flipped)');
+	} else if (op === 'union') {
+		lines.push('<span class="highlight">R = A \u222a B</span>  (keep A-outside-B + B-outside-A)');
+	} else if (op === 'intersect') {
+		lines.push('<span class="highlight">R = A \u2229 B</span>  (keep A-inside-B + B-inside-A)');
+	}
+
+	return lines.join('<br>');
+}
+
+// ── Run operation ──
+
+var showWireframe = false;
+var showEdges = true;
+var showOpenEdges = false;
+var showNonManifold = false;
+var showFanTris = false;
+var preRepair = true;
+var forceCloseWithFan = false;
+var forceCloseIndexed = false;
+var mergeSmall = false;
+
+var skipFit = false;
+window.runOp = function(op) {
+	currentOp = op;
+	clearResult();
+
+	var selA = document.getElementById('meshA').value;
+	var selB = document.getElementById('meshB').value;
+	var dataA = meshCatalogue[selA]();
+	var dataB = meshCatalogue[selB]();
+
+	// Step 1) Pre-repair: resolve T-junctions + weld nearby boundary verts
+	if (preRepair) {
+		var avgA = estimateAvgEdge(dataA.soup);
+		var avgB = estimateAvgEdge(dataB.soup);
+		dataA.soup = resolveTJunctions(dataA.soup, avgA * 0.01, 3);
+		dataA.soup = weldBoundaryVertices(dataA.soup, avgA * 0.01);
+		dataB.soup = resolveTJunctions(dataB.soup, avgB * 0.01, 3);
+		dataB.soup = weldBoundaryVertices(dataB.soup, avgB * 0.01);
+	}
+
+	// Update active button
+	document.querySelectorAll('#toolbar button').forEach(function(b) { b.classList.remove('active'); });
+	var btnId = 'btn-' + op;
+	var btn = document.getElementById(btnId);
+	if (btn) btn.classList.add('active');
+
+	var statInputs = document.getElementById('stat-inputs');
+	var statResult = document.getElementById('stat-result');
+
+	var repairNote = preRepair ? '<br><span class="highlight">T-junction repair: ON</span>' : '';
+	statInputs.innerHTML = soupStats(dataA.soup, 'A: ' + dataA.label, dataA.closed) +
+		'<br><br>' + soupStats(dataB.soup, 'B: ' + dataB.label, dataB.closed) + repairNote;
+
+	if (op === 'input') {
+		// Show both inputs
+		var meshA = soupToThreeMesh(dataA.soup, 0xcc2222, 0.7);
+		var meshB = soupToThreeMesh(dataB.soup, 0x888888, 0.7);
+		meshA.material.wireframe = showWireframe;
+		meshB.material.wireframe = showWireframe;
+		resultGroup.add(meshA);
+		resultGroup.add(meshB);
+
+		if (showEdges || showFanTris) {
+			var eA = soupToEdges(dataA.soup, showFanTris ? 0xffaa66 : 0xff6644);
+			var eB = soupToEdges(dataB.soup, showFanTris ? 0x66aaff : 0x4488ff);
+			if (showFanTris) { eA.material.opacity = 0.9; eB.material.opacity = 0.9; }
+			resultGroup.add(eA);
+			resultGroup.add(eB);
+		}
+
+		if (showOpenEdges) {
+			var openA = soupToOpenEdgeLines(dataA.soup, 0xff0000, container);
+			if (openA) resultGroup.add(openA);
+			var openB = soupToOpenEdgeLines(dataB.soup, 0xff0000, container);
+			if (openB) resultGroup.add(openB);
+		}
+
+		if (showNonManifold) {
+			addNonManifoldOverlay(dataA.soup, container, resultGroup);
+			addNonManifoldOverlay(dataB.soup, container, resultGroup);
+		}
+
+		// Intersection boundary — chain raw segments into continuous polylines
+		try {
+			var segs = intersectMeshPair(dataA.soup, dataB.soup);
+			if (segs && segs.length > 0) {
+				var avg = estimateAvgEdge(dataA.soup);
+				var chains = chainSegments(segs, avg * 0.01);
+				var fatMat = new LineMaterial({
+					color: 0xffffff, linewidth: 4,
+					worldUnits: false, dashed: false,
+					depthTest: false, transparent: true,
+					resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+				});
+
+				for (var ci = 0; ci < chains.length; ci++) {
+					var chain = chains[ci];
+					if (chain.length < 2) continue;
+					var pts = [];
+					for (var cp = 0; cp < chain.length; cp++) {
+						pts.push(chain[cp].x, chain[cp].y, chain[cp].z);
+					}
+					var fatGeo = new LineGeometry();
+					fatGeo.setPositions(pts);
+					var fatLine = new Line2(fatGeo, fatMat);
+					fatLine.computeLineDistances();
+					fatLine.renderOrder = 999;
+					resultGroup.add(fatLine);
+				}
+
+				statResult.innerHTML = 'Showing inputs<br>Intersection: <b>' + segs.length + '</b> segments → <b>' + chains.length + '</b> chains (yellow)';
+			} else {
+				statResult.innerHTML = 'Showing inputs<br>No intersection detected';
+			}
+		} catch(e) {
+			statResult.innerHTML = 'Showing inputs';
+		}
+
+		if (!skipFit) fitCamera();
+		return;
+	}
+
+	// ── Splits view: show the 4 classification groups with distinct colours ──
+	if (op === 'splits') {
+		var t0s = performance.now();
+		var split;
+		try {
+			split = splitMeshPair(dataA.soup, dataB.soup);
+		} catch(e) {
+			statResult.innerHTML = '<span class="highlight">Split error: ' + e.message + '</span>';
+			return;
+		}
+		var dts = (performance.now() - t0s).toFixed(1);
+
+		if (!split) {
+			statResult.innerHTML = '<span class="highlight">No intersection — nothing to split</span>';
+			var ghostA2 = soupToThreeMesh(dataA.soup, 0x333333, 0.3);
+			var ghostB2 = soupToThreeMesh(dataB.soup, 0x333333, 0.3);
+			resultGroup.add(ghostA2); resultGroup.add(ghostB2);
+			if (!skipFit) fitCamera();
+			return;
+		}
+
+		var grp = split.groups;
+		// Step 1) Distinct colours for each of the 4 groups
+		var splitColors = {
+			aInside:  0xE6192C,  // red — A inside B
+			aOutside: 0xF47920,  // orange — A outside B
+			bInside:  0x4472C4,  // blue — B inside A
+			bOutside: 0x00B7C2   // cyan — B outside A
+		};
+		var splitEdgeColors = {
+			aInside:  0x730C16,
+			aOutside: 0x7A3C10,
+			bInside:  0x223962,
+			bOutside: 0x005B61
+		};
+		var groupEntries = [
+			{ key: "aInside",  soup: grp.aInside,  label: "A inside B" },
+			{ key: "aOutside", soup: grp.aOutside, label: "A outside B" },
+			{ key: "bInside",  soup: grp.bInside,  label: "B inside A" },
+			{ key: "bOutside", soup: grp.bOutside, label: "B outside A" }
+		];
+
+		for (var gi = 0; gi < groupEntries.length; gi++) {
+			var ge = groupEntries[gi];
+			if (ge.soup.length === 0) continue;
+			var opa = (showFanTris) ? 0.85 : 0.75;
+			var gMesh = soupToThreeMesh(ge.soup, splitColors[ge.key], opa);
+			gMesh.material.wireframe = showWireframe;
+			resultGroup.add(gMesh);
+
+			if (showEdges || showFanTris) {
+				var edgeColor = showFanTris ? splitColors[ge.key] : splitEdgeColors[ge.key];
+				var edgeOpa = showFanTris ? 0.9 : 0.4;
+				var edgeObj = soupToEdges(ge.soup, edgeColor);
+				edgeObj.material.opacity = edgeOpa;
+				resultGroup.add(edgeObj);
+			}
+
+			if (showOpenEdges) {
+				var openG = soupToOpenEdgeLines(ge.soup, 0xff0000, container);
+				if (openG) resultGroup.add(openG);
+			}
+
+			if (showNonManifold) {
+				addNonManifoldOverlay(ge.soup, container, resultGroup);
+			}
+		}
+
+		// Step 2) Intersection boundary lines
+		if (split.segments && split.segments.length > 0) {
+			var avg2 = estimateAvgEdge(dataA.soup);
+			var rawSegs = [];
+			for (var si = 0; si < split.segments.length; si++) {
+				rawSegs.push({ p0: split.segments[si].p0, p1: split.segments[si].p1 });
+			}
+			var chains2 = chainSegments(rawSegs, avg2 * 0.01);
+			var fatMat2 = new LineMaterial({
+				color: 0xffffff, linewidth: 5,
+				worldUnits: false, dashed: false,
+				depthTest: false, transparent: true,
+				resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+			});
+			for (var ci2 = 0; ci2 < chains2.length; ci2++) {
+				var ch = chains2[ci2];
+				if (ch.length < 2) continue;
+				var pts2 = [];
+				for (var cp2 = 0; cp2 < ch.length; cp2++) {
+					pts2.push(ch[cp2].x, ch[cp2].y, ch[cp2].z);
+				}
+				var fg = new LineGeometry(); fg.setPositions(pts2);
+				var fl = new Line2(fg, fatMat2); fl.computeLineDistances();
+				fl.renderOrder = 999;
+				resultGroup.add(fl);
+			}
+		}
+
+		// Step 3) Stats panel
+		var splitLines = [];
+		splitLines.push('Split completed in <b>' + dts + '</b> ms');
+		splitLines.push('Segments: <b>' + (split.segments ? split.segments.length : 0) + '</b>');
+		splitLines.push('');
+		var legendHtml = '';
+		for (var li = 0; li < groupEntries.length; li++) {
+			var le = groupEntries[li];
+			var hex = "#" + splitColors[le.key].toString(16).padStart(6, "0");
+			var openInfo = '';
+			if (le.soup.length > 0) {
+				try {
+					var wl = weldVertices(le.soup, 0.0001);
+					var cl = weldedToSoup(wl.triangles);
+					var sl = countOpenEdges(cl);
+					openInfo = ' | open: ' + sl.openEdges;
+					if (sl.overShared > 0) openInfo += ' | nm: ' + sl.overShared;
+				} catch(e2) { /* skip */ }
+			}
+			legendHtml += '<div class="split-legend">' +
+				'<span class="split-swatch" style="background:' + hex + '"></span> ' +
+				'<span>' + le.label + ': <b>' + le.soup.length + '</b> tris' + openInfo + '</span></div>';
+		}
+		splitLines.push(legendHtml);
+		if (showFanTris) {
+			splitLines.push('<br><span class="highlight">Fan Tris: ON</span> (each sub-triangle edge visible)');
+		}
+		statResult.innerHTML = splitLines.join('<br>');
+
+		if (!skipFit) fitCamera();
+		return;
+	}
+
+	// Custom operation — component-based split picker
+	if (op === 'custom') {
+		var t0c = performance.now();
+		var split;
+		try {
+			split = splitMeshPair(dataA.soup, dataB.soup);
+		} catch(e) {
+			statResult.innerHTML = '<span class="highlight">Error: ' + e.message + '</span>';
+			return;
+		}
+		if (!split) {
+			statResult.innerHTML = 'No split result (meshes may not intersect)';
+			return;
+		}
+		var comps = splitToComponents(split.groups);
+		if (mergeSmall) {
+			comps = mergeSmallComponents(comps, 50);
+		}
+		var dtc = (performance.now() - t0c).toFixed(1);
+
+		// Step C1) Assign distinct colours — each component gets its own colour
+		// Rainbow palette (no yellow): Red, Orange, Green, Cyan, Blue, Indigo, Purple, Magenta
+		var basePalette = [
+			0xE6192C, 0xF47920, 0x39B54A, 0x00B7C2,
+			0x4472C4, 0x3C3C8C, 0x8B3FA0, 0xC2185B
+		];
+		var N = basePalette.length;
+
+		function darkenColor(hex, factor) {
+			var r = (hex >> 16) & 0xff;
+			var g = (hex >> 8) & 0xff;
+			var b = hex & 0xff;
+			r = Math.round(r * factor);
+			g = Math.round(g * factor);
+			b = Math.round(b * factor);
+			return (r << 16) | (g << 8) | b;
+		}
+		function lightenColor(hex, factor) {
+			var r = (hex >> 16) & 0xff;
+			var g = (hex >> 8) & 0xff;
+			var b = hex & 0xff;
+			r = Math.min(255, Math.round(r + (255 - r) * factor));
+			g = Math.min(255, Math.round(g + (255 - g) * factor));
+			b = Math.min(255, Math.round(b + (255 - b) * factor));
+			return (r << 16) | (g << 8) | b;
+		}
+
+		// First N components = base colours, next N = 50% darker, next N = 50% lighter
+		for (var ci = 0; ci < comps.length; ci++) {
+			var cp = comps[ci];
+			var band = Math.floor(ci / N);
+			var idx = ci % N;
+			var base = basePalette[idx];
+			if (band === 0) {
+				cp.color = base;
+			} else if (band === 1) {
+				cp.color = darkenColor(base, 0.5);
+			} else {
+				cp.color = lightenColor(base, 0.5);
+			}
+			cp.visible = true;
+		}
+
+		// Step C2) Preserve previous visibility state if re-running
+		if (window._customComps && window._customComps.length === comps.length) {
+			for (var pi = 0; pi < comps.length; pi++) {
+				comps[pi].visible = window._customComps[pi].visible;
+			}
+		}
+		window._customComps = comps;
+
+		// Step C3) Build the component list in the Result panel
+		var compHtml = '<b>Custom splits</b> (' + dtc + ' ms)<br>' +
+			comps.length + ' components from ' + split.segments.length + ' segments<hr>';
+		compHtml += '<ul class="comp-list" id="comp-list">';
+		for (var li = 0; li < comps.length; li++) {
+			var lc = comps[li];
+			var tag = lc.mesh + "-" + lc.side + (lc.index > 0 ? " #" + lc.index : "");
+			var hexStr = "#" + ("000000" + lc.color.toString(16)).slice(-6);
+			var eyeClass = lc.visible ? "comp-eye" : "comp-eye off";
+			var eyeChar = lc.visible ? "&#128065;" : "&#128065;";
+			compHtml += '<li class="comp-item" data-idx="' + li + '">' +
+				'<span class="' + eyeClass + '" data-idx="' + li + '">' + eyeChar + '</span>' +
+				'<span class="comp-swatch" style="background:' + hexStr + '"></span>' +
+				'<span class="comp-label">' + tag + ' (' + lc.triCount + ')</span>' +
+				'</li>';
+		}
+		compHtml += '</ul>';
+
+		// Step C4) Count combined visible stats
+		var visCount = 0;
+		var visTris = 0;
+		for (var vi = 0; vi < comps.length; vi++) {
+			if (comps[vi].visible) { visCount++; visTris += comps[vi].triCount; }
+		}
+		compHtml += '<br>Visible: ' + visCount + '/' + comps.length + ' (' + visTris + ' tris)';
+		statResult.innerHTML = compHtml;
+
+		// Step C5) Render visible components into the scene
+		for (var ri = 0; ri < comps.length; ri++) {
+			if (!comps[ri].visible) continue;
+			var cMesh = soupToThreeMesh(comps[ri].soup, comps[ri].color, 0.85);
+			cMesh.material.wireframe = showWireframe;
+			cMesh.material.side = THREE.DoubleSide;
+			resultGroup.add(cMesh);
+
+			if (showEdges) {
+				var cEdge = soupToEdges(comps[ri].soup, comps[ri].color);
+				cEdge.material.opacity = 0.5;
+				resultGroup.add(cEdge);
+			}
+		}
+
+		// Step C6) Attach click handlers for the eye toggles
+		setTimeout(function() {
+			var listEl = document.getElementById('comp-list');
+			if (!listEl) return;
+			listEl.addEventListener('click', function(ev) {
+				var target = ev.target;
+				while (target && !target.dataset.idx && target !== listEl) target = target.parentElement;
+				if (!target || target.dataset.idx === undefined) return;
+				var idx = parseInt(target.dataset.idx);
+				if (isNaN(idx) || idx < 0 || idx >= window._customComps.length) return;
+				window._customComps[idx].visible = !window._customComps[idx].visible;
+				skipFit = true; runOp('custom'); skipFit = false;
+			});
+		}, 0);
+
+		// Step C7) Intersection boundary lines (yellow)
+		if (split.segments && split.segments.length > 0) {
+			var avgC = estimateAvgEdge(dataA.soup);
+			var rawSegsC = [];
+			for (var sci = 0; sci < split.segments.length; sci++) {
+				rawSegsC.push({ p0: split.segments[sci].p0, p1: split.segments[sci].p1 });
+			}
+			var chainsC = chainSegments(rawSegsC, avgC * 0.01);
+			var fatMatC = new LineMaterial({
+				color: 0xffdd00, linewidth: 5,
+				worldUnits: false, dashed: false,
+				depthTest: false, transparent: true,
+				resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+			});
+			for (var cci = 0; cci < chainsC.length; cci++) {
+				var chC = chainsC[cci];
+				if (chC.length < 2) continue;
+				var ptsC = [];
+				for (var cpi = 0; cpi < chC.length; cpi++) {
+					ptsC.push(chC[cpi].x, chC[cpi].y, chC[cpi].z);
+				}
+				var geoC = new LineGeometry(); geoC.setPositions(ptsC);
+				var lineC = new Line2(geoC, fatMatC); lineC.computeLineDistances();
+				lineC.renderOrder = 999;
+				resultGroup.add(lineC);
+			}
+		}
+
+		if (!skipFit) fitCamera();
+		return;
+	}
+
+	// Boolean operation — inverse ops swap A and B
+	var boolOp = op;
+	var boolSoupA = dataA.soup;
+	var boolSoupB = dataB.soup;
+	if (op === 'subtract-inv') {
+		boolOp = 'subtract';
+		boolSoupA = dataB.soup;
+		boolSoupB = dataA.soup;
+	}
+
+	var t0 = performance.now();
+	var result;
+	try {
+		result = boolean(boolSoupA, boolSoupB, boolOp);
+	} catch(e) {
+		statResult.innerHTML = '<span class="highlight">Error: ' + e.message + '</span>';
+		return;
+	}
+	var dt = (performance.now() - t0).toFixed(1);
+
+	// Step 2) Post-process: optional gap filling / force close
+	var postNotes = [];
+	if (forceCloseWithFan && result && result.soup) {
+		var beforeLen = result.soup.length;
+		result.soup = fillOpenEdgeLoops(result.soup);
+		var added = result.soup.length - beforeLen;
+		if (added > 0) postNotes.push("Fill Gaps (Fan): +" + added + " tris");
+	}
+	if (forceCloseIndexed && result && result.soup) {
+		var beforeLen2 = result.soup.length;
+		var w = weldVertices(result.soup, 0.0001);
+		var closed = forceCloseIndexedMesh(w.points, w.triangles);
+		// Convert indexed triangles back to soup
+		var newSoup = [];
+		for (var ci2 = 0; ci2 < closed.triangles.length; ci2++) {
+			var cv = closed.triangles[ci2].vertices;
+			newSoup.push({
+				v0: { x: cv[0].x, y: cv[0].y, z: cv[0].z },
+				v1: { x: cv[1].x, y: cv[1].y, z: cv[1].z },
+				v2: { x: cv[2].x, y: cv[2].y, z: cv[2].z }
+			});
+		}
+		result.soup = newSoup;
+		var added2 = result.soup.length - beforeLen2;
+		if (added2 > 0) postNotes.push("Force Close (Idx): +" + added2 + " tris");
+		// Re-weld after force close
+		var rw = weldVertices(result.soup, 0.0001);
+		result.points = rw.points;
+		result.triangles = rw.triangles;
+	}
+
+	statResult.innerHTML = resultStats(result, op, dt);
+	if (postNotes.length > 0) {
+		statResult.innerHTML += '<br><span class="highlight">' + postNotes.join('<br>') + '</span>';
+	}
+
+	if (!result || !result.soup || result.soup.length === 0) {
+		var ghostA = soupToThreeMesh(dataA.soup, 0x333333, 0.2);
+		var ghostB = soupToThreeMesh(dataB.soup, 0x333333, 0.2);
+		resultGroup.add(ghostA);
+		resultGroup.add(ghostB);
+		fitCamera();
+		return;
+	}
+
+	// Result mesh
+	var colors = { subtract: 0xF47920, 'subtract-inv': 0x4472C4, union: 0x39B54A, intersect: 0x8B3FA0, custom: 0x00B7C2 };
+	var resultMesh = soupToThreeMesh(result.soup, colors[op] || 0xcccccc, 1.0);
+	resultMesh.material.wireframe = showWireframe;
+	resultGroup.add(resultMesh);
+
+	if (showEdges || showFanTris) {
+		var edgeColors = { subtract: 0x7A3C10, 'subtract-inv': 0x223962, union: 0x1C5A25, intersect: 0x451F50, custom: 0x005B61 };
+		var rEdges = soupToEdges(result.soup, edgeColors[op] || 0x999999);
+		if (showFanTris) rEdges.material.opacity = 0.9;
+		resultGroup.add(rEdges);
+	}
+
+	if (showOpenEdges) {
+		var openResult = soupToOpenEdgeLines(result.soup, 0xff0000, container);
+		if (openResult) resultGroup.add(openResult);
+	}
+
+	if (showNonManifold) {
+		var nmCount = addNonManifoldOverlay(result.soup, container, resultGroup);
+		if (nmCount > 0) {
+			statResult.innerHTML += '<br><span class="highlight">Non-manifold tris: ' + nmCount + '</span>';
+		}
+	}
+
+	if (!skipFit) fitCamera();
 };
 
-// Auto-show inputs
-run('cubes','input'); run('offset','input'); run('flat','input'); run('pit','input'); run('wavy','input');
+function fitCamera() {
+	var box = new THREE.Box3();
+	resultGroup.traverse(function(child) {
+		if (child.isMesh || child.isLineSegments) {
+			child.geometry.computeBoundingBox();
+			var childBox = child.geometry.boundingBox.clone();
+			box.union(childBox);
+		}
+	});
+
+	if (box.isEmpty()) return;
+
+	var center = new THREE.Vector3();
+	box.getCenter(center);
+	var size = new THREE.Vector3();
+	box.getSize(size);
+	var maxDim = Math.max(size.x, size.y, size.z);
+	var dist = maxDim * 1.8;
+
+	controls.target.copy(center);
+	camera.position.set(center.x + dist * 0.6, center.y - dist * 0.7, center.z + dist * 0.4);
+	controls.update();
+}
+
+// ── UI event handlers ──
+
+document.getElementById('meshA').addEventListener('change', function() { runOp(currentOp); });
+document.getElementById('meshB').addEventListener('change', function() { runOp(currentOp); });
+
+document.getElementById('chk-wireframe').addEventListener('change', function(e) {
+	showWireframe = e.target.checked;
+	resultGroup.traverse(function(child) {
+		if (child.isMesh) child.material.wireframe = showWireframe;
+	});
+});
+
+document.getElementById('chk-edges').addEventListener('change', function(e) {
+	showEdges = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-open-edges').addEventListener('change', function(e) {
+	showOpenEdges = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-nonmanifold').addEventListener('change', function(e) {
+	showNonManifold = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-fan-tris').addEventListener('change', function(e) {
+	showFanTris = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-prerepair').addEventListener('change', function(e) {
+	preRepair = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-fill-gaps').addEventListener('change', function(e) {
+	forceCloseWithFan = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-force-close').addEventListener('change', function(e) {
+	forceCloseIndexed = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-merge-small').addEventListener('change', function(e) {
+	mergeSmall = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+// ── Initial display ──
+runOp('input');
+
 </script>
 </body>
 </html>
