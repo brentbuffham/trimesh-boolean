@@ -1,0 +1,62 @@
+---
+description: trimesh-boolean library conventions and project memory
+alwaysApply: true
+---
+
+# trimesh-boolean — Project Rules
+
+## Project Structure
+- Plans go in `FuturePlans/` folder (not aiPlans). Naming: `YYYYMMDD-hhmm-PlanName.md`
+- 3D demo (`examples/index.html`) is the primary demo page
+- 2D demo (`examples/2d.html`) is secondary, linked from the 3D page
+- Library source in `src/`, tests in `test/`, examples in `examples/`
+
+## Code Style
+- Do NOT use template literals — use `"string " + variable + " more"` concatenation
+- Do NOT use `let` / `const` — use `var` throughout (ES5-compatible style)
+- Add `Step #)` comments so code is easy to follow
+- Do not remove code without a verbose comment explaining why
+- Avoid code bloat — reuse existing factory functions
+
+## Architecture
+- Triangle soup format: `{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }`
+- Indexed format: `{ points: [{x,y,z},...], triangles: [{vertices:[v0,v1,v2]},...] }`
+- No classes — plain objects and functions only
+- No Three.js dependency in core (`src/`). Three.js adapter is separate (`src/three.js`)
+
+## Coordinate System
+- Z-up (terrain convention). Y is North/South, X is East/West
+- Data is often large UTM values — always centroid-shift before rendering
+- Do NOT transform Z elevations or scale the 3D
+
+## Boolean Pipeline (current as of v0.3.0)
+1. Intersection detection (Moller tri-tri)
+2. Spatial grid construction (3-axis: XY, YZ, XZ)
+3. Flood-fill classification (multi-axis majority vote seeds)
+4. Fan triangulation of crossed triangles (CDT fallback for edge cases)
+5. Half-space classification with border-segment priority (Step D0)
+6. Constraint enforcement across segment edges (Step E3)
+7. Adjacency propagation (confident → non-confident)
+8. Seam deduplication + normal propagation
+9. Group combination + non-manifold fix
+10. Weld and return
+
+## Known Classification Limitations (v0.3.0)
+- Multi-crossing open surfaces (e.g., convoluted block) can have spill at crossings
+- The `halfSpaceTest` fallback picks the globally nearest segment, which may be from a wrong crossing
+- `mergeSmallComponents` can over-merge legitimate zones if threshold is too high
+- B-mesh components for double-crossings get squashed to 2 instead of 4
+
+## Key Files
+- `src/boolean/classifyTriangles.js` — classification engine (Steps D0, E1-E3)
+- `src/boolean/splitTriangles.js` — fan triangulation + CDT fallback
+- `src/boolean/booleanOp.js` — public API (boolean, splitMeshPair, splitToComponents, mergeSmallComponents)
+- `src/intersect/intersectMeshPair.js` — Moller intersection
+- `src/repair/fillOpenEdgeLoops.js` — gap filling (needs selectable loops in v0.3.1)
+- `examples/index.html` — primary 3D Three.js demo
+- `examples/2d.html` — secondary 2D canvas demo
+
+## Testing
+- Run `npx vitest run` for all tests
+- Run `npm run dev` for Vite dev server (serves `examples/`)
+- Key test meshes: cup (16 tris), cylinder (60 tris), terrain (11200 tris), convoluted (32 tris)
