@@ -57,6 +57,10 @@ export interface RepairConfig {
 	snapTolerance?: number;
 	stitchTolerance?: number;
 	removeDegenerate?: boolean;
+	sliverRatio?: number;
+	cleanCrossings?: boolean;
+	removeOverlapping?: boolean;
+	overlapTolerance?: number;
 }
 
 export interface RepairResult {
@@ -79,10 +83,86 @@ export interface BoundaryLoopResult {
 
 // ── Core Boolean API ──
 
+export interface SplitResult {
+	groups: {
+		aInside: TriangleSoup;
+		aOutside: TriangleSoup;
+		bInside: TriangleSoup;
+		bOutside: TriangleSoup;
+	};
+	segments: TaggedSegment[];
+}
+
+export interface BooleanOptions {
+	/** Resolve T-junctions and weld boundary vertices on inputs before splitting */
+	preRepair?: boolean;
+	/** Fill closed open-edge loops with fan triangles after the boolean */
+	fillGaps?: boolean;
+	/** Force-close via spatial-proximity indexed fill after the boolean */
+	forceClose?: boolean;
+	/** Vertex snapping tolerance for pre-repair / fill (default: avgEdge * 0.01) */
+	tolerance?: number;
+	/** Max T-junction resolution passes (default: 3) */
+	tjunctionPasses?: number;
+}
+
 export function boolean(
 	soupA: TriangleSoup,
 	soupB: TriangleSoup,
+	operation: "subtract" | "union" | "intersect",
+	options?: BooleanOptions
+): BooleanResult | null;
+
+export function splitMeshPair(
+	soupA: TriangleSoup,
+	soupB: TriangleSoup
+): SplitResult | null;
+
+export function mergeSplitGroups(
+	groups: SplitResult["groups"],
 	operation: "subtract" | "union" | "intersect"
+): BooleanResult | null;
+
+export interface SplitSelection {
+	/** Include A-inside-B triangles; "flip" reverses normals */
+	aInside?: boolean | "flip";
+	/** Include A-outside-B triangles; "flip" reverses normals */
+	aOutside?: boolean | "flip";
+	/** Include B-inside-A triangles; "flip" reverses normals */
+	bInside?: boolean | "flip";
+	/** Include B-outside-A triangles; "flip" reverses normals */
+	bOutside?: boolean | "flip";
+}
+
+export function selectSplits(
+	groups: SplitResult["groups"],
+	selection: SplitSelection
+): BooleanResult | null;
+
+export interface SplitComponent {
+	/** Which input mesh: "A" or "B" */
+	mesh: "A" | "B";
+	/** Classification relative to the other mesh */
+	side: "inside" | "outside";
+	/** Component index within its group (0 = largest) */
+	index: number;
+	/** The triangles in this component */
+	soup: TriangleSoup;
+	/** Number of triangles */
+	triCount: number;
+}
+
+export function splitToComponents(
+	groups: SplitResult["groups"]
+): SplitComponent[];
+
+export function mergeSmallComponents(
+	comps: SplitComponent[],
+	threshold?: number
+): SplitComponent[];
+
+export function mergeComponents(
+	picks: Array<{ soup: TriangleSoup; flip?: boolean }>
 ): BooleanResult | null;
 
 // ── Intersection ──
@@ -94,7 +174,9 @@ export function triTriIntersectionDetailed(triA: Triangle, triB: Triangle): { dA
 export function chainSegments(segments: Segment[], threshold: number): Vertex[][];
 export function simplifyPolyline(points: Vertex[], spacing: number): Vertex[];
 export function buildSpatialGrid(tris: TriangleSoup, cellSize: number): Record<string, number[]>;
+export function buildSpatialGridOnAxes(tris: TriangleSoup, cellSize: number, getA: (v: Vertex) => number, getB: (v: Vertex) => number): Record<string, number[]>;
 export function queryGrid(grid: Record<string, number[]>, bb: { minX: number; maxX: number; minY: number; maxY: number }, cellSize: number): number[];
+export function queryGridOnAxes(grid: Record<string, number[]>, a: number, b: number, cellSize: number): number[];
 export function computeBBox(tris: TriangleSoup): AABB;
 export function triBBox(tri: Triangle): AABB;
 export function bboxOverlap(a: AABB, b: AABB): boolean;
@@ -116,7 +198,14 @@ export function stitchByProximity(tris: TriangleSoup, stitchTolerance?: number):
 export function cleanCrossingTriangles(tris: TriangleSoup): TriangleSoup;
 export function removeOverlappingTriangles(tris: TriangleSoup, tolerance?: number): TriangleSoup;
 export function forceCloseIndexedMesh(points: Vertex[], triangles: WeldedTriangle[]): WeldedMesh;
+export function fillOpenEdgeLoops(soup: TriangleSoup, tolerance?: number): TriangleSoup;
 export function weldBoundaryVertices(tris: TriangleSoup, tolerance: number): TriangleSoup;
+
+// ── Mesh format conversion aliases ──
+/** Alias for weldVertices — converts triangle soup to indexed mesh */
+export function soupToIndexed(tris: TriangleSoup, tolerance: number): WeldedMesh;
+/** Alias for weldedToSoup — converts indexed triangles back to triangle soup */
+export function indexedToSoup(weldedTriangles: WeldedTriangle[]): TriangleSoup;
 
 // ── Normals ──
 
@@ -130,8 +219,14 @@ export function compute3DSurfaceArea(tris: TriangleSoup): number;
 
 // ── Boolean internals (advanced) ──
 
-export function classifyPointByRayCast(point: Vertex, otherTris: TriangleSoup, otherGrid: Record<string, number[]>, otherCellSize: number): 1 | -1;
-export function classifyByFloodFill(tris: TriangleSoup, crossedMap: Record<number, TaggedSegment[]>, otherTris: TriangleSoup, otherGrid: Record<string, number[]>, otherCellSize: number): Int8Array;
+export interface MultiAxisGrids {
+	xy: { grid: Record<string, number[]>; cellSize: number };
+	yz: { grid: Record<string, number[]>; cellSize: number };
+	xz: { grid: Record<string, number[]>; cellSize: number };
+}
+
+export function classifyPointMultiAxis(point: Vertex, otherTris: TriangleSoup, grids: MultiAxisGrids): 1 | -1;
+export function classifyByFloodFill(tris: TriangleSoup, crossedMap: Record<number, TaggedSegment[]>, otherTris: TriangleSoup, otherGrids: MultiAxisGrids): Int8Array;
 export function retriangulateWithSteinerPoints(tri: Triangle, segments: Segment[]): TriangleSoup;
 export function buildCurtainAndCap(tris: TriangleSoup, floorOffset?: number): TriangleSoup;
 export function generateClosingTriangles(tris: TriangleSoup, maxDist: number): TriangleSoup;
@@ -147,3 +242,4 @@ export function lerpVert(a: Vertex, b: Vertex, t: number): Vertex;
 export function vKey(v: Vertex): string;
 export function edgeKey(ka: string, kb: string): string;
 export function countOpenEdges(tris: TriangleSoup): EdgeStats;
+export function findConnectedComponents(soup: TriangleSoup): TriangleSoup[];

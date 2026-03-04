@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>trimesh-boolean — Live Demo</title>
+<style>
+	* { margin: 0; padding: 0; box-sizing: border-box; }
+	body { font-family: system-ui, sans-serif; background: #1a1a1a; color: #d0d0d0; }
+	header { padding: 16px 20px 8px; text-align: center; display: flex; flex-direction: column; align-items: center; }
+	header h1 { font-size: 1.5rem; color: #cc2222; }
+	header p { color: #888; margin-top: 2px; font-size: 0.9rem; }
+	.section { border: 1px solid #333; border-radius: 6px; margin: 6px; padding: 8px; background: #111; }
+	.section h2 { font-size: 0.9rem; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+	.section h2 .tag { font-size: 0.7rem; padding: 2px 8px; border-radius: 3px; font-weight: normal; }
+	.tag-closed { background: #cc222233; color: #cc2222; border: 1px solid #cc222255; }
+	.tag-open { background: #F4792033; color: #F47920; border: 1px solid #F4792055; }
+	.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
+	.panel { flex: 1; min-width: 280px; }
+	.controls { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+	button { padding: 5px 14px; border: 1px solid #444; background: transparent; color: #bbb;
+		border-radius: 3px; cursor: pointer; font-size: 0.8rem; }
+	button:hover { background: #333; }
+	button.active { background: #cc2222; color: #fff; border-color: #cc2222; }
+	button.active-orange { background: #F47920; color: #fff; border-color: #F47920; }
+	.info { color: #999; font-size: 0.78rem; margin-top: 4px; min-height: 1.2em; }
+	canvas { display: block; width: 100%; background: #111; border-radius: 4px; }
+	.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+	@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+	footer { text-align: center; padding: 16px; color: #555; font-size: 0.75rem; }
+	footer a { color: #cc2222; text-decoration: none; }
+	.three-link {
+		display: inline-block; padding: 8px 24px; margin-top: 10px;
+		background: #cc2222; color: #fff; font-weight: 600; font-size: 0.9rem;
+		border-radius: 4px; transition: background 0.2s;
+	}
+	.three-link:hover { background: #ee3333; }
+</style>
+</head>
+<body>
+<header>
+	<h1>trimesh-boolean</h1>
+	<p>Triangle mesh boolean operations — the only JS library that supports open surfaces</p>
+	<a href="index.html" class="three-link">3D Demo (Three.js) &rarr;</a>
+</header>
+
+<div class="grid" style="margin: 0 8px;">
+	<!-- Closed: Cube vs Cube -->
+	<div class="section" id="sec-cubes">
+		<h2>Cube vs Cube <span class="tag tag-closed">Closed Solid</span></h2>
+		<div class="controls">
+			<button onclick="run('cubes','input')">Inputs</button>
+			<button onclick="run('cubes','subtract')">Subtract</button>
+			<button onclick="run('cubes','union')">Union</button>
+			<button onclick="run('cubes','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-cubes" width="600" height="220"></canvas>
+		<div class="info" id="info-cubes">Click an operation</div>
+	</div>
+
+	<!-- Closed: Offset Cubes -->
+	<div class="section" id="sec-offset">
+		<h2>Offset Cubes <span class="tag tag-closed">Closed Solid</span></h2>
+		<div class="controls">
+			<button onclick="run('offset','input')">Inputs</button>
+			<button onclick="run('offset','subtract')">Subtract</button>
+			<button onclick="run('offset','union')">Union</button>
+			<button onclick="run('offset','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-offset" width="600" height="220"></canvas>
+		<div class="info" id="info-offset">Click an operation</div>
+	</div>
+
+	<!-- Open: Flat Patches -->
+	<div class="section" id="sec-flat">
+		<h2>Flat vs Inclined Terrain <span class="tag tag-open">Open Surface</span></h2>
+		<div class="controls">
+			<button onclick="run('flat','input')">Inputs</button>
+			<button onclick="run('flat','subtract')">Subtract</button>
+			<button onclick="run('flat','union')">Union</button>
+			<button onclick="run('flat','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-flat" width="600" height="220"></canvas>
+		<div class="info" id="info-flat">Click an operation</div>
+	</div>
+
+	<!-- Open: Steep Pit Shell -->
+	<div class="section" id="sec-pit">
+		<h2>Steep Pit Shell vs Terrain <span class="tag tag-open">Open Surface — Steep Walls</span></h2>
+		<div class="controls">
+			<button onclick="run('pit','input')">Inputs</button>
+			<button onclick="run('pit','subtract')">Subtract</button>
+			<button onclick="run('pit','union')">Union</button>
+			<button onclick="run('pit','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-pit" width="600" height="220"></canvas>
+		<div class="info" id="info-pit">Click an operation — tests multi-axis classification on steep walls</div>
+	</div>
+
+	<!-- Open: Wavy Terrain -->
+	<div class="section" id="sec-wavy">
+		<h2>Wavy Terrain vs Flat Cut <span class="tag tag-open">Open Surface</span></h2>
+		<div class="controls">
+			<button onclick="run('wavy','input')">Inputs</button>
+			<button onclick="run('wavy','subtract')">Subtract</button>
+			<button onclick="run('wavy','union')">Union</button>
+			<button onclick="run('wavy','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-wavy" width="600" height="220"></canvas>
+		<div class="info" id="info-wavy">Click an operation</div>
+	</div>
+</div>
+
+<footer>
+	<a href="https://github.com/brentbuffham/trimesh-boolean">GitHub</a> &middot;
+	<code>npm install trimesh-boolean</code> &middot;
+	MIT License
+</footer>
+
+<script type="module">
+import { boolean, countOpenEdges, weldVertices, weldedToSoup } from '../src/index.js';
+
+// ── Mesh Generators ──
+
+function createCube(cx, cy, cz, size) {
+	var h = size / 2;
+	var v = [
+		{ x: cx-h, y: cy-h, z: cz-h }, { x: cx+h, y: cy-h, z: cz-h },
+		{ x: cx+h, y: cy+h, z: cz-h }, { x: cx-h, y: cy+h, z: cz-h },
+		{ x: cx-h, y: cy-h, z: cz+h }, { x: cx+h, y: cy-h, z: cz+h },
+		{ x: cx+h, y: cy+h, z: cz+h }, { x: cx-h, y: cy+h, z: cz+h }
+	];
+	var faces = [[0,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],[2,3,7],[2,7,6],[0,4,7],[0,7,3],[1,2,6],[1,6,5]];
+	var soup = [];
+	for (var i = 0; i < faces.length; i++) {
+		var f = faces[i];
+		soup.push({ v0: { x:v[f[0]].x, y:v[f[0]].y, z:v[f[0]].z },
+			v1: { x:v[f[1]].x, y:v[f[1]].y, z:v[f[1]].z },
+			v2: { x:v[f[2]].x, y:v[f[2]].y, z:v[f[2]].z } });
+	}
+	return soup;
+}
+
+function createFlatPatch(cx, cy, z, w, d, divX, divY) {
+	var soup = [], dx = w/divX, dy = d/divY, sx = cx - w/2, sy = cy - d/2;
+	for (var ix = 0; ix < divX; ix++) {
+		for (var iy = 0; iy < divY; iy++) {
+			var x0 = sx+ix*dx, y0 = sy+iy*dy, x1 = x0+dx, y1 = y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:z}, v1:{x:x1,y:y0,z:z}, v2:{x:x1,y:y1,z:z} });
+			soup.push({ v0:{x:x0,y:y0,z:z}, v1:{x:x1,y:y1,z:z}, v2:{x:x0,y:y1,z:z} });
+		}
+	}
+	return soup;
+}
+
+function createInclinedPatch(cx, cy, z, w, d, divX, divY, slopeX, slopeY) {
+	var soup = [], dx = w/divX, dy = d/divY, sx = cx - w/2, sy = cy - d/2;
+	if (!slopeX) slopeX = 0;
+	if (!slopeY) slopeY = 0;
+	function zAt(x, y) { return z + (x - cx) * slopeX + (y - cy) * slopeY; }
+	for (var ix = 0; ix < divX; ix++) {
+		for (var iy = 0; iy < divY; iy++) {
+			var x0 = sx+ix*dx, y0 = sy+iy*dy, x1 = x0+dx, y1 = y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y0,z:zAt(x1,y0)}, v2:{x:x1,y:y1,z:zAt(x1,y1)} });
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y1,z:zAt(x1,y1)}, v2:{x:x0,y:y1,z:zAt(x0,y1)} });
+		}
+	}
+	return soup;
+}
+
+function createWavyPatch(cx, cy, baseZ, w, d, div, amp) {
+	var soup = [], dx = w/div, dy = d/div, sx = cx-w/2, sy = cy-d/2;
+	function zAt(x,y) { return baseZ + amp * Math.sin(x*0.8) * Math.cos(y*0.8); }
+	for (var ix = 0; ix < div; ix++) {
+		for (var iy = 0; iy < div; iy++) {
+			var x0=sx+ix*dx, y0=sy+iy*dy, x1=x0+dx, y1=y0+dy;
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y0,z:zAt(x1,y0)}, v2:{x:x1,y:y1,z:zAt(x1,y1)} });
+			soup.push({ v0:{x:x0,y:y0,z:zAt(x0,y0)}, v1:{x:x1,y:y1,z:zAt(x1,y1)}, v2:{x:x0,y:y1,z:zAt(x0,y1)} });
+		}
+	}
+	return soup;
+}
+
+/**
+ * Create an open pit shell — a bowl/cup shape with steep (80 deg) walls.
+ * The shell is open at the top. Tests multi-axis classification since
+ * Z-only ray casting fails on near-vertical walls.
+ */
+function createPitShell(cx, cy, topZ, bottomZ, topRadius, bottomRadius, segments) {
+	if (!segments) segments = 12;
+	var soup = [];
+	var angleStep = (2 * Math.PI) / segments;
+
+	for (var i = 0; i < segments; i++) {
+		var a0 = i * angleStep;
+		var a1 = (i + 1) * angleStep;
+
+		// Top ring vertices
+		var tx0 = cx + topRadius * Math.cos(a0);
+		var ty0 = cy + topRadius * Math.sin(a0);
+		var tx1 = cx + topRadius * Math.cos(a1);
+		var ty1 = cy + topRadius * Math.sin(a1);
+
+		// Bottom ring vertices
+		var bx0 = cx + bottomRadius * Math.cos(a0);
+		var by0 = cy + bottomRadius * Math.sin(a0);
+		var bx1 = cx + bottomRadius * Math.cos(a1);
+		var by1 = cy + bottomRadius * Math.sin(a1);
+
+		// Wall quad: 2 triangles
+		soup.push({
+			v0: { x: tx0, y: ty0, z: topZ },
+			v1: { x: tx1, y: ty1, z: topZ },
+			v2: { x: bx1, y: by1, z: bottomZ }
+		});
+		soup.push({
+			v0: { x: tx0, y: ty0, z: topZ },
+			v1: { x: bx1, y: by1, z: bottomZ },
+			v2: { x: bx0, y: by0, z: bottomZ }
+		});
+
+		// Bottom cap triangle (fan from center)
+		soup.push({
+			v0: { x: cx, y: cy, z: bottomZ },
+			v1: { x: bx0, y: by0, z: bottomZ },
+			v2: { x: bx1, y: by1, z: bottomZ }
+		});
+	}
+
+	return soup;
+}
+
+// ── Scene Definitions ──
+
+var scenes = {
+	cubes: {
+		a: createCube(0, 0, 0, 2),
+		b: createCube(1, 0, 0, 2),
+		labelA: 'Cube A', labelB: 'Cube B',
+		scale: 55, colorA: '#ff6644', colorB: '#44aaff', closed: true, tilt: 0.3
+	},
+	offset: {
+		a: createCube(0, 0, 0, 2.5),
+		b: createCube(0.8, 0.8, 0.5, 1.8),
+		labelA: 'Large Cube', labelB: 'Small Cube',
+		scale: 45, colorA: '#cc44ff', colorB: '#44ffaa', closed: true, tilt: 0.3
+	},
+	flat: {
+		a: createFlatPatch(0, 0, 0, 8, 8, 4, 4),
+		b: createInclinedPatch(0, 0, 0, 8, 8, 4, 4, 0.2, 0.15),
+		labelA: 'Flat Patch (z=0)', labelB: 'Inclined Patch',
+		scale: 30, colorA: '#ff8844', colorB: '#44ccff', closed: false, tilt: 0.55
+	},
+	pit: {
+		a: createFlatPatch(0, 0, 2, 10, 10, 4, 4),
+		b: createPitShell(0, 0, 3, -1, 3, 0.5, 16),
+		labelA: 'Flat Terrain (z=2)', labelB: 'Steep Pit Shell (80° walls)',
+		scale: 25, colorA: '#ff8844', colorB: '#44ffcc', closed: false, tilt: 0.5
+	},
+	wavy: {
+		a: createWavyPatch(0, 0, 0, 8, 8, 6, 1.5),
+		b: createFlatPatch(0, 0, 0.5, 7, 7, 4, 4),
+		labelA: 'Wavy Terrain', labelB: 'Flat Cut Plane',
+		scale: 30, colorA: '#ff6688', colorB: '#88ddff', closed: false, tilt: 0.55
+	}
+};
+
+// ── Rendering ──
+
+function project(v, scale, cx, cy, tilt) {
+	if (!tilt) tilt = 0.3;
+	var px = (v.x - v.y * 0.4) * scale + cx;
+	var py = (-v.z * (1 - tilt) + v.y * tilt) * scale + cy;
+	return { x: px, y: py };
+}
+
+function drawSoup(ctx, soup, color, alpha, scale, cx, cy, tilt) {
+	ctx.strokeStyle = color;
+	ctx.globalAlpha = alpha;
+	ctx.lineWidth = 0.8;
+	for (var i = 0; i < soup.length; i++) {
+		var tri = soup[i];
+		var a = project(tri.v0, scale, cx, cy, tilt);
+		var b = project(tri.v1, scale, cx, cy, tilt);
+		var c = project(tri.v2, scale, cx, cy, tilt);
+		ctx.beginPath();
+		ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y);
+		ctx.closePath(); ctx.stroke();
+	}
+	ctx.globalAlpha = 1;
+}
+
+function drawFilled(ctx, soup, fillColor, strokeColor, scale, cx, cy, tilt) {
+	for (var i = 0; i < soup.length; i++) {
+		var tri = soup[i];
+		var a = project(tri.v0, scale, cx, cy, tilt);
+		var b = project(tri.v1, scale, cx, cy, tilt);
+		var c = project(tri.v2, scale, cx, cy, tilt);
+		ctx.beginPath();
+		ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y);
+		ctx.closePath();
+		ctx.fillStyle = fillColor;
+		ctx.fill();
+		ctx.strokeStyle = strokeColor;
+		ctx.lineWidth = 0.5;
+		ctx.stroke();
+	}
+}
+
+// ── Run ──
+
+var resultColors = {
+	subtract: { fill: '#ff884444', stroke: '#ff884488' },
+	union:    { fill: '#44ff8844', stroke: '#44ff8888' },
+	intersect:{ fill: '#ffcc4444', stroke: '#ffcc4488' }
+};
+
+window.run = function(sceneId, op) {
+	var scene = scenes[sceneId];
+	var canvas = document.getElementById('c-' + sceneId);
+	var ctx = canvas.getContext('2d');
+	var info = document.getElementById('info-' + sceneId);
+	var cx = canvas.width / 2;
+	var cy = canvas.height / 2;
+
+	// Update buttons
+	var sec = document.getElementById('sec-' + sceneId);
+	sec.querySelectorAll('button').forEach(function(b) { b.classList.remove('active', 'active-orange'); });
+	var btns = sec.querySelectorAll('button');
+	for (var i = 0; i < btns.length; i++) {
+		if (btns[i].textContent.toLowerCase() === op || btns[i].textContent === 'Inputs' && op === 'input') {
+			btns[i].classList.add(scene.closed ? 'active' : 'active-orange');
+		}
+	}
+
+	ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+	var tilt = scene.tilt || 0.3;
+
+	if (op === 'input') {
+		drawSoup(ctx, scene.a, scene.colorA, 0.7, scene.scale, cx, cy, tilt);
+		drawSoup(ctx, scene.b, scene.colorB, 0.7, scene.scale, cx, cy, tilt);
+		info.textContent = scene.labelA + ': ' + scene.a.length + ' tris | ' +
+			scene.labelB + ': ' + scene.b.length + ' tris' +
+			(scene.closed ? '' : ' (open surfaces)');
+		return;
+	}
+
+	var t0 = performance.now();
+	var result;
+	try {
+		result = boolean(scene.a, scene.b, op);
+	} catch (e) {
+		info.textContent = op + ': error — ' + e.message;
+		drawSoup(ctx, scene.a, scene.colorA, 0.3, scene.scale, cx, cy, tilt);
+		drawSoup(ctx, scene.b, scene.colorB, 0.3, scene.scale, cx, cy, tilt);
+		return;
+	}
+	var dt = (performance.now() - t0).toFixed(1);
+
+	if (!result || !result.soup || result.soup.length === 0) {
+		info.textContent = op + ': no result (' + dt + ' ms)';
+		drawSoup(ctx, scene.a, '#333', 0.3, scene.scale, cx, cy, tilt);
+		drawSoup(ctx, scene.b, '#333', 0.3, scene.scale, cx, cy, tilt);
+		return;
+	}
+
+	var rc = resultColors[op];
+	drawFilled(ctx, result.soup, rc.fill, rc.stroke, scene.scale, cx, cy, tilt);
+
+	// Stats
+	var openEdges = '?';
+	try {
+		var welded = weldVertices(result.soup, 0.0001);
+		var clean = weldedToSoup(welded.triangles);
+		var stats = countOpenEdges(clean);
+		openEdges = stats.openEdges;
+	} catch(e) { /* skip */ }
+
+	info.textContent = op + ': ' + result.soup.length + ' tris, ' +
+		(result.points ? result.points.length + ' verts, ' : '') +
+		'open edges: ' + openEdges +
+		' — ' + dt + ' ms';
+};
+
+// Auto-show inputs on load
+window.run('cubes', 'input');
+window.run('offset', 'input');
+window.run('flat', 'input');
+window.run('pit', 'input');
+window.run('wavy', 'input');
+</script>
+</body>
+</html>

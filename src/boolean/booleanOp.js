@@ -23,6 +23,12 @@ import { deduplicateSeamVertices } from "../repair/deduplicateVertices.js";
 import { weldVertices, weldedToSoup } from "../repair/weldVertices.js";
 import { ensureZUpNormals } from "../normals/alignNormals.js";
 import { vKey } from "../util/math.js";
+import { resolveTJunctions } from "../repair/resolveTJunctions.js";
+import { weldBoundaryVertices } from "../repair/weldBoundary.js";
+import { fillOpenEdgeLoops } from "../repair/fillOpenLoops.js";
+import { findConnectedComponents } from "../util/connectedComponents.js";
+import { forceCloseIndexedMesh } from "../repair/forceClose.js";
+
 
 /**
  * Propagate consistent winding order across a triangle mesh via BFS.
@@ -173,29 +179,17 @@ function flipSoup(tris) {
 }
 
 /**
- * Perform a boolean operation on two triangle meshes.
+ * Split two meshes into inside/outside groups without combining them.
  *
- * Algorithm:
- *   1. Find tagged intersection segments between soupA and soupB
- *   2. Build crossed triangle sets from segment tags
- *   3. Build spatial grids for both meshes
- *   4. Classify via flood fill
- *   5. Split straddling triangles and classify sub-triangles
- *   6. Deduplicate seam vertices
- *   7. Propagate normals for consistent winding
- *   8. Combine groups based on operation:
- *      - "subtract": A_outside + B_inside (B_inside normals flipped)
- *      - "union": A_outside + B_outside
- *      - "intersect": A_inside + B_inside
- *   9. Return welded result
+ * This is the "split-and-pick" workflow: compute 4 groups
+ * (A-inside-B, A-outside-B, B-inside-A, B-outside-A), then the caller
+ * decides which groups to keep. Mirrors Kirra's computeSplits pattern.
  *
- * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soupA - First mesh triangle soup
- * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soupB - Second mesh triangle soup
- * @param {"subtract"|"union"|"intersect"} operation - Boolean operation to perform
- * @returns {{ soup: Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>, points: Array<{x,y,z}>, triangles: Array<{ vertices: [{x,y,z},{x,y,z},{x,y,z}] }> }|null}
- *          Result mesh as soup and welded indexed form, or null if inputs are empty
+ * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soupA - First mesh
+ * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soupB - Second mesh
+ * @returns {{ groups: { aInside: Array, aOutside: Array, bInside: Array, bOutside: Array }, segments: Array }|null}
  */
-export function boolean(soupA, soupB, operation) {
+export function splitMeshPair(soupA, soupB) {
 	if (!soupA || !soupB || soupA.length === 0 || soupB.length === 0) {
 		return null;
 	}
@@ -204,19 +198,15 @@ export function boolean(soupA, soupB, operation) {
 	var taggedSegments = intersectMeshPairTagged(soupA, soupB);
 
 	if (taggedSegments.length === 0) {
-		// No intersection -- return appropriate result based on operation
-		var resultSoup;
-		if (operation === "union") {
-			resultSoup = soupA.concat(soupB);
-		} else if (operation === "intersect") {
-			// No intersection means empty result
-			return null;
-		} else {
-			// subtract: A minus nothing = A
-			resultSoup = soupA.slice();
-		}
-		var welded = weldVertices(resultSoup, 0);
-		return { soup: resultSoup, points: welded.points, triangles: welded.triangles };
+		return {
+			groups: {
+				aInside: [],
+				aOutside: soupA.slice(),
+				bInside: [],
+				bOutside: soupB.slice()
+			},
+			segments: []
+		};
 	}
 
 	// Step 2) Build crossed triangle sets from tagged segments
@@ -236,8 +226,6 @@ export function boolean(soupA, soupB, operation) {
 	var cellSizeA = Math.max(avgEdgeA * 2, 0.1);
 	var cellSizeB = Math.max(avgEdgeB * 2, 0.1);
 
-	// Build 3 spatial grids per surface for multi-axis ray-cast classification:
-	//   XY grid (Z-ray), YZ grid (X-ray), XZ grid (Y-ray)
 	var gridsA = {
 		xy: { grid: buildSpatialGrid(soupA, cellSizeA), cellSize: cellSizeA },
 		yz: { grid: buildSpatialGridOnAxes(soupA, cellSizeA, function (v) { return v.y; }, function (v) { return v.z; }), cellSize: cellSizeA },
@@ -249,13 +237,21 @@ export function boolean(soupA, soupB, operation) {
 		xz: { grid: buildSpatialGridOnAxes(soupB, cellSizeB, function (v) { return v.x; }, function (v) { return v.z; }), cellSize: cellSizeB }
 	};
 
-	// Step 4) Flood-fill classify: each connected non-crossed region gets one seed
+	// Step 4) Flood-fill classify
 	var classA = classifyByFloodFill(soupA, crossedSetA, soupB, gridsB);
 	var classB = classifyByFloodFill(soupB, crossedSetB, soupA, gridsA);
 
-	// Step 5) Split straddling triangles and classify sub-triangles
-	var groupsA = splitStraddlingAndClassify(soupA, classA, crossedSetA, soupB, gridsB);
-	var groupsB = splitStraddlingAndClassify(soupB, classB, crossedSetB, soupA, gridsA);
+	// Step 5) Split straddling triangles and classify sub-triangles.
+	// The half-space test inside calibrates its normal convention by sampling
+	// a few points near the intersection and ray-casting them.
+	var groupsA = splitStraddlingAndClassify(soupA, classA, crossedSetA, soupB, gridsB, "idxB");
+	var groupsB = splitStraddlingAndClassify(soupB, classB, crossedSetB, soupA, gridsA, "idxA");
+
+	// Step 5b) Fix non-manifold edges within each split group
+	if (groupsA.inside.length > 0) groupsA.inside = fixMergedNonManifold(groupsA.inside);
+	if (groupsA.outside.length > 0) groupsA.outside = fixMergedNonManifold(groupsA.outside);
+	if (groupsB.inside.length > 0) groupsB.inside = fixMergedNonManifold(groupsB.inside);
+	if (groupsB.outside.length > 0) groupsB.outside = fixMergedNonManifold(groupsB.outside);
 
 	// Step 6) Deduplicate seam vertices
 	if (groupsA.inside.length > 0) groupsA.inside = deduplicateSeamVertices(groupsA.inside, 1e-4);
@@ -269,33 +265,49 @@ export function boolean(soupA, soupB, operation) {
 	if (groupsB.inside.length > 0) groupsB.inside = propagateNormals(groupsB.inside);
 	if (groupsB.outside.length > 0) groupsB.outside = propagateNormals(groupsB.outside);
 
-	// Step 8) Combine groups based on operation
+	return {
+		groups: {
+			aInside: groupsA.inside,
+			aOutside: groupsA.outside,
+			bInside: groupsB.inside,
+			bOutside: groupsB.outside
+		},
+		segments: taggedSegments
+	};
+}
+
+/**
+ * Merge split groups into a single result soup based on the operation type,
+ * then weld and return the combined mesh.
+ *
+ * @param {{ aInside: Array, aOutside: Array, bInside: Array, bOutside: Array }} groups
+ * @param {"subtract"|"union"|"intersect"} operation
+ * @returns {{ soup: Array, points: Array, triangles: Array }|null}
+ */
+export function mergeSplitGroups(groups, operation) {
 	var combined = [];
 
 	if (operation === "subtract") {
-		// A_outside + B_inside (with B_inside normals flipped)
-		for (var ai = 0; ai < groupsA.outside.length; ai++) {
-			combined.push(groupsA.outside[ai]);
+		for (var ai = 0; ai < groups.aOutside.length; ai++) {
+			combined.push(groups.aOutside[ai]);
 		}
-		var flippedBInside = flipSoup(groupsB.inside);
+		var flippedBInside = flipSoup(groups.bInside);
 		for (var bi = 0; bi < flippedBInside.length; bi++) {
 			combined.push(flippedBInside[bi]);
 		}
 	} else if (operation === "union") {
-		// A_outside + B_outside
-		for (var ao = 0; ao < groupsA.outside.length; ao++) {
-			combined.push(groupsA.outside[ao]);
+		for (var ao = 0; ao < groups.aOutside.length; ao++) {
+			combined.push(groups.aOutside[ao]);
 		}
-		for (var bo = 0; bo < groupsB.outside.length; bo++) {
-			combined.push(groupsB.outside[bo]);
+		for (var bo = 0; bo < groups.bOutside.length; bo++) {
+			combined.push(groups.bOutside[bo]);
 		}
 	} else if (operation === "intersect") {
-		// A_inside + B_inside
-		for (var aii = 0; aii < groupsA.inside.length; aii++) {
-			combined.push(groupsA.inside[aii]);
+		for (var aii = 0; aii < groups.aInside.length; aii++) {
+			combined.push(groups.aInside[aii]);
 		}
-		for (var bii = 0; bii < groupsB.inside.length; bii++) {
-			combined.push(groupsB.inside[bii]);
+		for (var bii = 0; bii < groups.bInside.length; bii++) {
+			combined.push(groups.bInside[bii]);
 		}
 	} else {
 		return null;
@@ -305,12 +317,439 @@ export function boolean(soupA, soupB, operation) {
 		return null;
 	}
 
-	// Step 9) Final weld and return
-	var finalWelded = weldVertices(combined, 1e-4);
+	// Step: Fix non-manifold edges in the combined mesh by removing the
+	// triangle that causes the least damage (fewest new open edges).
+	combined = fixMergedNonManifold(combined);
 
+	var finalWelded = weldVertices(combined, 1e-4);
 	return {
 		soup: combined,
 		points: finalWelded.points,
 		triangles: finalWelded.triangles
 	};
+}
+
+/**
+ * Merge user-selected split groups into a single result.
+ *
+ * Each group can be independently included or excluded, and optionally
+ * flipped (normals reversed). This is the "super flexible" counterpart
+ * to mergeSplitGroups which hard-codes the classic boolean recipes.
+ *
+ * Selection object keys:
+ *   aInside   {boolean|"flip"}  Include A-inside-B triangles; "flip" reverses normals
+ *   aOutside  {boolean|"flip"}  Include A-outside-B triangles
+ *   bInside   {boolean|"flip"}  Include B-inside-A triangles
+ *   bOutside  {boolean|"flip"}  Include B-outside-A triangles
+ *
+ * Example — "chop top off a cylinder" (keep only A-outside-B):
+ *   selectSplits(groups, { aOutside: true })
+ *
+ * Example — "knife through paper, keep both sides":
+ *   selectSplits(groups, { aInside: true, aOutside: true })
+ *
+ * Example — classic subtract (A - B):
+ *   selectSplits(groups, { aOutside: true, bInside: "flip" })
+ *
+ * @param {{ aInside: Array, aOutside: Array, bInside: Array, bOutside: Array }} groups
+ * @param {{ aInside?: boolean|"flip", aOutside?: boolean|"flip", bInside?: boolean|"flip", bOutside?: boolean|"flip" }} selection
+ * @returns {{ soup: Array, points: Array, triangles: Array }|null}
+ */
+export function selectSplits(groups, selection) {
+	if (!groups || !selection) return null;
+	var sel = selection;
+	var combined = [];
+
+	// Step 1) Collect selected groups, flipping where requested
+	var groupNames = ["aInside", "aOutside", "bInside", "bOutside"];
+	for (var g = 0; g < groupNames.length; g++) {
+		var gName = groupNames[g];
+		var flag = sel[gName];
+		if (!flag) continue;
+		var src = groups[gName];
+		if (!src || src.length === 0) continue;
+
+		if (flag === "flip") {
+			var flipped = flipSoup(src);
+			for (var fi = 0; fi < flipped.length; fi++) combined.push(flipped[fi]);
+		} else {
+			for (var si = 0; si < src.length; si++) combined.push(src[si]);
+		}
+	}
+
+	if (combined.length === 0) return null;
+
+	// Step 2) Fix non-manifold edges
+	combined = fixMergedNonManifold(combined);
+
+	// Step 3) Weld and return
+	var finalWelded = weldVertices(combined, 1e-4);
+	return {
+		soup: combined,
+		points: finalWelded.points,
+		triangles: finalWelded.triangles
+	};
+}
+
+/**
+ * Decompose the 4 binary split groups into individual connected components.
+ *
+ * After splitMeshPair returns {aInside, aOutside, bInside, bOutside}, this
+ * function finds the connected components within each group and returns a
+ * flat array of component objects. For the "convoluted block crossing a
+ * terrain twice" case this produces 9 components: 4 terrain pieces + 5
+ * convoluted pieces.
+ *
+ * Each component carries metadata:
+ *   mesh       "A" | "B"             — which input mesh it came from
+ *   side       "inside" | "outside"  — relative to the other mesh
+ *   index      number                — component index within its group
+ *   soup       TriangleSoup          — the triangles
+ *   triCount   number                — soup.length
+ *
+ * @param {{ aInside: Array, aOutside: Array, bInside: Array, bOutside: Array }} groups
+ * @returns {Array<{ mesh: string, side: string, index: number, soup: Array, triCount: number }>}
+ */
+export function splitToComponents(groups) {
+	if (!groups) return [];
+	var result = [];
+
+	var groupDefs = [
+		{ key: "aInside",  mesh: "A", side: "inside"  },
+		{ key: "aOutside", mesh: "A", side: "outside" },
+		{ key: "bInside",  mesh: "B", side: "inside"  },
+		{ key: "bOutside", mesh: "B", side: "outside" }
+	];
+
+	for (var g = 0; g < groupDefs.length; g++) {
+		var def = groupDefs[g];
+		var soup = groups[def.key];
+		if (!soup || soup.length === 0) continue;
+
+		var components = findConnectedComponents(soup);
+		for (var c = 0; c < components.length; c++) {
+			result.push({
+				mesh: def.mesh,
+				side: def.side,
+				index: c,
+				soup: components[c],
+				triCount: components[c].length
+			});
+		}
+	}
+
+	return result;
+}
+
+/**
+ * Merge tiny disconnected fragments into their nearest same-group sibling.
+ *
+ * After splitToComponents, classification noise can produce small stray
+ * components within a binary group (e.g. A-inside).  This function absorbs
+ * any component whose triangle count is below `threshold` into the nearest
+ * larger component of the same (mesh, side) group, measured by centroid
+ * Euclidean distance.
+ *
+ * @param {Array<{ mesh: string, side: string, index: number, soup: Array, triCount: number }>} comps
+ * @param {number} [threshold=50] - max tri count to be considered "small"
+ * @returns {Array<{ mesh: string, side: string, index: number, soup: Array, triCount: number }>}
+ */
+export function mergeSmallComponents(comps, threshold) {
+	if (!comps || comps.length === 0) return comps;
+	if (threshold === undefined || threshold === null) threshold = 50;
+
+	// Step 1) Compute centroid for each component
+	for (var ci = 0; ci < comps.length; ci++) {
+		var cp = comps[ci];
+		var sx = 0, sy = 0, sz = 0, n = 0;
+		for (var ti = 0; ti < cp.soup.length; ti++) {
+			var t = cp.soup[ti];
+			sx += t.v0.x + t.v1.x + t.v2.x;
+			sy += t.v0.y + t.v1.y + t.v2.y;
+			sz += t.v0.z + t.v1.z + t.v2.z;
+			n += 3;
+		}
+		cp._cx = n > 0 ? sx / n : 0;
+		cp._cy = n > 0 ? sy / n : 0;
+		cp._cz = n > 0 ? sz / n : 0;
+	}
+
+	// Step 2) Group by binary key (mesh + side)
+	var groups = {};
+	for (var gi = 0; gi < comps.length; gi++) {
+		var gk = comps[gi].mesh + "|" + comps[gi].side;
+		if (!groups[gk]) groups[gk] = [];
+		groups[gk].push(gi);
+	}
+
+	// Step 3) For each group, absorb small components into nearest large sibling
+	var absorbed = {};
+	for (var gkey in groups) {
+		var members = groups[gkey];
+		var largeIdxs = [];
+		var smallIdxs = [];
+		for (var mi = 0; mi < members.length; mi++) {
+			if (comps[members[mi]].triCount > threshold) {
+				largeIdxs.push(members[mi]);
+			} else {
+				smallIdxs.push(members[mi]);
+			}
+		}
+		if (largeIdxs.length === 0 || smallIdxs.length === 0) continue;
+
+		for (var si = 0; si < smallIdxs.length; si++) {
+			var sc = comps[smallIdxs[si]];
+			var bestDist = Infinity;
+			var bestIdx = largeIdxs[0];
+			for (var li = 0; li < largeIdxs.length; li++) {
+				var lc = comps[largeIdxs[li]];
+				var dx = sc._cx - lc._cx;
+				var dy = sc._cy - lc._cy;
+				var dz = sc._cz - lc._cz;
+				var d2 = dx * dx + dy * dy + dz * dz;
+				if (d2 < bestDist) { bestDist = d2; bestIdx = largeIdxs[li]; }
+			}
+			// Absorb: append small soup into the large component
+			var target = comps[bestIdx];
+			for (var ai = 0; ai < sc.soup.length; ai++) {
+				target.soup.push(sc.soup[ai]);
+			}
+			target.triCount += sc.triCount;
+			absorbed[smallIdxs[si]] = true;
+		}
+	}
+
+	// Step 4) Filter out absorbed components and re-index
+	var out = [];
+	var prevKey = "";
+	var prevIdx = 0;
+	for (var oi = 0; oi < comps.length; oi++) {
+		if (absorbed[oi]) continue;
+		var oc = comps[oi];
+		var ok = oc.mesh + "|" + oc.side;
+		if (ok !== prevKey) { prevIdx = 0; prevKey = ok; }
+		oc.index = prevIdx++;
+		delete oc._cx;
+		delete oc._cy;
+		delete oc._cz;
+		out.push(oc);
+	}
+	return out;
+}
+
+/**
+ * Merge an arbitrary list of component soups into a single welded result.
+ *
+ * Works with the output of splitToComponents — pass in the components the
+ * user has selected (with optional flip flags).
+ *
+ * @param {Array<{ soup: Array, flip?: boolean }>} picks
+ * @returns {{ soup: Array, points: Array, triangles: Array }|null}
+ */
+export function mergeComponents(picks) {
+	if (!picks || picks.length === 0) return null;
+	var combined = [];
+
+	for (var i = 0; i < picks.length; i++) {
+		var src = picks[i].soup;
+		if (!src || src.length === 0) continue;
+
+		if (picks[i].flip) {
+			var flipped = flipSoup(src);
+			for (var fi = 0; fi < flipped.length; fi++) combined.push(flipped[fi]);
+		} else {
+			for (var si = 0; si < src.length; si++) combined.push(src[si]);
+		}
+	}
+
+	if (combined.length === 0) return null;
+	combined = fixMergedNonManifold(combined);
+	var finalWelded = weldVertices(combined, 1e-4);
+	return {
+		soup: combined,
+		points: finalWelded.points,
+		triangles: finalWelded.triangles
+	};
+}
+
+/**
+ * Detect non-manifold edges in a merged triangle soup and remove offending
+ * triangles. For each non-manifold edge (shared by 3+ tris), pick the
+ * triangle whose removal results in the best net open-edge change.
+ *
+ * @param {Array} soup - combined triangle soup (modified in-place)
+ * @returns {Array} cleaned soup
+ */
+function fixMergedNonManifold(soup) {
+	var PREC = 6;
+	function vk2(v) {
+		return v.x.toFixed(PREC) + "," + v.y.toFixed(PREC) + "," + v.z.toFixed(PREC);
+	}
+	function ek2(a, b) { return a < b ? a + "|" + b : b + "|" + a; }
+
+	var maxPasses = 5;
+	for (var pass = 0; pass < maxPasses; pass++) {
+		// Step 1) Build edge count map
+		var edgeCnt = {};
+		var triEdges = [];  // triEdges[i] = [ek0, ek1, ek2]
+		for (var i = 0; i < soup.length; i++) {
+			var t = soup[i];
+			var k0 = vk2(t.v0), k1 = vk2(t.v1), k2 = vk2(t.v2);
+			var e0 = ek2(k0, k1), e1 = ek2(k1, k2), e2 = ek2(k2, k0);
+			triEdges.push([e0, e1, e2]);
+			if (!edgeCnt[e0]) edgeCnt[e0] = [];
+			edgeCnt[e0].push(i);
+			if (!edgeCnt[e1]) edgeCnt[e1] = [];
+			edgeCnt[e1].push(i);
+			if (!edgeCnt[e2]) edgeCnt[e2] = [];
+			edgeCnt[e2].push(i);
+		}
+
+		// Step 2) Find all non-manifold edges
+		var nmEdges = [];
+		for (var ek3 in edgeCnt) {
+			if (edgeCnt[ek3].length > 2) nmEdges.push(ek3);
+		}
+		if (nmEdges.length === 0) break;
+
+		// Step 3) For each non-manifold edge, evaluate removing each candidate
+		var toRemove = {};
+		for (var ni = 0; ni < nmEdges.length; ni++) {
+			var nmTriIdxs = edgeCnt[nmEdges[ni]];
+			var bestIdx = -1;
+			var bestNet = Infinity;
+
+			for (var ci = 0; ci < nmTriIdxs.length; ci++) {
+				var ti = nmTriIdxs[ci];
+				if (toRemove[ti]) continue;
+				// Compute net open-edge change if we remove tri ti:
+				// For each of its 3 edges:
+				//   count==1 (open) -> 0: net -1 (lose an open edge)
+				//   count==2 (manifold) -> 1: net +1 (gain an open edge)
+				//   count>=3 (non-manifold) -> count-1: net 0
+				var net = 0;
+				var edges = triEdges[ti];
+				for (var ei = 0; ei < 3; ei++) {
+					var cnt = edgeCnt[edges[ei]].length;
+					if (cnt === 1) net -= 1;
+					else if (cnt === 2) net += 1;
+					// count >= 3: no change in open edges
+				}
+				if (net < bestNet) {
+					bestNet = net;
+					bestIdx = ti;
+				}
+			}
+
+			// Only remove if net change <= 0 (doesn't worsen open edges)
+			if (bestIdx >= 0 && bestNet <= 0) {
+				toRemove[bestIdx] = true;
+			}
+		}
+
+		// Step 4) Remove marked triangles
+		var removeList = [];
+		for (var rk in toRemove) removeList.push(Number(rk));
+		if (removeList.length === 0) break;
+		removeList.sort(function(a, b) { return b - a; });
+		for (var ri = 0; ri < removeList.length; ri++) {
+			soup.splice(removeList[ri], 1);
+		}
+	}
+
+	return soup;
+}
+
+/**
+ * Perform a boolean operation on two triangle meshes.
+ *
+ * Internally calls splitMeshPair() to compute the 4 split groups,
+ * then mergeSplitGroups() to combine based on the operation.
+ *
+ * Options (all optional):
+ *   preRepair   {boolean}  Resolve T-junctions and weld boundary vertices
+ *                          on both inputs before splitting. Default: false.
+ *   fillGaps    {boolean}  After the boolean, fill closed open-edge loops
+ *                          with fan triangles (fillOpenEdgeLoops). Default: false.
+ *   forceClose  {boolean}  After the boolean, force-close using spatial-proximity
+ *                          indexed fill (forceCloseIndexedMesh). Default: false.
+ *   tolerance   {number}   Vertex snapping tolerance for pre-repair / fill.
+ *                          Default: estimateAvgEdge * 0.01.
+ *   tjunctionPasses {number} Max T-junction resolution passes. Default: 3.
+ *
+ * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soupA
+ * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soupB
+ * @param {"subtract"|"union"|"intersect"} operation
+ * @param {Object} [options]
+ * @returns {{ soup: Array, points: Array, triangles: Array }|null}
+ */
+export function boolean(soupA, soupB, operation, options) {
+	if (!soupA || !soupB || soupA.length === 0 || soupB.length === 0) {
+		return null;
+	}
+
+	var opts = options || {};
+
+	// Step 1) Optional pre-repair: resolve T-junctions + weld boundary
+	if (opts.preRepair) {
+		var tolA = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupA) * 0.01;
+		var tolB = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupB) * 0.01;
+		var passes = opts.tjunctionPasses !== undefined ? opts.tjunctionPasses : 3;
+		soupA = resolveTJunctions(soupA, tolA, passes);
+		soupA = weldBoundaryVertices(soupA, tolA);
+		soupB = resolveTJunctions(soupB, tolB, passes);
+		soupB = weldBoundaryVertices(soupB, tolB);
+	}
+
+	// Step 2) Split meshes into inside/outside groups
+	var split = splitMeshPair(soupA, soupB);
+	if (!split) return null;
+
+	// Step 3) Handle no-intersection case
+	if (split.segments.length === 0) {
+		var resultSoup;
+		if (operation === "union") {
+			resultSoup = soupA.concat(soupB);
+		} else if (operation === "intersect") {
+			return null;
+		} else {
+			resultSoup = soupA.slice();
+		}
+		var welded = weldVertices(resultSoup, 0);
+		return { soup: resultSoup, points: welded.points, triangles: welded.triangles };
+	}
+
+	// Step 4) Merge groups based on operation
+	var result = mergeSplitGroups(split.groups, operation);
+	if (!result) return null;
+
+	// Step 5) Optional post-repair: fill open-edge loops with fan triangles
+	if (opts.fillGaps && result.soup) {
+		var fillTol = opts.tolerance !== undefined ? opts.tolerance : 1e-6;
+		result.soup = fillOpenEdgeLoops(result.soup, fillTol);
+		var rw1 = weldVertices(result.soup, 1e-4);
+		result.points = rw1.points;
+		result.triangles = rw1.triangles;
+	}
+
+	// Step 6) Optional post-repair: force-close via indexed spatial fill
+	if (opts.forceClose && result.soup) {
+		var w = weldVertices(result.soup, 0.0001);
+		var closed = forceCloseIndexedMesh(w.points, w.triangles);
+		var newSoup = [];
+		for (var ci = 0; ci < closed.triangles.length; ci++) {
+			var cv = closed.triangles[ci].vertices;
+			newSoup.push({
+				v0: { x: cv[0].x, y: cv[0].y, z: cv[0].z },
+				v1: { x: cv[1].x, y: cv[1].y, z: cv[1].z },
+				v2: { x: cv[2].x, y: cv[2].y, z: cv[2].z }
+			});
+		}
+		result.soup = newSoup;
+		var rw2 = weldVertices(result.soup, 1e-4);
+		result.points = rw2.points;
+		result.triangles = rw2.triangles;
+	}
+
+	return result;
 }

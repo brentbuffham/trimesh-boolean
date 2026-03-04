@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
 	boolean,
+	splitMeshPair,
+	mergeSplitGroups,
+	repairMesh,
 	countOpenEdges,
 	weldVertices,
 	weldedToSoup,
@@ -125,11 +128,84 @@ describe("boolean result quality", function () {
 
 		var result = boolean(cubeA, cubeB, "intersect");
 		if (result) {
-			// Intersection result exists and has reasonable triangle count
-			// (re-triangulation at intersection boundaries may create more
-			// sub-triangles than the original inputs)
 			expect(result.soup.length).toBeGreaterThan(0);
 			expect(result.soup.length).toBeLessThan((cubeA.length + cubeB.length) * 3);
 		}
+	});
+});
+
+describe("splitMeshPair", function () {
+	it("returns 4 groups for overlapping cubes", function () {
+		var cubeA = createCube(0, 0, 0, 2);
+		var cubeB = createCube(1, 0, 0, 2);
+
+		var split = splitMeshPair(cubeA, cubeB);
+		expect(split).not.toBeNull();
+		expect(split.groups).toBeDefined();
+		expect(split.groups.aInside).toBeDefined();
+		expect(split.groups.aOutside).toBeDefined();
+		expect(split.groups.bInside).toBeDefined();
+		expect(split.groups.bOutside).toBeDefined();
+		expect(split.segments.length).toBeGreaterThan(0);
+
+		// All 4 groups should have triangles since cubes overlap partially
+		expect(split.groups.aInside.length).toBeGreaterThan(0);
+		expect(split.groups.aOutside.length).toBeGreaterThan(0);
+		expect(split.groups.bInside.length).toBeGreaterThan(0);
+		expect(split.groups.bOutside.length).toBeGreaterThan(0);
+	});
+
+	it("returns null for null inputs", function () {
+		var result = splitMeshPair(null, null);
+		expect(result).toBeNull();
+	});
+
+	it("returns empty inside groups when meshes do not intersect", function () {
+		var cubeA = createCube(0, 0, 0, 1);
+		var cubeB = createCube(10, 10, 10, 1);
+
+		var split = splitMeshPair(cubeA, cubeB);
+		expect(split).not.toBeNull();
+		expect(split.segments.length).toBe(0);
+		expect(split.groups.aInside.length).toBe(0);
+		expect(split.groups.bInside.length).toBe(0);
+		expect(split.groups.aOutside.length).toBe(cubeA.length);
+		expect(split.groups.bOutside.length).toBe(cubeB.length);
+	});
+
+	it("mergeSplitGroups produces same result as boolean", function () {
+		var cubeA = createCube(0, 0, 0, 2);
+		var cubeB = createCube(1, 0, 0, 2);
+
+		var split = splitMeshPair(cubeA, cubeB);
+		var fromSplit = mergeSplitGroups(split.groups, "subtract");
+		var fromBoolean = boolean(cubeA, cubeB, "subtract");
+
+		expect(fromSplit).not.toBeNull();
+		expect(fromBoolean).not.toBeNull();
+		expect(fromSplit.soup.length).toBe(fromBoolean.soup.length);
+	});
+});
+
+describe("repairMesh enhanced config", function () {
+	it("accepts sliverRatio config", async function () {
+		var cube = createCube(0, 0, 0, 2);
+		var result = await repairMesh(cube, { sliverRatio: 0.05 });
+		expect(result).toBeDefined();
+		expect(result.soup.length).toBeGreaterThan(0);
+	});
+
+	it("accepts cleanCrossings config", async function () {
+		var cube = createCube(0, 0, 0, 2);
+		var result = await repairMesh(cube, { cleanCrossings: true });
+		expect(result).toBeDefined();
+		expect(result.soup.length).toBeGreaterThan(0);
+	});
+
+	it("accepts removeOverlapping config", async function () {
+		var cube = createCube(0, 0, 0, 2);
+		var result = await repairMesh(cube, { removeOverlapping: true, overlapTolerance: 0.001 });
+		expect(result).toBeDefined();
+		expect(result.soup.length).toBeGreaterThan(0);
 	});
 });

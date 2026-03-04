@@ -17,6 +17,7 @@ import { removeDegenerateTriangles } from "./removeDegenerates.js";
 import { stitchByProximity } from "./stitchEdges.js";
 import { capBoundaryLoopsSequential, extractBoundaryLoops } from "./boundaryLoops.js";
 import { cleanCrossingTriangles } from "./cleanCrossing.js";
+import { removeOverlappingTriangles } from "./removeOverlapping.js";
 import { forceCloseIndexedMesh } from "./forceClose.js";
 
 /**
@@ -29,6 +30,10 @@ import { forceCloseIndexedMesh } from "./forceClose.js";
  * @param {number}  [config.snapTolerance=0] - Weld tolerance in metres
  * @param {number}  [config.stitchTolerance=1.0] - Stitch tolerance
  * @param {boolean} [config.removeDegenerate=true] - Remove degenerate/sliver triangles
+ * @param {number}  [config.sliverRatio=0.01] - Sliver aspect ratio threshold
+ * @param {boolean} [config.cleanCrossings=true] - Remove over-shared edge duplicates
+ * @param {boolean} [config.removeOverlapping=false] - Remove anti-parallel internal wall triangles
+ * @param {number}  [config.overlapTolerance=1e-4] - Overlap detection tolerance
  * @param {Function} [onProgress] - Called with progress string, e.g. onProgress("Welding...")
  * @returns {Promise<{ points: Array<{x,y,z}>, triangles: Array<{vertices: Array}>, soup: Array }>}
  */
@@ -38,6 +43,10 @@ export async function repairMesh(soup, config, onProgress) {
 	var snapTol = config.snapTolerance || 0;
 	var stitchTol = config.stitchTolerance || 1.0;
 	var removeDegenerate = config.removeDegenerate !== false;
+	var sliverRatio = config.sliverRatio !== undefined ? config.sliverRatio : 0.01;
+	var doCleanCrossings = config.cleanCrossings !== false;
+	var doRemoveOverlapping = !!config.removeOverlapping;
+	var overlapTol = config.overlapTolerance !== undefined ? config.overlapTolerance : 1e-4;
 
 	function progress(msg) {
 		if (typeof onProgress === "function") onProgress(msg);
@@ -68,7 +77,22 @@ export async function repairMesh(soup, config, onProgress) {
 	if (removeDegenerate) {
 		progress("Removing degenerate triangles...");
 		await yieldUI();
-		soup = removeDegenerateTriangles(soup, 1e-6, 0.01);
+		soup = removeDegenerateTriangles(soup, 1e-6, sliverRatio);
+	}
+
+	// Step 3.5: Clean crossing and overlapping triangles
+	if (doCleanCrossings) {
+		var preCleanStats = countOpenEdges(soup);
+		if (preCleanStats.overShared > 0) {
+			progress("Cleaning crossing triangles...");
+			await yieldUI();
+			soup = cleanCrossingTriangles(soup);
+		}
+	}
+	if (doRemoveOverlapping) {
+		progress("Removing overlapping triangles...");
+		await yieldUI();
+		soup = removeOverlappingTriangles(soup, overlapTol);
 	}
 
 	// Step 4: Stitch + cap (if closeMode === "stitch")
@@ -103,15 +127,23 @@ export async function repairMesh(soup, config, onProgress) {
 		var postCapSoup = weldedToSoup(triangles);
 		var postCapChanged = false;
 
-		var postCapStats = countOpenEdges(postCapSoup);
-		if (postCapStats.overShared > 0) {
-			postCapSoup = cleanCrossingTriangles(postCapSoup);
-			postCapChanged = true;
+		if (doCleanCrossings) {
+			var postCapStats = countOpenEdges(postCapSoup);
+			if (postCapStats.overShared > 0) {
+				postCapSoup = cleanCrossingTriangles(postCapSoup);
+				postCapChanged = true;
+			}
+		}
+
+		if (doRemoveOverlapping) {
+			var preOverlapCount = postCapSoup.length;
+			postCapSoup = removeOverlappingTriangles(postCapSoup, overlapTol);
+			if (postCapSoup.length < preOverlapCount) postCapChanged = true;
 		}
 
 		if (removeDegenerate) {
 			var preDegenCount = postCapSoup.length;
-			postCapSoup = removeDegenerateTriangles(postCapSoup, 1e-6, 0.01);
+			postCapSoup = removeDegenerateTriangles(postCapSoup, 1e-6, sliverRatio);
 			if (postCapSoup.length < preDegenCount) postCapChanged = true;
 		}
 
