@@ -59,6 +59,15 @@ export { classifyPointMultiAxis, classifyByFloodFill } from "./boolean/classifyT
 export { retriangulateWithSteinerPoints, fanTriangulate } from "./boolean/splitTriangles.js";
 export { buildCurtainAndCap, generateClosingTriangles } from "./boolean/closeBoundary.js";
 
+// ── BMS Pipeline (Brent's Mega Soup) ──
+export { createVertexPool } from "./bms/bmsVertexPool.js";
+export { bmsIntersect } from "./bms/bmsIntersect.js";
+export { bmsSplit } from "./bms/bmsSplit.js";
+export { bmsChain } from "./bms/bmsChain.js";
+export { bmsClosePolylines } from "./bms/bmsClose.js";
+export { bmsClassify } from "./bms/bmsClassify.js";
+export { bmsBooleanOp } from "./bms/bmsBooleanOp.js";
+
 // ── Utilities ──
 export { dist3, distSq3, triangleArea3D, computeBounds, cross, lerpVert, vKey, edgeKey, countOpenEdges } from "./util/math.js";
 export { findConnectedComponents } from "./util/connectedComponents.js";

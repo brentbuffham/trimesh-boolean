@@ -104,6 +104,7 @@
 
 		<button id="btn-input" onclick="runOp('input')">Inputs</button>
 		<button id="btn-splits" onclick="runOp('splits')">Splits</button>
+		<button id="btn-bms-splits" onclick="runOp('bms-splits')" style="border-color:#39B54A;color:#39B54A">BMS Splits</button>
 		<button id="btn-subtract" onclick="runOp('subtract')">A &minus; B</button>
 		<button id="btn-subtract-inv" onclick="runOp('subtract-inv')">B &minus; A</button>
 		<button id="btn-union" onclick="runOp('union')">A &cup; B</button>
@@ -157,7 +158,8 @@ import {
 	intersectMeshPair, chainSegments, computeSignedVolume, compute3DSurfaceArea,
 	computeProjectedArea, estimateAvgEdge,
 	resolveTJunctions, weldBoundaryVertices,
-	fillOpenEdgeLoops, forceCloseIndexedMesh
+	fillOpenEdgeLoops, forceCloseIndexedMesh,
+	bmsBooleanOp
 } from '../src/index.js';
 
 // ── Load Kirra surfaces from pre-extracted JSON ──
@@ -839,6 +841,138 @@ window.runOp = function(op) {
 			splitLines.push('<br><span class="highlight">Fan Tris: ON</span> (each sub-triangle edge visible)');
 		}
 		statResult.innerHTML = splitLines.join('<br>');
+
+		if (!skipFit) fitCamera();
+		return;
+	}
+
+	// ── BMS Splits view: Pipeline C (Brent's Mega Soup) ──
+	if (op === 'bms-splits') {
+		var t0bms = performance.now();
+		var bmsResult;
+		try {
+			bmsResult = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
+		} catch(e) {
+			statResult.innerHTML = '<span class="highlight">BMS error: ' + e.message + '</span>';
+			console.error(e);
+			return;
+		}
+		var dtbms = (performance.now() - t0bms).toFixed(1);
+
+		if (!bmsResult) {
+			statResult.innerHTML = '<span class="highlight">No BMS result — meshes may not intersect</span>';
+			if (!skipFit) fitCamera();
+			return;
+		}
+
+		var bmsGrp = bmsResult.groups;
+		var bmsSplitColors = {
+			aInside:  0xE6192C,
+			aOutside: 0xF47920,
+			bInside:  0x4472C4,
+			bOutside: 0x00B7C2
+		};
+		var bmsSplitEdgeColors = {
+			aInside:  0x730C16,
+			aOutside: 0x7A3C10,
+			bInside:  0x223962,
+			bOutside: 0x005B61
+		};
+		var bmsGroupEntries = [
+			{ key: "aInside",  soup: bmsGrp.aInside,  label: "A inside B" },
+			{ key: "aOutside", soup: bmsGrp.aOutside, label: "A outside B" },
+			{ key: "bInside",  soup: bmsGrp.bInside,  label: "B inside A" },
+			{ key: "bOutside", soup: bmsGrp.bOutside, label: "B outside A" }
+		];
+
+		for (var bgi = 0; bgi < bmsGroupEntries.length; bgi++) {
+			var bge = bmsGroupEntries[bgi];
+			if (bge.soup.length === 0) continue;
+			var bopa = (showFanTris) ? 0.85 : 0.75;
+			var bgMesh = soupToThreeMesh(bge.soup, bmsSplitColors[bge.key], bopa);
+			bgMesh.material.wireframe = showWireframe;
+			resultGroup.add(bgMesh);
+
+			if (showEdges || showFanTris) {
+				var bedgeColor = showFanTris ? bmsSplitColors[bge.key] : bmsSplitEdgeColors[bge.key];
+				var bedgeOpa = showFanTris ? 0.9 : 0.4;
+				var bedgeObj = soupToEdges(bge.soup, bedgeColor);
+				bedgeObj.material.opacity = bedgeOpa;
+				resultGroup.add(bedgeObj);
+			}
+
+			if (showOpenEdges) {
+				var bopenG = soupToOpenEdgeLines(bge.soup, 0xff0000, container);
+				if (bopenG) resultGroup.add(bopenG);
+			}
+
+			if (showNonManifold) {
+				addNonManifoldOverlay(bge.soup, container, resultGroup);
+			}
+		}
+
+		// Render closed polylines as white fat lines
+		if (bmsResult.polylines && bmsResult.polylines.length > 0) {
+			var bfatMat = new LineMaterial({
+				color: 0xffffff, linewidth: 5,
+				worldUnits: false, dashed: false,
+				depthTest: false, transparent: true,
+				resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+			});
+			for (var bci = 0; bci < bmsResult.polylines.length; bci++) {
+				var bch = bmsResult.polylines[bci];
+				if (bch.length < 2) continue;
+				var bpts = [];
+				for (var bcp = 0; bcp < bch.length; bcp++) {
+					bpts.push(bch[bcp].x, bch[bcp].y, bch[bcp].z);
+				}
+				var bfg = new LineGeometry(); bfg.setPositions(bpts);
+				var bfl = new Line2(bfg, bfatMat); bfl.computeLineDistances();
+				bfl.renderOrder = 999;
+				resultGroup.add(bfl);
+			}
+		}
+
+		// Stats panel
+		var bmsLines = [];
+		bmsLines.push('<span class="highlight">BMS Pipeline</span> (' + dtbms + ' ms)');
+		bmsLines.push('Segments: <b>' + bmsResult.segments.length + '</b>');
+		bmsLines.push('Polylines: <b>' + (bmsResult.polylines ? bmsResult.polylines.length : 0) + '</b>');
+		if (bmsResult.pool) bmsLines.push('Pool vertices: <b>' + bmsResult.pool.size() + '</b>');
+		bmsLines.push('');
+		var blegendHtml = '';
+		for (var bli = 0; bli < bmsGroupEntries.length; bli++) {
+			var ble = bmsGroupEntries[bli];
+			var bhex = "#" + bmsSplitColors[ble.key].toString(16).padStart(6, "0");
+			var bopenInfo = '';
+			if (ble.soup.length > 0) {
+				try {
+					var bwl = weldVertices(ble.soup, 0.0001);
+					var bcl = weldedToSoup(bwl.triangles);
+					var bsl = countOpenEdges(bcl);
+					bopenInfo = ' | open: ' + bsl.openEdges;
+					if (bsl.overShared > 0) bopenInfo += ' | nm: ' + bsl.overShared;
+				} catch(e2) { /* skip */ }
+			}
+			blegendHtml += '<div class="split-legend">' +
+				'<span class="split-swatch" style="background:' + bhex + '"></span> ' +
+				'<span>' + ble.label + ': <b>' + ble.soup.length + '</b> tris' + bopenInfo + '</span></div>';
+		}
+		bmsLines.push(blegendHtml);
+		// Check polyline closure
+		var closedCount = 0;
+		if (bmsResult.polylines) {
+			for (var bpi = 0; bpi < bmsResult.polylines.length; bpi++) {
+				var bp = bmsResult.polylines[bpi];
+				if (bp.length >= 2) {
+					var first = bp[0], last = bp[bp.length - 1];
+					var dx = first.x - last.x, dy = first.y - last.y, dz = first.z - last.z;
+					if (Math.sqrt(dx*dx + dy*dy + dz*dz) < 0.001) closedCount++;
+				}
+			}
+			bmsLines.push('<br>Closed polylines: <b>' + closedCount + '/' + bmsResult.polylines.length + '</b>');
+		}
+		statResult.innerHTML = bmsLines.join('<br>');
 
 		if (!skipFit) fitCamera();
 		return;
