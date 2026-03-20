@@ -85,8 +85,11 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB) {
 
 	for (var si = 0; si < segments.length; si++) {
 		var seg = segments[si];
+		// Skip zero-length segments (pool dedup merged p0 and p1)
+		if (seg.p0 === seg.p1) continue;
 		var k0 = vKey(seg.p0);
 		var k1 = vKey(seg.p1);
+		if (k0 === k1) continue; // Same vKey — degenerate
 		var ek = edgeKey(k0, k1);
 		barrierEdges[ek] = true;
 		steinerVertKeys[k0] = true;
@@ -115,23 +118,6 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB) {
 
 	for (var ek3 in edgeToTris) {
 		if (barrierEdges[ek3]) continue;
-		// Also block edges where both endpoints are Steiner points AND
-		// both triangles sharing this edge are from the SAME mesh.
-		// This closes gaps in the barrier caused by CDT producing slightly
-		// different edges than the exact segment endpoints.
-		var ekParts = ek3.split("|");
-		if (ekParts.length === 2 && steinerVertKeys[ekParts[0]] && steinerVertKeys[ekParts[1]]) {
-			// Check if all tris on this edge are from the same mesh
-			var edgeTris = edgeToTris[ek3];
-			var allSameMesh = true;
-			if (edgeTris.length >= 2) {
-				var firstMesh = megaSoup[edgeTris[0]].mesh;
-				for (var eti = 1; eti < edgeTris.length; eti++) {
-					if (megaSoup[edgeTris[eti]].mesh !== firstMesh) { allSameMesh = false; break; }
-				}
-			}
-			if (allSameMesh) continue; // Block this edge — it's along the intersection within one mesh
-		}
 
 		var triList = edgeToTris[ek3];
 		for (var a = 0; a < triList.length; a++) {
@@ -216,8 +202,18 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB) {
 	for (var dbek in barrierEdges) {
 		if (edgeToTris[dbek]) barrierHit++; else barrierMiss++;
 	}
+	// Log missing barrier edges to diagnose
+	var missingBarriers = [];
+	for (var dbek2 in barrierEdges) {
+		if (!edgeToTris[dbek2]) missingBarriers.push(dbek2);
+	}
 	console.log("[BMS] Barrier edges: " + Object.keys(barrierEdges).length +
 		" total, " + barrierHit + " found in soup edges, " + barrierMiss + " missing");
+	if (missingBarriers.length > 0) {
+		for (var mbi = 0; mbi < missingBarriers.length; mbi++) {
+			console.log("[BMS] MISSING barrier: " + missingBarriers[mbi]);
+		}
+	}
 	console.log("[BMS] Total soup edges: " + Object.keys(edgeToTris).length);
 
 	// Debug: sample a barrier edge and a soup edge to compare format

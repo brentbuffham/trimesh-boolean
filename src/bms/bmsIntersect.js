@@ -67,6 +67,9 @@ export function bmsIntersect(trisA, trisB, options) {
 			var pv1 = pool.getOrCreate(seg.p1.x, seg.p1.y, seg.p1.z, { mesh: "A", triIdx: i });
 			pool.getOrCreate(seg.p1.x, seg.p1.y, seg.p1.z, { mesh: "B", triIdx: j });
 
+			// Skip zero-length segments (pool dedup merged both endpoints)
+			if (pv0 === pv1) continue;
+
 			var taggedSeg = { p0: pv0, p1: pv1, idxA: i, idxB: j };
 			segments.push(taggedSeg);
 
