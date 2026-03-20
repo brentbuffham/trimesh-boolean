@@ -11,7 +11,7 @@ Unlike every other mesh boolean package in the npm ecosystem, `trimesh-boolean` 
 | three-bvh-csg | No | BVH-accelerated BSP |
 | three-csg-ts | No | BSP tree (TS) |
 | manifold-3d | No | WASM C++ |
-| **trimesh-boolean** | **Yes** | Moller intersection + fan triangulation + half-space classification |
+| **trimesh-boolean** | **Yes** | Moller intersection + fan triangulation + shared Steiner points + boundary topology classification |
 
 Every existing package requires **closed, manifold** input. If you're working with terrain surfaces, geological models, or any open mesh — they won't work. `trimesh-boolean` will.
 
@@ -62,6 +62,20 @@ var picked = mergeComponents([
   { soup: comps[0].soup },              // keep A-inside #0
   { soup: comps[2].soup, flip: true }   // keep B-outside #0, flip normals
 ]);
+
+// ── BMS Pipeline (v0.4.0) — shared Steiner points + boundary topology ──
+import { bmsBooleanOp } from 'trimesh-boolean';
+
+var bms = bmsBooleanOp(meshA, meshB, null, { preRepair: true });
+// bms.groups = { aInside, aOutside, bInside, bOutside }
+// bms.segments = pool-vertex intersection segments
+// bms.polylines = chained intersection polylines
+// bms.meshEdgePolys = { A: {...}, B: {...} } — per-mesh boundary polygons
+// bms.pool = shared vertex pool
+
+// BMS + splitToComponents for per-region analysis
+var comps = splitToComponents(bms.groups);
+// 9 components for double-crossing terrain + convoluted block
 
 // Just intersection segments (no boolean)
 var segments = intersectMeshPair(meshA, meshB);
@@ -142,6 +156,43 @@ Select specific split groups by name, with optional normal flipping.
 - **groups**: `{ aInside, aOutside, bInside, bOutside }` from `splitMeshPair`
 - **selections**: `{ aInside?: boolean|"flip", aOutside?: boolean|"flip", bInside?: boolean|"flip", bOutside?: boolean|"flip" }`
 - **Returns**: `{ soup, points, triangles }` or `null`
+
+### BMS Pipeline (v0.4.0)
+
+The BMS (Brent's Mega Soup) pipeline is a new boolean pipeline designed for open surfaces. It solves the core problems of the original pipeline: shared Steiner points, identity-based segment chaining, fan triangulation with guaranteed constraint edges, and boundary topology classification.
+
+### `bmsBooleanOp(soupA, soupB, operation?, options?)`
+
+Run the full BMS pipeline. Both meshes are split into a unified mega soup where intersection points are shared by object reference (not string matching).
+
+- **operation**: `"subtract"` | `"union"` | `"intersect"` — omit to get groups only
+- **options.preRepair**: `boolean` — resolve T-junctions + weld before splitting
+- **options.tolerance**: `number` — vertex pool merge tolerance
+- **Returns**: `{ groups, segments, polylines, meshEdgePolys, megaSoup, pool }`
+
+### `bmsIntersect(trisA, trisB, options?)`
+
+Compute intersections with a shared vertex pool. Every segment endpoint goes through the pool — both meshes get the exact same object reference at each intersection location.
+
+### `bmsSplit(trisA, trisB, intersectResult)`
+
+Re-triangulate crossed triangles using fan triangulation with pool vertex references. Produces a tagged mega soup: `[{v0, v1, v2, mesh: "A"|"B", origIdx}]`.
+
+### `bmsChain(segments)`
+
+Chain intersection segments using pool vertex identity (integer ID lookup, not distance threshold). Two segments sharing a pool vertex connect by definition.
+
+### `bmsClosePolylines(polylines, trisA, trisB, megaSoup?, segments?)`
+
+Build mesh edge polygons connecting intersection polylines via graph-walks and boundary edge-walks. Graph-walks avoid crossing intersection lines (barrier-aware BFS).
+
+### `bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB)`
+
+Barrier flood-fill classification. Intersection segment edges block propagation between regions. Boundary topology determines inside/outside: the component touching the mesh's open boundary = outside.
+
+### `createVertexPool(tolerance)`
+
+Create a shared vertex pool with spatial hash deduplication. Points within tolerance get merged to the same object reference.
 
 ### `intersectMeshPair(trisA, trisB)`
 
