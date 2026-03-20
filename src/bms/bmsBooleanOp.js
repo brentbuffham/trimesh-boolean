@@ -99,8 +99,10 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	// Step 4) Chain intersection segments
 	var polylines = bmsChain(isect.segments);
 
-	// Step 5) Close open polylines along boundary edges
-	var closedPolylines = bmsClosePolylines(polylines, soupA, soupB);
+	// Step 5) Close open polylines along boundary edges + build mesh edge polys
+	var closeResult = bmsClosePolylines(polylines, soupA, soupB, megaSoup, isect.segments);
+	var closedPolylines = closeResult.closedPolylines;
+	var meshEdgePolys = closeResult.meshEdgePolys;
 
 	// Step 6) Classify via barrier flood fill
 	var groups = bmsClassify(megaSoup, closedPolylines, isect.segments, soupA, soupB);
@@ -115,6 +117,8 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 		groups: groups,
 		segments: isect.segments,
 		polylines: closedPolylines,
+		rawPolylines: polylines,
+		meshEdgePolys: meshEdgePolys,
 		megaSoup: megaSoup,
 		pool: isect.pool
 	};

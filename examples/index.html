@@ -122,6 +122,10 @@
 		<label><input type="checkbox" id="chk-fill-gaps"> Fill Gaps (Fan)</label>
 		<label><input type="checkbox" id="chk-force-close"> Force Close (Idx)</label>
 		<label><input type="checkbox" id="chk-merge-small"> Merge Small</label>
+		<div class="sep"></div>
+		<label style="color:#39B54A"><input type="checkbox" id="chk-bms-pipe"> BMS Pipe</label>
+		<label style="color:#ffdd00"><input type="checkbox" id="chk-show-isect" checked> Intersect</label>
+		<label style="color:#ff00ff"><input type="checkbox" id="chk-show-walks" checked> Walks</label>
 	</div>
 
 	<div id="main-row">
@@ -159,7 +163,7 @@ import {
 	computeProjectedArea, estimateAvgEdge,
 	resolveTJunctions, weldBoundaryVertices,
 	fillOpenEdgeLoops, forceCloseIndexedMesh,
-	bmsBooleanOp
+	bmsBooleanOp, bmsIntersect, bmsSplit, bmsChain, bmsClosePolylines
 } from '../src/index.js';
 
 // ── Load Kirra surfaces from pre-extracted JSON ──
@@ -614,6 +618,9 @@ var preRepair = true;
 var forceCloseWithFan = false;
 var forceCloseIndexed = false;
 var mergeSmall = false;
+var useBmsPipe = false;
+var showIsect = true;
+var showWalks = true;
 
 var skipFit = false;
 window.runOp = function(op) {
@@ -911,25 +918,56 @@ window.runOp = function(op) {
 			}
 		}
 
-		// Render closed polylines as white fat lines
-		if (bmsResult.polylines && bmsResult.polylines.length > 0) {
-			var bfatMat = new LineMaterial({
-				color: 0xffffff, linewidth: 5,
-				worldUnits: false, dashed: false,
-				depthTest: false, transparent: true,
-				resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
-			});
-			for (var bci = 0; bci < bmsResult.polylines.length; bci++) {
-				var bch = bmsResult.polylines[bci];
-				if (bch.length < 2) continue;
-				var bpts = [];
-				for (var bcp = 0; bcp < bch.length; bcp++) {
-					bpts.push(bch[bcp].x, bch[bcp].y, bch[bcp].z);
+		// Render mesh edge polys with toggleable intersection and walk lines
+		var isectColors = [0xffdd00, 0xff8800, 0x88ff00, 0x00ff88, 0x0088ff, 0x8800ff, 0xff0088, 0xffffff];
+		var walkColors = [0xff00ff, 0x00ffff, 0xff6600, 0x00ff66, 0xff0066, 0x6600ff, 0x66ff00, 0x0066ff];
+
+		function renderPolyVerts(verts, mat) {
+			if (!verts || verts.length < 2) return;
+			var pts = [];
+			for (var vi = 0; vi < verts.length; vi++) {
+				pts.push(verts[vi].x, verts[vi].y, verts[vi].z);
+			}
+			var geo = new LineGeometry(); geo.setPositions(pts);
+			var line = new Line2(geo, mat); line.computeLineDistances();
+			line.renderOrder = 999;
+			resultGroup.add(line);
+		}
+
+		var meshEPs = bmsResult.meshEdgePolys || {};
+		var epNames = ["A", "B"];
+		var totalEpSegments = 0;
+		var closedEpCount = 0;
+		var isectColorIdx = 0;
+		var walkColorIdx = 0;
+		for (var epi = 0; epi < epNames.length; epi++) {
+			var epData = meshEPs[epNames[epi]];
+			if (!epData || !epData.segments) continue;
+			if (epData.closed) closedEpCount++;
+			for (var esi = 0; esi < epData.segments.length; esi++) {
+				var epSeg = epData.segments[esi];
+				totalEpSegments++;
+				if (epSeg.type === "intersection") {
+					if (showIsect) {
+						var iMat = new LineMaterial({
+							color: isectColors[isectColorIdx % isectColors.length], linewidth: 5,
+							worldUnits: false, dashed: false, depthTest: false, transparent: true,
+							resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+						});
+						renderPolyVerts(epSeg.verts, iMat);
+					}
+					isectColorIdx++;
+				} else {
+					if (showWalks) {
+						var wMat = new LineMaterial({
+							color: walkColors[walkColorIdx % walkColors.length], linewidth: 4,
+							worldUnits: false, dashed: false, depthTest: false, transparent: true,
+							resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+						});
+						renderPolyVerts(epSeg.verts, wMat);
+					}
+					walkColorIdx++;
 				}
-				var bfg = new LineGeometry(); bfg.setPositions(bpts);
-				var bfl = new Line2(bfg, bfatMat); bfl.computeLineDistances();
-				bfl.renderOrder = 999;
-				resultGroup.add(bfl);
 			}
 		}
 
@@ -959,19 +997,11 @@ window.runOp = function(op) {
 				'<span>' + ble.label + ': <b>' + ble.soup.length + '</b> tris' + bopenInfo + '</span></div>';
 		}
 		bmsLines.push(blegendHtml);
-		// Check polyline closure
-		var closedCount = 0;
-		if (bmsResult.polylines) {
-			for (var bpi = 0; bpi < bmsResult.polylines.length; bpi++) {
-				var bp = bmsResult.polylines[bpi];
-				if (bp.length >= 2) {
-					var first = bp[0], last = bp[bp.length - 1];
-					var dx = first.x - last.x, dy = first.y - last.y, dz = first.z - last.z;
-					if (Math.sqrt(dx*dx + dy*dy + dz*dz) < 0.001) closedCount++;
-				}
-			}
-			bmsLines.push('<br>Closed polylines: <b>' + closedCount + '/' + bmsResult.polylines.length + '</b>');
-		}
+		// Edge poly stats
+		bmsLines.push('<br><span style="color:#ffdd00">&#9632;</span> Yellow = intersection');
+		bmsLines.push('<span style="color:#ff00ff">&#9632;</span> Magenta = graph/edge walk');
+		bmsLines.push('Edge poly segments: <b>' + totalEpSegments + '</b> (' + closedEpCount + '/2 meshes closed)');
+		bmsLines.push('Raw chains: <b>' + (bmsResult.rawPolylines ? bmsResult.rawPolylines.length : 0) + '</b>');
 		statResult.innerHTML = bmsLines.join('<br>');
 
 		if (!skipFit) fitCamera();
@@ -982,10 +1012,19 @@ window.runOp = function(op) {
 	if (op === 'custom') {
 		var t0c = performance.now();
 		var split;
+		var bmsCloseData = null;
 		try {
-			split = splitMeshPair(dataA.soup, dataB.soup);
+			if (useBmsPipe) {
+				var bmsR = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
+				if (!bmsR) { statResult.innerHTML = 'No BMS result'; return; }
+				split = { groups: bmsR.groups, segments: bmsR.segments };
+				bmsCloseData = bmsR.meshEdgePolys;
+			} else {
+				split = splitMeshPair(dataA.soup, dataB.soup);
+			}
 		} catch(e) {
 			statResult.innerHTML = '<span class="highlight">Error: ' + e.message + '</span>';
+			console.error(e);
 			return;
 		}
 		if (!split) {
@@ -1050,8 +1089,9 @@ window.runOp = function(op) {
 		window._customComps = comps;
 
 		// Step C3) Build the component list in the Result panel
-		var compHtml = '<b>Custom splits</b> (' + dtc + ' ms)<br>' +
-			comps.length + ' components from ' + split.segments.length + ' segments<hr>';
+		var pipeLabel = useBmsPipe ? '<span style="color:#39B54A">BMS Pipe</span>' : 'Old Pipe';
+		var compHtml = '<b>Custom splits</b> — ' + pipeLabel + ' (' + dtc + ' ms)<br>' +
+			comps.length + ' components from ' + (split.segments ? split.segments.length : 0) + ' segments<hr>';
 		compHtml += '<ul class="comp-list" id="comp-list">';
 		for (var li = 0; li < comps.length; li++) {
 			var lc = comps[li];
@@ -1106,32 +1146,64 @@ window.runOp = function(op) {
 			});
 		}, 0);
 
-		// Step C7) Intersection boundary lines (yellow)
-		if (split.segments && split.segments.length > 0) {
-			var avgC = estimateAvgEdge(dataA.soup);
-			var rawSegsC = [];
-			for (var sci = 0; sci < split.segments.length; sci++) {
-				rawSegsC.push({ p0: split.segments[sci].p0, p1: split.segments[sci].p1 });
-			}
-			var chainsC = chainSegments(rawSegsC, avgC * 0.01);
-			var fatMatC = new LineMaterial({
-				color: 0xffdd00, linewidth: 5,
-				worldUnits: false, dashed: false,
-				depthTest: false, transparent: true,
-				resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
-			});
-			for (var cci = 0; cci < chainsC.length; cci++) {
-				var chC = chainsC[cci];
-				if (chC.length < 2) continue;
-				var ptsC = [];
-				for (var cpi = 0; cpi < chC.length; cpi++) {
-					ptsC.push(chC[cpi].x, chC[cpi].y, chC[cpi].z);
+		// Step C7) BMS mesh edge poly overlay (yellow=intersection, magenta=walk)
+		try {
+			var meshEpData = bmsCloseData;
+			if (!meshEpData) {
+				// Not using BMS pipe — compute mesh edge polys separately for overlay
+				var bmsIsect = bmsIntersect(dataA.soup, dataB.soup);
+				if (bmsIsect.segments.length > 0) {
+					var bmsMega = bmsSplit(dataA.soup, dataB.soup, bmsIsect);
+					var bmsChains2 = bmsChain(bmsIsect.segments);
+					var bmsClose2 = bmsClosePolylines(bmsChains2, dataA.soup, dataB.soup, bmsMega, bmsIsect.segments);
+					meshEpData = bmsClose2.meshEdgePolys;
 				}
-				var geoC = new LineGeometry(); geoC.setPositions(ptsC);
-				var lineC = new Line2(geoC, fatMatC); lineC.computeLineDistances();
-				lineC.renderOrder = 999;
-				resultGroup.add(lineC);
 			}
+			if (meshEpData) {
+				var cIsectColors = [0xffdd00, 0xff8800, 0x88ff00, 0x00ff88, 0x0088ff, 0x8800ff, 0xff0088, 0xffffff];
+				var cWalkColors = [0xff00ff, 0x00ffff, 0xff6600, 0x00ff66, 0xff0066, 0x6600ff, 0x66ff00, 0x0066ff];
+				function renderCPolyVerts(verts, mat) {
+					if (!verts || verts.length < 2) return;
+					var pts = [];
+					for (var vi = 0; vi < verts.length; vi++) pts.push(verts[vi].x, verts[vi].y, verts[vi].z);
+					var geo = new LineGeometry(); geo.setPositions(pts);
+					var line = new Line2(geo, mat); line.computeLineDistances();
+					line.renderOrder = 999;
+					resultGroup.add(line);
+				}
+				var cIsectIdx = 0, cWalkIdx = 0;
+				var cEpNames = ["A", "B"];
+				for (var cepi = 0; cepi < cEpNames.length; cepi++) {
+					var cEpData = meshEpData[cEpNames[cepi]];
+					if (!cEpData || !cEpData.segments) continue;
+					for (var cesi = 0; cesi < cEpData.segments.length; cesi++) {
+						var cepSeg = cEpData.segments[cesi];
+						if (cepSeg.type === "intersection") {
+							if (showIsect) {
+								var ciMat = new LineMaterial({
+									color: cIsectColors[cIsectIdx % cIsectColors.length], linewidth: 5,
+									worldUnits: false, dashed: false, depthTest: false, transparent: true,
+									resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+								});
+								renderCPolyVerts(cepSeg.verts, ciMat);
+							}
+							cIsectIdx++;
+						} else {
+							if (showWalks) {
+								var cwMat = new LineMaterial({
+									color: cWalkColors[cWalkIdx % cWalkColors.length], linewidth: 4,
+									worldUnits: false, dashed: false, depthTest: false, transparent: true,
+									resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+								});
+								renderCPolyVerts(cepSeg.verts, cwMat);
+							}
+							cWalkIdx++;
+						}
+					}
+				}
+			}
+		} catch(e3) {
+			console.warn("BMS overlay failed:", e3.message);
 		}
 
 		if (!skipFit) fitCamera();
@@ -1304,6 +1376,21 @@ document.getElementById('chk-force-close').addEventListener('change', function(e
 
 document.getElementById('chk-merge-small').addEventListener('change', function(e) {
 	mergeSmall = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-bms-pipe').addEventListener('change', function(e) {
+	useBmsPipe = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-show-isect').addEventListener('change', function(e) {
+	showIsect = e.target.checked;
+	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+document.getElementById('chk-show-walks').addEventListener('change', function(e) {
+	showWalks = e.target.checked;
 	skipFit = true; runOp(currentOp); skipFit = false;
 });
 
