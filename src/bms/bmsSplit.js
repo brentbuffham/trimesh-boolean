@@ -8,7 +8,8 @@
 
 import Delaunator from "delaunator";
 import Constrainautor from "@kninnug/constrainautor";
-import { vKey } from "../util/math.js";
+import { vKey, distSq3 } from "../util/math.js";
+import { bmsChain } from "./bmsChain.js";
 
 /**
  * Re-triangulate a crossed triangle using pool vertices as Steiner points.
@@ -213,6 +214,163 @@ function bmsRetriangulate(tri, segments) {
 }
 
 /**
+ * Fan-based re-triangulation using pool vertices.
+ * Chains segments using bmsChain (identity-based), then fans from original
+ * vertices to consecutive chain points. GUARANTEES intersection segments
+ * appear as edges in the output — no CDT constraint needed.
+ *
+ * Falls back to bmsRetriangulate for multi-chain, same-edge entry/exit,
+ * or vertex-hit cases.
+ */
+function bmsFanTriangulate(tri, segments) {
+	if (!segments || segments.length === 0) return [tri];
+
+	// Step 1: Chain segments using identity-based chaining
+	var chains = bmsChain(segments);
+
+	if (chains.length !== 1 || chains[0].length < 2) {
+		return bmsRetriangulate(tri, segments);
+	}
+	var chain = chains[0];
+
+	// Step 2: Build local 2D frame for barycentric classification
+	var verts = [tri.v0, tri.v1, tri.v2];
+	var e1x = tri.v1.x - tri.v0.x, e1y = tri.v1.y - tri.v0.y, e1z = tri.v1.z - tri.v0.z;
+	var e2x = tri.v2.x - tri.v0.x, e2y = tri.v2.y - tri.v0.y, e2z = tri.v2.z - tri.v0.z;
+	var e1Len = Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+	if (e1Len < 1e-12) return bmsRetriangulate(tri, segments);
+	var lux = e1x / e1Len, luy = e1y / e1Len, luz = e1z / e1Len;
+	var lnx = e1y * e2z - e1z * e2y, lny = e1z * e2x - e1x * e2z, lnz = e1x * e2y - e1y * e2x;
+	var lnLen = Math.sqrt(lnx * lnx + lny * lny + lnz * lnz);
+	if (lnLen < 1e-12) return bmsRetriangulate(tri, segments);
+	var lvx = lny * luz - lnz * luy, lvy = lnz * lux - lnx * luz, lvz = lnx * luy - lny * lux;
+	var lvLen = Math.sqrt(lvx * lvx + lvy * lvy + lvz * lvz);
+	if (lvLen < 1e-12) return bmsRetriangulate(tri, segments);
+	lvx /= lvLen; lvy /= lvLen; lvz /= lvLen;
+
+	function toLocal(p) {
+		var ddx = p.x - tri.v0.x, ddy = p.y - tri.v0.y, ddz = p.z - tri.v0.z;
+		return [ddx * lux + ddy * luy + ddz * luz, ddx * lvx + ddy * lvy + ddz * lvz];
+	}
+	var l0 = toLocal(tri.v0), l1 = toLocal(tri.v1), l2 = toLocal(tri.v2);
+	var baryD = (l1[1] - l2[1]) * (l0[0] - l2[0]) + (l2[0] - l1[0]) * (l0[1] - l2[1]);
+	if (Math.abs(baryD) < 1e-12) return bmsRetriangulate(tri, segments);
+
+	function baryCoords(pu, pv) {
+		var u = ((l1[1] - l2[1]) * (pu - l2[0]) + (l2[0] - l1[0]) * (pv - l2[1])) / baryD;
+		var v = ((l2[1] - l0[1]) * (pu - l2[0]) + (l0[0] - l2[0]) * (pv - l2[1])) / baryD;
+		return [u, v, 1 - u - v];
+	}
+
+	// Step 3: Identify entry/exit edges
+	var EDGE_TOL = 0.02;
+	var VERTEX_TOL = 0.02;
+	var entryLocal = toLocal(chain[0]);
+	var exitLocal = toLocal(chain[chain.length - 1]);
+	var entryBary = baryCoords(entryLocal[0], entryLocal[1]);
+	var exitBary = baryCoords(exitLocal[0], exitLocal[1]);
+
+	function isAtVertex(bc) {
+		var nearZero = 0;
+		for (var bci = 0; bci < 3; bci++) { if (bc[bci] < VERTEX_TOL) nearZero++; }
+		return nearZero >= 2;
+	}
+	if (isAtVertex(entryBary) || isAtVertex(exitBary)) {
+		return bmsRetriangulate(tri, segments);
+	}
+
+	function edgeOf(bc) {
+		if (bc[0] < EDGE_TOL && bc[0] <= bc[1] && bc[0] <= bc[2]) return 0;
+		if (bc[1] < EDGE_TOL && bc[1] <= bc[0] && bc[1] <= bc[2]) return 1;
+		if (bc[2] < EDGE_TOL && bc[2] <= bc[0] && bc[2] <= bc[1]) return 2;
+		return -1;
+	}
+	var entryOpp = edgeOf(entryBary);
+	var exitOpp = edgeOf(exitBary);
+
+	if (entryOpp < 0 || exitOpp < 0 || entryOpp === exitOpp) {
+		return bmsRetriangulate(tri, segments);
+	}
+
+	// Step 4: Corner, vA, vB
+	var cornerIdx = -1;
+	for (var ci = 0; ci < 3; ci++) {
+		if (ci !== entryOpp && ci !== exitOpp) { cornerIdx = ci; break; }
+	}
+	if (cornerIdx < 0) return bmsRetriangulate(tri, segments);
+
+	var corner = verts[cornerIdx];
+	var vA = verts[exitOpp];
+	var vB = verts[entryOpp];
+
+	// Step 5: Winding consistency
+	var origNx = e1y * e2z - e1z * e2y;
+	var origNy = e1z * e2x - e1x * e2z;
+	var origNz = e1x * e2y - e1y * e2x;
+
+	function makeTri(a, b, c) {
+		var se1x = b.x - a.x, se1y = b.y - a.y, se1z = b.z - a.z;
+		var se2x = c.x - a.x, se2y = c.y - a.y, se2z = c.z - a.z;
+		var snx = se1y * se2z - se1z * se2y;
+		var sny = se1z * se2x - se1x * se2z;
+		var snz = se1x * se2y - se1y * se2x;
+		var dot = snx * origNx + sny * origNy + snz * origNz;
+		return dot < 0 ? { v0: a, v1: c, v2: b } : { v0: a, v1: b, v2: c };
+	}
+
+	// Step 6: Build fan triangles — chain points ARE pool vertices (shared references)
+	var result = [];
+
+	// Corner fan: corner to all consecutive chain point pairs
+	for (var fi = 0; fi < chain.length - 1; fi++) {
+		result.push(makeTri(corner, chain[fi], chain[fi + 1]));
+	}
+
+	// Split index K
+	var splitK = 0;
+	var bestRatio = Infinity;
+	for (var ki = 0; ki < chain.length; ki++) {
+		var dA = distSq3(vA, chain[ki]);
+		var dB = distSq3(vB, chain[ki]);
+		var ratio = (dA < 1e-20 || dB < 1e-20) ? Infinity : (dA < dB ? dA / dB : dB / dA);
+		var diff = Math.abs(1.0 - ratio);
+		if (diff < bestRatio) { bestRatio = diff; splitK = ki; }
+	}
+	if (splitK < 1) splitK = 1;
+	if (splitK > chain.length - 2) splitK = chain.length - 2;
+
+	// Fan from vA
+	for (var ai = 0; ai < splitK; ai++) {
+		result.push(makeTri(vA, chain[ai], chain[ai + 1]));
+	}
+
+	// Transition triangle
+	result.push(makeTri(vA, chain[splitK], vB));
+
+	// Fan from vB
+	for (var bi = splitK; bi < chain.length - 1; bi++) {
+		result.push(makeTri(vB, chain[bi], chain[bi + 1]));
+	}
+
+	// Step 7: Validate — remove degenerates
+	var triArea = lnLen * 0.5;
+	var MIN_AREA = triArea * 1e-8;
+	var validated = [];
+	for (var vli = 0; vli < result.length; vli++) {
+		var t = result[vli];
+		var te1x = t.v1.x - t.v0.x, te1y = t.v1.y - t.v0.y, te1z = t.v1.z - t.v0.z;
+		var te2x = t.v2.x - t.v0.x, te2y = t.v2.y - t.v0.y, te2z = t.v2.z - t.v0.z;
+		var tcx = te1y * te2z - te1z * te2y;
+		var tcy = te1z * te2x - te1x * te2z;
+		var tcz = te1x * te2y - te1y * te2x;
+		var subArea = Math.sqrt(tcx * tcx + tcy * tcy + tcz * tcz) * 0.5;
+		if (subArea > MIN_AREA) validated.push(t);
+	}
+
+	return validated.length > 0 ? validated : bmsRetriangulate(tri, segments);
+}
+
+/**
  * Split both meshes and produce a unified mega soup where Steiner point
  * vertices are shared pool vertex objects.
  *
@@ -239,7 +397,7 @@ export function bmsSplit(trisA, trisB, intersectResult) {
 			});
 		} else {
 			// Crossed: re-triangulate with pool vertices
-			var subTris = bmsRetriangulate(trisA[i], crossedSetA[i]);
+			var subTris = bmsFanTriangulate(trisA[i], crossedSetA[i]);
 			for (var si = 0; si < subTris.length; si++) {
 				megaSoup.push({
 					v0: subTris[si].v0,
@@ -263,7 +421,7 @@ export function bmsSplit(trisA, trisB, intersectResult) {
 				origIdx: j
 			});
 		} else {
-			var subTrisB = bmsRetriangulate(trisB[j], crossedSetB[j]);
+			var subTrisB = bmsFanTriangulate(trisB[j], crossedSetB[j]);
 			for (var sj = 0; sj < subTrisB.length; sj++) {
 				megaSoup.push({
 					v0: subTrisB[sj].v0,
