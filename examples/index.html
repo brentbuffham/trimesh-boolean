@@ -66,6 +66,12 @@
 		<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
 		<div class="sep"></div>
 
+		<button type="button" id="btn-kap-import" title="Load triangulated surfaces from a Kirra .kap file">Import KAP</button>
+		<button type="button" id="btn-kap-export" title="Save Mesh A and Mesh B as a minimal Kirra-compatible .kap">Export KAP</button>
+		<input type="file" id="kap-file-input" accept=".kap,application/zip,application/x-zip-compressed" style="display:none" />
+
+		<div class="sep"></div>
+
 		<label>Mesh A:</label>
 		<select id="meshA">
 			<optgroup label="Kirra Surfaces">
@@ -165,6 +171,7 @@ import {
 	fillOpenEdgeLoops, forceCloseIndexedMesh,
 	bmsBooleanOp, bmsIntersect, bmsSplit, bmsChain, bmsClosePolylines
 } from '../src/index.js';
+import { parseKapSurfaces, buildMinimalKapBlob } from './kap-io.js';
 
 // ── Load Kirra surfaces from pre-extracted JSON ──
 var kirraSurfaces = {};
@@ -335,6 +342,82 @@ if (kirraSurfaces.cup) {
 }
 if (kirraSurfaces.convoluted) {
 	meshCatalogue['kirra-convoluted'] = function() { return { soup: kirraSurfaces.convoluted.soup, label: "convoluted (32 tris, from Kirra)", closed: false }; };
+}
+
+// ── KAP user import: keys "kap-user-0", "kap-user-1", ... ──
+var KAP_USER_PREFIX = "kap-user-";
+
+function clearKapUserMeshes() {
+	for (var key in meshCatalogue) {
+		if (meshCatalogue.hasOwnProperty(key) && key.indexOf(KAP_USER_PREFIX) === 0) {
+			delete meshCatalogue[key];
+		}
+	}
+	var meshAel = document.getElementById("meshA");
+	var meshBel = document.getElementById("meshB");
+	var ogA = meshAel.querySelector("optgroup[data-kap-user]");
+	var ogB = meshBel.querySelector("optgroup[data-kap-user]");
+	if (ogA) ogA.remove();
+	if (ogB) ogB.remove();
+}
+
+function applyKapUserImport(result) {
+	clearKapUserMeshes();
+	var list = result.surfaces;
+	for (var ii = 0; ii < list.length; ii++) {
+		(function (idx) {
+			var s = list[idx];
+			var key = KAP_USER_PREFIX + idx;
+			var soupCopy = s.soup;
+			meshCatalogue[key] = function () {
+				return { soup: soupCopy, label: s.label, closed: s.closed };
+			};
+		})(ii);
+	}
+
+	var ogLabel = "Imported KAP (" + list.length + ")";
+	var meshAel = document.getElementById("meshA");
+	var meshBel = document.getElementById("meshB");
+	var ogA = document.createElement("optgroup");
+	ogA.setAttribute("label", ogLabel);
+	ogA.setAttribute("data-kap-user", "1");
+	var ogB = document.createElement("optgroup");
+	ogB.setAttribute("label", ogLabel);
+	ogB.setAttribute("data-kap-user", "1");
+
+	for (var oi = 0; oi < list.length; oi++) {
+		var s2 = list[oi];
+		var optKey = KAP_USER_PREFIX + oi;
+		var optText = s2.name + " (" + s2.soup.length + " tris)";
+		var oa = document.createElement("option");
+		oa.value = optKey;
+		oa.textContent = optText;
+		ogA.appendChild(oa);
+		var ob = document.createElement("option");
+		ob.value = optKey;
+		ob.textContent = optText;
+		ogB.appendChild(ob);
+	}
+	meshAel.appendChild(ogA);
+	meshBel.appendChild(ogB);
+
+	if (list.length >= 1) {
+		meshAel.value = KAP_USER_PREFIX + "0";
+	}
+	if (list.length >= 2) {
+		meshBel.value = KAP_USER_PREFIX + "1";
+	} else if (list.length === 1) {
+		meshBel.value = KAP_USER_PREFIX + "0";
+	}
+
+	var warnMsg = "";
+	if (result.warnings && result.warnings.length > 0) {
+		warnMsg = " (" + result.warnings.length + " warning(s) — see console)";
+		for (var wi = 0; wi < result.warnings.length; wi++) {
+			console.warn("KAP import: " + result.warnings[wi]);
+		}
+	}
+	console.log("KAP import: " + list.length + " surface(s)" + warnMsg);
 }
 
 // ── Soup → Three.js mesh ──
@@ -1392,6 +1475,50 @@ document.getElementById('chk-show-isect').addEventListener('change', function(e)
 document.getElementById('chk-show-walks').addEventListener('change', function(e) {
 	showWalks = e.target.checked;
 	skipFit = true; runOp(currentOp); skipFit = false;
+});
+
+// Step KAP-1) Import: read surfaces.json from a Kirra .kap ZIP
+document.getElementById("btn-kap-import").addEventListener("click", function () {
+	document.getElementById("kap-file-input").click();
+});
+document.getElementById("kap-file-input").addEventListener("change", function (ev) {
+	var f = ev.target.files && ev.target.files[0];
+	if (!f) return;
+	parseKapSurfaces(f).then(function (result) {
+		applyKapUserImport(result);
+		skipFit = true;
+		runOp(currentOp);
+		skipFit = false;
+	}).catch(function (err) {
+		alert("KAP import failed: " + err.message);
+		console.error(err);
+	});
+	ev.target.value = "";
+});
+
+// Step KAP-2) Export: minimal .kap (manifest + surfaces.json) for Mesh A & B
+document.getElementById("btn-kap-export").addEventListener("click", function () {
+	var selAx = document.getElementById("meshA").value;
+	var selBx = document.getElementById("meshB").value;
+	var dataAx = meshCatalogue[selAx]();
+	var dataBx = meshCatalogue[selBx]();
+	buildMinimalKapBlob({
+		soupA: dataAx.soup,
+		soupB: dataBx.soup,
+		nameA: dataAx.label,
+		nameB: dataBx.label,
+		projectName: "trimesh-boolean-demo"
+	}).then(function (blob) {
+		var url = URL.createObjectURL(blob);
+		var a = document.createElement("a");
+		a.href = url;
+		a.download = "trimesh-boolean-meshes.kap";
+		a.click();
+		URL.revokeObjectURL(url);
+	}).catch(function (e) {
+		alert("KAP export failed: " + e.message);
+		console.error(e);
+	});
 });
 
 // ── Initial display ──

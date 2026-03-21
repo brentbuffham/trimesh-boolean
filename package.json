@@ -63,6 +63,7 @@
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^16.0.0",
     "@rollup/plugin-terser": "^0.4.4",
+    "jszip": "^3.10.1",
     "rollup": "^4.0.0",
     "three": "^0.183.0",
     "vite": "^7.0.0",
@@ -71,7 +72,8 @@
   "scripts": {
     "build": "rollup -c",
     "test": "vitest run",
-    "dev": "vite examples",
+    "dev": "vite",
+    "build:docs": "npm run build && vite build && node scripts/copy-docs-libs.mjs",
     "prepublishOnly": "npm run build && npm run test"
   }
 }

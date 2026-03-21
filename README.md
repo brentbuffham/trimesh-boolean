@@ -30,6 +30,20 @@ Or use the CDN for browser scripts:
 
 **Links:** [npm](https://www.npmjs.com/package/trimesh-boolean) · [GitHub](https://github.com/brentbuffham/trimesh-boolean) · [Live Demo](https://brentbuffham.github.io/trimesh-boolean/)
 
+### Live demo (GitHub Pages)
+
+The [live demo](https://brentbuffham.github.io/trimesh-boolean/) is **built and deployed automatically** on every push to `main` or `master` by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) (`npm run build:docs` in CI). You do **not** need to commit the `docs/` folder for the site to update.
+
+**One-time repo setting:** GitHub → **Settings** → **Pages** → **Build and deployment** → **Source:** **GitHub Actions** (not “Deploy from a branch”). After that, each push runs the workflow and refreshes the demo.
+
+To preview the same build locally:
+
+```bash
+npm run build:docs
+```
+
+Edit demos only under `examples/` (Vite root). Local dev: `npm run dev`.
+
 ## Quick Start
 
 ```javascript
@@ -325,7 +339,9 @@ function kirraToSoup(surface) {
 }
 ```
 
-Pre-extracted Kirra surfaces (terrain, cylinder, cup, convoluted block) are included in `examples/kirra-surfaces.json` with UTM coordinates centroid-subtracted for demo use. The convoluted block is a 32-triangle open surface that crosses the terrain twice — the hardest test case for multi-crossing classification.
+Pre-extracted Kirra surfaces (terrain, cylinder, cup, convoluted block) are included in `examples/public/kirra-surfaces.json` with UTM coordinates centroid-subtracted for demo use. The convoluted block is a 32-triangle open surface that crosses the terrain twice — the hardest test case for multi-crossing classification.
+
+The Three.js demo (`examples/index.html`) also has **Import KAP** / **Export KAP**: import reads `surfaces.json` from a Kirra `.kap` ZIP into the Mesh A/B dropdowns; export writes a minimal Kirra-compatible archive (manifest + two surfaces for the current Mesh A and B) for round-tripping or testing in Kirra.
 
 ## Data Model
 

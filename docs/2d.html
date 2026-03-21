@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>trimesh-boolean — Live Demo</title>
+<style>
+	* { margin: 0; padding: 0; box-sizing: border-box; }
+	body { font-family: system-ui, sans-serif; background: #1a1a1a; color: #d0d0d0; }
+	header { padding: 16px 20px 8px; text-align: center; display: flex; flex-direction: column; align-items: center; }
+	header h1 { font-size: 1.5rem; color: #cc2222; }
+	header p { color: #888; margin-top: 2px; font-size: 0.9rem; }
+	.section { border: 1px solid #333; border-radius: 6px; margin: 6px; padding: 8px; background: #111; }
+	.section h2 { font-size: 0.9rem; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+	.section h2 .tag { font-size: 0.7rem; padding: 2px 8px; border-radius: 3px; font-weight: normal; }
+	.tag-closed { background: #cc222233; color: #cc2222; border: 1px solid #cc222255; }
+	.tag-open { background: #F4792033; color: #F47920; border: 1px solid #F4792055; }
+	.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
+	.panel { flex: 1; min-width: 280px; }
+	.controls { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+	button { padding: 5px 14px; border: 1px solid #444; background: transparent; color: #bbb;
+		border-radius: 3px; cursor: pointer; font-size: 0.8rem; }
+	button:hover { background: #333; }
+	button.active { background: #cc2222; color: #fff; border-color: #cc2222; }
+	button.active-orange { background: #F47920; color: #fff; border-color: #F47920; }
+	.info { color: #999; font-size: 0.78rem; margin-top: 4px; min-height: 1.2em; }
+	canvas { display: block; width: 100%; background: #111; border-radius: 4px; }
+	.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+	@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+	footer { text-align: center; padding: 16px; color: #555; font-size: 0.75rem; }
+	footer a { color: #cc2222; text-decoration: none; }
+	.three-link {
+		display: inline-block; padding: 8px 24px; margin-top: 10px;
+		background: #cc2222; color: #fff; font-weight: 600; font-size: 0.9rem;
+		border-radius: 4px; transition: background 0.2s;
+	}
+	.three-link:hover { background: #ee3333; }
+</style>
+  <script type="module" crossorigin src="/trimesh-boolean/assets/2d-s-ReOHNB.js"></script>
+  <link rel="modulepreload" crossorigin href="/trimesh-boolean/assets/booleanOp-BhCmmezw.js">
+</head>
+<body>
+<header>
+	<h1>trimesh-boolean</h1>
+	<p>Triangle mesh boolean operations — the only JS library that supports open surfaces</p>
+	<a href="index.html" class="three-link">3D Demo (Three.js) &rarr;</a>
+</header>
+
+<div class="grid" style="margin: 0 8px;">
+	<!-- Closed: Cube vs Cube -->
+	<div class="section" id="sec-cubes">
+		<h2>Cube vs Cube <span class="tag tag-closed">Closed Solid</span></h2>
+		<div class="controls">
+			<button onclick="run('cubes','input')">Inputs</button>
+			<button onclick="run('cubes','subtract')">Subtract</button>
+			<button onclick="run('cubes','union')">Union</button>
+			<button onclick="run('cubes','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-cubes" width="600" height="220"></canvas>
+		<div class="info" id="info-cubes">Click an operation</div>
+	</div>
+
+	<!-- Closed: Offset Cubes -->
+	<div class="section" id="sec-offset">
+		<h2>Offset Cubes <span class="tag tag-closed">Closed Solid</span></h2>
+		<div class="controls">
+			<button onclick="run('offset','input')">Inputs</button>
+			<button onclick="run('offset','subtract')">Subtract</button>
+			<button onclick="run('offset','union')">Union</button>
+			<button onclick="run('offset','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-offset" width="600" height="220"></canvas>
+		<div class="info" id="info-offset">Click an operation</div>
+	</div>
+
+	<!-- Open: Flat Patches -->
+	<div class="section" id="sec-flat">
+		<h2>Flat vs Inclined Terrain <span class="tag tag-open">Open Surface</span></h2>
+		<div class="controls">
+			<button onclick="run('flat','input')">Inputs</button>
+			<button onclick="run('flat','subtract')">Subtract</button>
+			<button onclick="run('flat','union')">Union</button>
+			<button onclick="run('flat','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-flat" width="600" height="220"></canvas>
+		<div class="info" id="info-flat">Click an operation</div>
+	</div>
+
+	<!-- Open: Steep Pit Shell -->
+	<div class="section" id="sec-pit">
+		<h2>Steep Pit Shell vs Terrain <span class="tag tag-open">Open Surface — Steep Walls</span></h2>
+		<div class="controls">
+			<button onclick="run('pit','input')">Inputs</button>
+			<button onclick="run('pit','subtract')">Subtract</button>
+			<button onclick="run('pit','union')">Union</button>
+			<button onclick="run('pit','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-pit" width="600" height="220"></canvas>
+		<div class="info" id="info-pit">Click an operation — tests multi-axis classification on steep walls</div>
+	</div>
+
+	<!-- Open: Wavy Terrain -->
+	<div class="section" id="sec-wavy">
+		<h2>Wavy Terrain vs Flat Cut <span class="tag tag-open">Open Surface</span></h2>
+		<div class="controls">
+			<button onclick="run('wavy','input')">Inputs</button>
+			<button onclick="run('wavy','subtract')">Subtract</button>
+			<button onclick="run('wavy','union')">Union</button>
+			<button onclick="run('wavy','intersect')">Intersect</button>
+		</div>
+		<canvas id="c-wavy" width="600" height="220"></canvas>
+		<div class="info" id="info-wavy">Click an operation</div>
+	</div>
+</div>
+
+<footer>
+	<a href="https://github.com/brentbuffham/trimesh-boolean">GitHub</a> &middot;
+	<code>npm install trimesh-boolean</code> &middot;
+	MIT License
+</footer>
+
+</body>
+</html>
