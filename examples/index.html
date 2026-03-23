@@ -53,7 +53,7 @@
 	.comp-list { margin: 4px 0; padding: 0; list-style: none; font-size: 11px; }
 	.comp-item { display: flex; align-items: center; gap: 4px; padding: 2px 0; cursor: pointer; user-select: none; }
 	.comp-item:hover { background: rgba(255,255,255,0.07); }
-	.comp-eye { width: 18px; text-align: center; font-size: 13px; opacity: 0.8; }
+	.comp-eye { width: 18px; text-align: center; font-size: 13px; opacity: 0.8; cursor: pointer; }
 	.comp-eye.off { opacity: 0.25; }
 	.comp-swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.2); }
 	.comp-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1102,6 +1102,7 @@ window.runOp = function(op) {
 				if (!bmsR) { statResult.innerHTML = 'No BMS result'; return; }
 				split = { groups: bmsR.groups, segments: bmsR.segments };
 				bmsCloseData = bmsR.meshEdgePolys;
+				window._componentWalks = bmsR.componentWalks || null;
 			} else {
 				split = splitMeshPair(dataA.soup, dataB.soup);
 			}
@@ -1181,9 +1182,8 @@ window.runOp = function(op) {
 			var tag = lc.mesh + "-" + lc.side + (lc.index > 0 ? " #" + lc.index : "");
 			var hexStr = "#" + ("000000" + lc.color.toString(16)).slice(-6);
 			var eyeClass = lc.visible ? "comp-eye" : "comp-eye off";
-			var eyeChar = lc.visible ? "&#128065;" : "&#128065;";
 			compHtml += '<li class="comp-item" data-idx="' + li + '">' +
-				'<span class="' + eyeClass + '" data-idx="' + li + '">' + eyeChar + '</span>' +
+				'<span class="' + eyeClass + '" data-idx="' + li + '">&#128065;</span>' +
 				'<span class="comp-swatch" style="background:' + hexStr + '"></span>' +
 				'<span class="comp-label">' + tag + ' (' + lc.triCount + ')</span>' +
 				'</li>';
@@ -1214,7 +1214,7 @@ window.runOp = function(op) {
 			}
 		}
 
-		// Step C6) Attach click handlers for the eye toggles
+		// Step C6) Attach click handlers for eye toggles
 		setTimeout(function() {
 			var listEl = document.getElementById('comp-list');
 			if (!listEl) return;
@@ -1229,11 +1229,25 @@ window.runOp = function(op) {
 			});
 		}, 0);
 
-		// Step C7) BMS mesh edge poly overlay (yellow=intersection, magenta=walk)
+		// Shared line rendering helper
+		function renderCPolyVerts(verts, mat) {
+			if (!verts || verts.length < 2) return;
+			var pts = [];
+			for (var vi = 0; vi < verts.length; vi++) pts.push(verts[vi].x, verts[vi].y, verts[vi].z);
+			var geo = new LineGeometry(); geo.setPositions(pts);
+			var line = new Line2(geo, mat); line.computeLineDistances();
+			line.renderOrder = 999;
+			resultGroup.add(line);
+		}
+
+		var cIsectColors = [0xffdd00, 0xff8800, 0x88ff00, 0x00ff88, 0x0088ff, 0x8800ff, 0xff0088, 0xffffff];
+		var cWalkColors = [0xff00ff, 0x00ffff, 0xff6600, 0x00ff66, 0xff0066, 0x6600ff, 0x66ff00, 0x0066ff];
+
+		// Step C7) Global mesh edge poly overlay (yellow=intersection, magenta=walk)
+		// Controlled by master Intersect/Walks checkboxes
 		try {
 			var meshEpData = bmsCloseData;
 			if (!meshEpData) {
-				// Not using BMS pipe — compute mesh edge polys separately for overlay
 				var bmsIsect = bmsIntersect(dataA.soup, dataB.soup);
 				if (bmsIsect.segments.length > 0) {
 					var bmsMega = bmsSplit(dataA.soup, dataB.soup, bmsIsect);
@@ -1243,17 +1257,6 @@ window.runOp = function(op) {
 				}
 			}
 			if (meshEpData) {
-				var cIsectColors = [0xffdd00, 0xff8800, 0x88ff00, 0x00ff88, 0x0088ff, 0x8800ff, 0xff0088, 0xffffff];
-				var cWalkColors = [0xff00ff, 0x00ffff, 0xff6600, 0x00ff66, 0xff0066, 0x6600ff, 0x66ff00, 0x0066ff];
-				function renderCPolyVerts(verts, mat) {
-					if (!verts || verts.length < 2) return;
-					var pts = [];
-					for (var vi = 0; vi < verts.length; vi++) pts.push(verts[vi].x, verts[vi].y, verts[vi].z);
-					var geo = new LineGeometry(); geo.setPositions(pts);
-					var line = new Line2(geo, mat); line.computeLineDistances();
-					line.renderOrder = 999;
-					resultGroup.add(line);
-				}
 				var cIsectIdx = 0, cWalkIdx = 0;
 				var cEpNames = ["A", "B"];
 				for (var cepi = 0; cepi < cEpNames.length; cepi++) {

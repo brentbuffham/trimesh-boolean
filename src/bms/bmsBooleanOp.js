@@ -8,7 +8,7 @@
  *   2. bmsSplit      — CDT with pool vertices → mega soup
  *   3. bmsChain      — identity-based segment chaining
  *   4. bmsClose      — close polylines along boundary edges
- *   5. bmsClassify   — barrier flood-fill, right=inside left=outside
+ *   5. bmsClassify   — per-region boundary walk, winding = inside/outside
  */
 
 import { bmsIntersect } from "./bmsIntersect.js";
@@ -104,8 +104,15 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	var closedPolylines = closeResult.closedPolylines;
 	var meshEdgePolys = closeResult.meshEdgePolys;
 
-	// Step 6) Classify via mesh edge poly point-in-polygon
-	var groups = bmsClassify(megaSoup, closedPolylines, isect.segments, soupA, soupB, meshEdgePolys);
+	// Step 6) Classify via hybrid boundary-topology / barrier-normal
+	var classifyResult = bmsClassify(megaSoup, closedPolylines, isect.segments, soupA, soupB, meshEdgePolys);
+
+	var groups = {
+		aInside: classifyResult.aInside,
+		aOutside: classifyResult.aOutside,
+		bInside: classifyResult.bInside,
+		bOutside: classifyResult.bOutside
+	};
 
 	// Step 7) Deduplicate seam vertices in each group
 	if (groups.aInside.length > 0) groups.aInside = deduplicateSeamVertices(groups.aInside, 1e-4);
@@ -119,6 +126,7 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 		polylines: closedPolylines,
 		rawPolylines: polylines,
 		meshEdgePolys: meshEdgePolys,
+		componentWalks: classifyResult.componentWalks,
 		megaSoup: megaSoup,
 		pool: isect.pool
 	};

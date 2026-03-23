@@ -11,7 +11,7 @@ Unlike every other mesh boolean package in the npm ecosystem, `trimesh-boolean` 
 | three-bvh-csg | No | BVH-accelerated BSP |
 | three-csg-ts | No | BSP tree (TS) |
 | manifold-3d | No | WASM C++ |
-| **trimesh-boolean** | **Yes** | Moller intersection + fan triangulation + shared Steiner points + boundary topology classification |
+| **trimesh-boolean** | **Yes** | Moller intersection + fan triangulation + shared Steiner points + hybrid boundary/barrier-normal classification |
 
 Every existing package requires **closed, manifold** input. If you're working with terrain surfaces, geological models, or any open mesh — they won't work. `trimesh-boolean` will.
 
@@ -77,7 +77,7 @@ var picked = mergeComponents([
   { soup: comps[2].soup, flip: true }   // keep B-outside #0, flip normals
 ]);
 
-// ── BMS Pipeline (v0.4.0) — shared Steiner points + boundary topology ──
+// ── BMS Pipeline (v0.5.0) — hybrid classification + per-component walks ──
 import { bmsBooleanOp } from 'trimesh-boolean';
 
 var bms = bmsBooleanOp(meshA, meshB, null, { preRepair: true });
@@ -85,6 +85,7 @@ var bms = bmsBooleanOp(meshA, meshB, null, { preRepair: true });
 // bms.segments = pool-vertex intersection segments
 // bms.polylines = chained intersection polylines
 // bms.meshEdgePolys = { A: {...}, B: {...} } — per-mesh boundary polygons
+// bms.componentWalks = per-component boundary walk segments
 // bms.pool = shared vertex pool
 
 // BMS + splitToComponents for per-region analysis
@@ -171,9 +172,9 @@ Select specific split groups by name, with optional normal flipping.
 - **selections**: `{ aInside?: boolean|"flip", aOutside?: boolean|"flip", bInside?: boolean|"flip", bOutside?: boolean|"flip" }`
 - **Returns**: `{ soup, points, triangles }` or `null`
 
-### BMS Pipeline (v0.4.0)
+### BMS Pipeline (v0.4.0+)
 
-The BMS (Brent's Mega Soup) pipeline is a new boolean pipeline designed for open surfaces. It solves the core problems of the original pipeline: shared Steiner points, identity-based segment chaining, fan triangulation with guaranteed constraint edges, and boundary topology classification.
+The BMS (Brent's Mega Soup) pipeline is a boolean pipeline designed for open surfaces. It solves the core problems of the original pipeline: shared Steiner points, identity-based segment chaining, fan triangulation with guaranteed constraint edges, and hybrid classification (v0.5.0).
 
 ### `bmsBooleanOp(soupA, soupB, operation?, options?)`
 
@@ -182,7 +183,7 @@ Run the full BMS pipeline. Both meshes are split into a unified mega soup where 
 - **operation**: `"subtract"` | `"union"` | `"intersect"` — omit to get groups only
 - **options.preRepair**: `boolean` — resolve T-junctions + weld before splitting
 - **options.tolerance**: `number` — vertex pool merge tolerance
-- **Returns**: `{ groups, segments, polylines, meshEdgePolys, megaSoup, pool }`
+- **Returns**: `{ groups, segments, polylines, meshEdgePolys, componentWalks, megaSoup, pool }`
 
 ### `bmsIntersect(trisA, trisB, options?)`
 
@@ -202,7 +203,11 @@ Build mesh edge polygons connecting intersection polylines via graph-walks and b
 
 ### `bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB)`
 
-Barrier flood-fill classification. Intersection segment edges block propagation between regions. Boundary topology determines inside/outside: the component touching the mesh's open boundary = outside.
+Hybrid classification (v0.5.0). Barrier flood-fill produces connected components per mesh. Classification method depends on mesh type:
+- **Open meshes**: boundary topology — component touching mesh open boundary = outside, enclosed by barriers = inside.
+- **Closed meshes**: barrier-normal — dot product of component direction vs other mesh's face normal at barrier edges.
+
+Also extracts per-component boundary walk segments (`componentWalks`) for visualization.
 
 ### `createVertexPool(tolerance)`
 
