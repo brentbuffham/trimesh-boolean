@@ -197,8 +197,8 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB, m
 			var pt = projectPoint({ x: cx, y: cy, z: cz }, polyA.axis);
 			var inPoly = pointInPolygon(pt[0], pt[1], polyA.polygon);
 			var plainTri = { v0: tri.v0, v1: tri.v1, v2: tri.v2 };
-			// Walk polygon encapsulates the outside region.
-			// Inside the polygon = outside the intersection.
+			// Walk polygon traces boundary + intersection connections.
+			// It surrounds the OUTSIDE region. Inside polygon = outside.
 			if (inPoly) aOutside.push(plainTri);
 			else aInside.push(plainTri);
 		}

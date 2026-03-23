@@ -381,8 +381,16 @@ function buildMeshEdgePoly(chains, meshTris, graphTris, barrierEdgeSet) {
 	// Step 4: Sort chain attachments by their position along the boundary loop
 	chainAttachments.sort(function (a, b) { return a.boundaryLoopIdx - b.boundaryLoopIdx; });
 
-	// Step 5: Build the mesh edge poly
-	// Walk along boundary, detouring into each chain via graph-walks
+	// Step 5: Build the mesh edge poly — bmsMontyWalk
+	// Start from intersection, walk OUT to boundary, turn left, walk boundary,
+	// graph-walk back IN to next chain. The polygon encapsulates the INSIDE region.
+	//
+	// For each chain:
+	//   1. Follow intersection chain (yellow)
+	//   2. Graph-walk OUT from chain end to boundary (magenta)
+	//   3. Edge-walk along boundary to next chain's attachment (magenta)
+	//   4. Graph-walk IN from boundary to next chain start (magenta)
+	//   5. Repeat
 	var resultSegments = [];
 	var n = chainAttachments.length;
 
@@ -390,44 +398,41 @@ function buildMeshEdgePoly(chains, meshTris, graphTris, barrierEdgeSet) {
 		var att = chainAttachments[ai];
 		var nextAtt = chainAttachments[(ai + 1) % n];
 
-		// 5a) Graph-walk from boundary to chain entry point (magenta)
-		var gwIn = att.graphWalkToBoundary.slice().reverse(); // boundary→chain, so reverse the chain→boundary path
-		if (gwIn.length >= 2) {
-			resultSegments.push({ verts: gwIn, type: "walk" });
-		}
-
-		// 5b) Follow the intersection chain (yellow)
+		// 5a) Follow the intersection chain (yellow)
 		resultSegments.push({ verts: att.chain.slice(), type: "intersection" });
 
-		// 5c) Graph-walk from chain back to boundary (magenta)
-		// For closed chains, we end up back at the entry point, so the walk back
-		// is the same as the walk in (reversed)
+		// 5b) Graph-walk OUT from chain end to boundary (magenta)
 		var chainEndKey = vKey(att.chain[att.chain.length - 1]);
 		var isClosed = (chainEndKey === att.chainEntryKey) || (att.chain[att.chain.length - 1] === att.chain[0]);
 
 		if (isClosed) {
-			// Closed chain — walk back the same way we came in
+			// Closed chain — walk out the same path we'd walk in
 			if (att.graphWalkToBoundary.length >= 2) {
 				resultSegments.push({ verts: att.graphWalkToBoundary.slice(), type: "walk" });
 			}
 		} else {
-			// Open chain — graph-walk from the chain END to boundary
+			// Open chain — graph-walk from chain END to boundary
 			var gwOut = graphWalkToSet(chainEndKey, bdryVertSet, meshGraph.adj, meshGraph.vertMap, 10000);
 			if (gwOut && gwOut.path.length >= 2) {
 				resultSegments.push({ verts: gwOut.path, type: "walk" });
 			}
 		}
 
-		// 5d) Edge-walk along boundary to next chain's attachment (magenta)
+		// 5c) Edge-walk along boundary to next chain's boundary attachment (magenta)
 		var fromBdryIdx = att.boundaryLoopIdx;
 		var toBdryIdx = nextAtt.boundaryLoopIdx;
 
-		// Walk forward along boundary from current to next
 		if (fromBdryIdx !== toBdryIdx) {
 			var bdryWalk = walkBoundarySegment(boundaryLoop, fromBdryIdx, toBdryIdx);
 			if (bdryWalk.length >= 2) {
 				resultSegments.push({ verts: bdryWalk, type: "walk" });
 			}
+		}
+
+		// 5d) Graph-walk IN from boundary to next chain entry point (magenta)
+		var gwIn = nextAtt.graphWalkToBoundary.slice().reverse();
+		if (gwIn.length >= 2) {
+			resultSegments.push({ verts: gwIn, type: "walk" });
 		}
 	}
 
