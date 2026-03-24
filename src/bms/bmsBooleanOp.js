@@ -127,6 +127,38 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	if (groups.bInside.length > 0) groups.bInside = translateSoup(deduplicateSeamVertices(groups.bInside, 1e-4), cx, cy, cz);
 	if (groups.bOutside.length > 0) groups.bOutside = translateSoup(deduplicateSeamVertices(groups.bOutside, 1e-4), cx, cy, cz);
 
+	// Translate meshEdgePolys and componentWalks verts back to original coordinates
+	function translatePolyVerts(meshEps) {
+		if (!meshEps) return;
+		var keys = ["A", "B"];
+		for (var ki = 0; ki < keys.length; ki++) {
+			var ep = meshEps[keys[ki]];
+			if (!ep || !ep.segments) continue;
+			for (var si2 = 0; si2 < ep.segments.length; si2++) {
+				var vs = ep.segments[si2].verts;
+				if (!vs) continue;
+				for (var vi = 0; vi < vs.length; vi++) {
+					vs[vi] = { x: vs[vi].x + cx, y: vs[vi].y + cy, z: vs[vi].z + cz };
+				}
+			}
+		}
+	}
+	translatePolyVerts(meshEdgePolys);
+
+	// Translate componentWalk verts back
+	if (classifyResult.componentWalks) {
+		for (var cwi = 0; cwi < classifyResult.componentWalks.length; cwi++) {
+			var segs = classifyResult.componentWalks[cwi].segments;
+			for (var csi = 0; csi < segs.length; csi++) {
+				var cvs = segs[csi].verts;
+				if (!cvs) continue;
+				for (var cvi = 0; cvi < cvs.length; cvi++) {
+					cvs[cvi] = { x: cvs[cvi].x + cx, y: cvs[cvi].y + cy, z: cvs[cvi].z + cz };
+				}
+			}
+		}
+	}
+
 	var result = {
 		groups: groups,
 		segments: isect.segments,

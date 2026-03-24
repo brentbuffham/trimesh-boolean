@@ -62,7 +62,7 @@
 <body>
 <div id="app">
 	<div id="toolbar">
-		<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.2</span></h1>
+		<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.3</span></h1>
 		<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
 		<div class="sep"></div>
 
@@ -616,6 +616,7 @@ function addNonManifoldOverlay(soup, container, resultGroup) {
 var resultGroup = new THREE.Group();
 resultGroup.name = 'result';
 scene.add(resultGroup);
+window._scene = scene; window._camera = camera; window._resultGroup = resultGroup;
 
 var currentOp = 'input';
 
@@ -1475,6 +1476,9 @@ function fitCamera() {
 
 	controls.target.copy(center);
 	camera.position.set(center.x + dist * 0.6, center.y - dist * 0.7, center.z + dist * 0.4);
+	camera.near = Math.max(0.1, dist * 0.001);
+	camera.far = Math.max(10000, dist * 10);
+	camera.updateProjectionMatrix();
 	controls.update();
 }
 
