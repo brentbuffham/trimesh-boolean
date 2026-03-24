@@ -22,7 +22,7 @@ import { classifyByFloodFill, splitStraddlingAndClassify } from "./classifyTrian
 import { deduplicateSeamVertices } from "../repair/deduplicateVertices.js";
 import { weldVertices, weldedToSoup } from "../repair/weldVertices.js";
 import { ensureZUpNormals } from "../normals/alignNormals.js";
-import { vKey } from "../util/math.js";
+import { vKey, soupCentroid, translateSoup } from "../util/math.js";
 import { resolveTJunctions } from "../repair/resolveTJunctions.js";
 import { weldBoundaryVertices } from "../repair/weldBoundary.js";
 import { fillOpenEdgeLoops } from "../repair/fillOpenLoops.js";
@@ -194,6 +194,12 @@ export function splitMeshPair(soupA, soupB) {
 		return null;
 	}
 
+	// Step 0) Translate to origin for floating-point precision
+	var centroid = soupCentroid(soupA, soupB);
+	var cx = centroid.x, cy = centroid.y, cz = centroid.z;
+	soupA = translateSoup(soupA, -cx, -cy, -cz);
+	soupB = translateSoup(soupB, -cx, -cy, -cz);
+
 	// Step 1) Get tagged intersection segments
 	var taggedSegments = intersectMeshPairTagged(soupA, soupB);
 
@@ -201,9 +207,9 @@ export function splitMeshPair(soupA, soupB) {
 		return {
 			groups: {
 				aInside: [],
-				aOutside: soupA.slice(),
+				aOutside: translateSoup(soupA, cx, cy, cz),
 				bInside: [],
-				bOutside: soupB.slice()
+				bOutside: translateSoup(soupB, cx, cy, cz)
 			},
 			segments: []
 		};
@@ -265,12 +271,13 @@ export function splitMeshPair(soupA, soupB) {
 	if (groupsB.inside.length > 0) groupsB.inside = propagateNormals(groupsB.inside);
 	if (groupsB.outside.length > 0) groupsB.outside = propagateNormals(groupsB.outside);
 
+	// Translate results back to original coordinates
 	return {
 		groups: {
-			aInside: groupsA.inside,
-			aOutside: groupsA.outside,
-			bInside: groupsB.inside,
-			bOutside: groupsB.outside
+			aInside: translateSoup(groupsA.inside, cx, cy, cz),
+			aOutside: translateSoup(groupsA.outside, cx, cy, cz),
+			bInside: translateSoup(groupsB.inside, cx, cy, cz),
+			bOutside: translateSoup(groupsB.outside, cx, cy, cz)
 		},
 		segments: taggedSegments
 	};

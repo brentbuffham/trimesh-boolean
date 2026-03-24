@@ -117,6 +117,44 @@ export function edgeKey(ka, kb) {
 }
 
 /**
+ * Compute shared centroid of two triangle soups.
+ */
+export function soupCentroid(soupA, soupB) {
+	var sx = 0, sy = 0, sz = 0, n = 0;
+	for (var i = 0; i < soupA.length; i++) {
+		var t = soupA[i];
+		sx += t.v0.x + t.v1.x + t.v2.x;
+		sy += t.v0.y + t.v1.y + t.v2.y;
+		sz += t.v0.z + t.v1.z + t.v2.z;
+		n += 3;
+	}
+	for (var j = 0; j < soupB.length; j++) {
+		var t2 = soupB[j];
+		sx += t2.v0.x + t2.v1.x + t2.v2.x;
+		sy += t2.v0.y + t2.v1.y + t2.v2.y;
+		sz += t2.v0.z + t2.v1.z + t2.v2.z;
+		n += 3;
+	}
+	return { x: sx / n, y: sy / n, z: sz / n };
+}
+
+/**
+ * Translate a triangle soup by an offset.
+ */
+export function translateSoup(soup, dx, dy, dz) {
+	var out = new Array(soup.length);
+	for (var i = 0; i < soup.length; i++) {
+		var t = soup[i];
+		out[i] = {
+			v0: { x: t.v0.x + dx, y: t.v0.y + dy, z: t.v0.z + dz },
+			v1: { x: t.v1.x + dx, y: t.v1.y + dy, z: t.v1.z + dz },
+			v2: { x: t.v2.x + dx, y: t.v2.y + dy, z: t.v2.z + dz }
+		};
+	}
+	return out;
+}
+
+/**
  * Count open (boundary) and non-manifold (over-shared) edges in a triangle soup.
  * @param {Array} tris - Array of {v0, v1, v2}
  * @returns {{ openEdges: number, overShared: number, total: number }}

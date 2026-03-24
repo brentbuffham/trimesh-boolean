@@ -17,6 +17,7 @@ import { bmsChain } from "./bmsChain.js";
 import { bmsClosePolylines } from "./bmsClose.js";
 import { bmsClassify } from "./bmsClassify.js";
 import { estimateAvgEdge } from "../intersect/spatialGrid.js";
+import { soupCentroid, translateSoup } from "../util/math.js";
 import { resolveTJunctions } from "../repair/resolveTJunctions.js";
 import { weldBoundaryVertices } from "../repair/weldBoundary.js";
 import { weldVertices } from "../repair/weldVertices.js";
@@ -64,6 +65,12 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 
 	var opts = options || {};
 
+	// Step 0) Translate to origin for floating-point precision (UTM, mine coords)
+	var centroid = soupCentroid(soupA, soupB);
+	var cx = centroid.x, cy = centroid.y, cz = centroid.z;
+	soupA = translateSoup(soupA, -cx, -cy, -cz);
+	soupB = translateSoup(soupB, -cx, -cy, -cz);
+
 	// Step 1) Optional pre-repair
 	if (opts.preRepair) {
 		var tolA = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupA) * 0.01;
@@ -78,13 +85,13 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	var isect = bmsIntersect(soupA, soupB, { tolerance: opts.tolerance });
 
 	if (isect.segments.length === 0) {
-		// No intersection — everything is outside
+		// No intersection — everything is outside, translate back
 		return {
 			groups: {
 				aInside: [],
-				aOutside: soupA.slice(),
+				aOutside: translateSoup(soupA, cx, cy, cz),
 				bInside: [],
-				bOutside: soupB.slice()
+				bOutside: translateSoup(soupB, cx, cy, cz)
 			},
 			segments: [],
 			polylines: [],
@@ -114,11 +121,11 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 		bOutside: classifyResult.bOutside
 	};
 
-	// Step 7) Deduplicate seam vertices in each group
-	if (groups.aInside.length > 0) groups.aInside = deduplicateSeamVertices(groups.aInside, 1e-4);
-	if (groups.aOutside.length > 0) groups.aOutside = deduplicateSeamVertices(groups.aOutside, 1e-4);
-	if (groups.bInside.length > 0) groups.bInside = deduplicateSeamVertices(groups.bInside, 1e-4);
-	if (groups.bOutside.length > 0) groups.bOutside = deduplicateSeamVertices(groups.bOutside, 1e-4);
+	// Step 7) Deduplicate seam vertices, then translate back to original coordinates
+	if (groups.aInside.length > 0) groups.aInside = translateSoup(deduplicateSeamVertices(groups.aInside, 1e-4), cx, cy, cz);
+	if (groups.aOutside.length > 0) groups.aOutside = translateSoup(deduplicateSeamVertices(groups.aOutside, 1e-4), cx, cy, cz);
+	if (groups.bInside.length > 0) groups.bInside = translateSoup(deduplicateSeamVertices(groups.bInside, 1e-4), cx, cy, cz);
+	if (groups.bOutside.length > 0) groups.bOutside = translateSoup(deduplicateSeamVertices(groups.bOutside, 1e-4), cx, cy, cz);
 
 	var result = {
 		groups: groups,
