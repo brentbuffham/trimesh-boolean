@@ -62,7 +62,7 @@
 <body>
 <div id="app">
 	<div id="toolbar">
-		<h1>trimesh-boolean</h1>
+		<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.2</span></h1>
 		<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
 		<div class="sep"></div>
 
@@ -135,7 +135,12 @@
 	</div>
 
 	<div id="main-row">
-		<div id="viewport"></div>
+		<div id="viewport">
+			<div id="mesh-warning" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+				background:rgba(0,0,0,0.85);color:#ff6600;padding:20px 30px;border-radius:8px;font-size:14px;
+				font-family:'Courier New',monospace;text-align:center;z-index:100;border:1px solid #ff6600;max-width:400px;">
+			</div>
+		</div>
 		<div id="info-panel">
 			<h3>Inputs</h3>
 			<div class="stat" id="stat-inputs">Select meshes and click an operation</div>
@@ -423,12 +428,13 @@ function applyKapUserImport(result) {
 // ── Soup → Three.js mesh ──
 
 function soupToThreeMesh(soup, color, opacity) {
+	var doff = window._displayOffset || { x: 0, y: 0, z: 0 };
 	var positions = new Float32Array(soup.length * 9);
 	for (var i = 0; i < soup.length; i++) {
 		var tri = soup[i], off = i * 9;
-		positions[off]   = tri.v0.x; positions[off+1] = tri.v0.y; positions[off+2] = tri.v0.z;
-		positions[off+3] = tri.v1.x; positions[off+4] = tri.v1.y; positions[off+5] = tri.v1.z;
-		positions[off+6] = tri.v2.x; positions[off+7] = tri.v2.y; positions[off+8] = tri.v2.z;
+		positions[off]   = tri.v0.x - doff.x; positions[off+1] = tri.v0.y - doff.y; positions[off+2] = tri.v0.z - doff.z;
+		positions[off+3] = tri.v1.x - doff.x; positions[off+4] = tri.v1.y - doff.y; positions[off+5] = tri.v1.z - doff.z;
+		positions[off+6] = tri.v2.x - doff.x; positions[off+7] = tri.v2.y - doff.y; positions[off+8] = tri.v2.z - doff.z;
 	}
 	var geo = new THREE.BufferGeometry();
 	geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -445,18 +451,19 @@ function soupToThreeMesh(soup, color, opacity) {
 }
 
 function soupToEdges(soup, color) {
+	var doff = window._displayOffset || { x: 0, y: 0, z: 0 };
 	var positions = new Float32Array(soup.length * 18); // 3 edges * 2 verts * 3 components
 	for (var i = 0; i < soup.length; i++) {
 		var tri = soup[i], off = i * 18;
 		// edge 0-1
-		positions[off]    = tri.v0.x; positions[off+1]  = tri.v0.y; positions[off+2]  = tri.v0.z;
-		positions[off+3]  = tri.v1.x; positions[off+4]  = tri.v1.y; positions[off+5]  = tri.v1.z;
+		positions[off]    = tri.v0.x - doff.x; positions[off+1]  = tri.v0.y - doff.y; positions[off+2]  = tri.v0.z - doff.z;
+		positions[off+3]  = tri.v1.x - doff.x; positions[off+4]  = tri.v1.y - doff.y; positions[off+5]  = tri.v1.z - doff.z;
 		// edge 1-2
-		positions[off+6]  = tri.v1.x; positions[off+7]  = tri.v1.y; positions[off+8]  = tri.v1.z;
-		positions[off+9]  = tri.v2.x; positions[off+10] = tri.v2.y; positions[off+11] = tri.v2.z;
+		positions[off+6]  = tri.v1.x - doff.x; positions[off+7]  = tri.v1.y - doff.y; positions[off+8]  = tri.v1.z - doff.z;
+		positions[off+9]  = tri.v2.x - doff.x; positions[off+10] = tri.v2.y - doff.y; positions[off+11] = tri.v2.z - doff.z;
 		// edge 2-0
-		positions[off+12] = tri.v2.x; positions[off+13] = tri.v2.y; positions[off+14] = tri.v2.z;
-		positions[off+15] = tri.v0.x; positions[off+16] = tri.v0.y; positions[off+17] = tri.v0.z;
+		positions[off+12] = tri.v2.x - doff.x; positions[off+13] = tri.v2.y - doff.y; positions[off+14] = tri.v2.z - doff.z;
+		positions[off+15] = tri.v0.x - doff.x; positions[off+16] = tri.v0.y - doff.y; positions[off+17] = tri.v0.z - doff.z;
 	}
 	var geo = new THREE.BufferGeometry();
 	geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -715,6 +722,61 @@ window.runOp = function(op) {
 	var dataA = meshCatalogue[selA]();
 	var dataB = meshCatalogue[selB]();
 
+	// Step 0) Compute display centroid offset for Three.js rendering precision
+	var warningEl = document.getElementById('mesh-warning');
+	warningEl.style.display = 'none';
+	var dcx = 0, dcy = 0, dcz = 0;
+	if (dataA.soup.length > 0 && dataB.soup.length > 0) {
+		// Shared centroid
+		var dnA = 0, dnB = 0, dsx = 0, dsy = 0, dsz = 0;
+		for (var di = 0; di < dataA.soup.length; di++) {
+			var dt = dataA.soup[di];
+			dsx += dt.v0.x + dt.v1.x + dt.v2.x;
+			dsy += dt.v0.y + dt.v1.y + dt.v2.y;
+			dsz += dt.v0.z + dt.v1.z + dt.v2.z;
+			dnA += 3;
+		}
+		var cxA = dsx / dnA, cyA = dsy / dnA, czA = dsz / dnA;
+		dsx = 0; dsy = 0; dsz = 0;
+		for (var dj = 0; dj < dataB.soup.length; dj++) {
+			var dt2 = dataB.soup[dj];
+			dsx += dt2.v0.x + dt2.v1.x + dt2.v2.x;
+			dsy += dt2.v0.y + dt2.v1.y + dt2.v2.y;
+			dsz += dt2.v0.z + dt2.v1.z + dt2.v2.z;
+			dnB += 3;
+		}
+		var cxB = dsx / dnB, cyB = dsy / dnB, czB = dsz / dnB;
+		dcx = (cxA * dnA + cxB * dnB) / (dnA + dnB);
+		dcy = (cyA * dnA + cyB * dnB) / (dnA + dnB);
+		dcz = (czA * dnA + czB * dnB) / (dnA + dnB);
+
+		// Check if meshes are very far apart
+		var meshDist = Math.sqrt((cxA - cxB) * (cxA - cxB) + (cyA - cyB) * (cyA - cyB) + (czA - czB) * (czA - czB));
+		var avgSizeA = Math.sqrt(dataA.soup.length) * 2;
+		var avgSizeB = Math.sqrt(dataB.soup.length) * 2;
+		var refSize = Math.max(avgSizeA, avgSizeB) * 50;
+		if (meshDist > refSize && meshDist > 1000) {
+			warningEl.innerHTML = 'Mesh A and Mesh B seem to be a very long way apart.<br><br>Please check the mesh coordinates.';
+			warningEl.style.display = 'block';
+		}
+	}
+	window._displayOffset = { x: dcx, y: dcy, z: dcz };
+
+	// Helper: translate soup for display (subtract centroid)
+	function displaySoup(soup) {
+		if (dcx === 0 && dcy === 0 && dcz === 0) return soup;
+		var out = new Array(soup.length);
+		for (var i = 0; i < soup.length; i++) {
+			var t = soup[i];
+			out[i] = {
+				v0: { x: t.v0.x - dcx, y: t.v0.y - dcy, z: t.v0.z - dcz },
+				v1: { x: t.v1.x - dcx, y: t.v1.y - dcy, z: t.v1.z - dcz },
+				v2: { x: t.v2.x - dcx, y: t.v2.y - dcy, z: t.v2.z - dcz }
+			};
+		}
+		return out;
+	}
+
 	// Step 1) Pre-repair: resolve T-junctions + weld nearby boundary verts
 	if (preRepair) {
 		var avgA = estimateAvgEdge(dataA.soup);
@@ -785,7 +847,8 @@ window.runOp = function(op) {
 					if (chain.length < 2) continue;
 					var pts = [];
 					for (var cp = 0; cp < chain.length; cp++) {
-						pts.push(chain[cp].x, chain[cp].y, chain[cp].z);
+						var _d = window._displayOffset || {x:0,y:0,z:0};
+						pts.push(chain[cp].x - _d.x, chain[cp].y - _d.y, chain[cp].z - _d.z);
 					}
 					var fatGeo = new LineGeometry();
 					fatGeo.setPositions(pts);
@@ -1007,9 +1070,10 @@ window.runOp = function(op) {
 
 		function renderPolyVerts(verts, mat) {
 			if (!verts || verts.length < 2) return;
+			var doff = window._displayOffset || { x: 0, y: 0, z: 0 };
 			var pts = [];
 			for (var vi = 0; vi < verts.length; vi++) {
-				pts.push(verts[vi].x, verts[vi].y, verts[vi].z);
+				pts.push(verts[vi].x - doff.x, verts[vi].y - doff.y, verts[vi].z - doff.z);
 			}
 			var geo = new LineGeometry(); geo.setPositions(pts);
 			var line = new Line2(geo, mat); line.computeLineDistances();
@@ -1232,8 +1296,9 @@ window.runOp = function(op) {
 		// Shared line rendering helper
 		function renderCPolyVerts(verts, mat) {
 			if (!verts || verts.length < 2) return;
+			var doff = window._displayOffset || { x: 0, y: 0, z: 0 };
 			var pts = [];
-			for (var vi = 0; vi < verts.length; vi++) pts.push(verts[vi].x, verts[vi].y, verts[vi].z);
+			for (var vi = 0; vi < verts.length; vi++) pts.push(verts[vi].x - doff.x, verts[vi].y - doff.y, verts[vi].z - doff.z);
 			var geo = new LineGeometry(); geo.setPositions(pts);
 			var line = new Line2(geo, mat); line.computeLineDistances();
 			line.renderOrder = 999;
