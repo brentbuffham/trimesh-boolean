@@ -11,7 +11,7 @@ Unlike every other mesh boolean package in the npm ecosystem, `trimesh-boolean` 
 | three-bvh-csg | No | BVH-accelerated BSP |
 | three-csg-ts | No | BSP tree (TS) |
 | manifold-3d | No | WASM C++ |
-| **trimesh-boolean** | **Yes** | Moller intersection + fan triangulation + shared Steiner points + hybrid boundary/barrier-normal classification |
+| **trimesh-boolean** | **Yes** | Moller intersection + fan triangulation + shared Steiner points + hybrid boundary/barrier-normal classification + heffalump per-triangle classifier |
 
 Every existing package requires **closed, manifold** input. If you're working with terrain surfaces, geological models, or any open mesh — they won't work. `trimesh-boolean` will.
 
@@ -49,7 +49,9 @@ Edit demos only under `examples/` (Vite root). Local dev: `npm run dev`.
 ```javascript
 import { boolean, splitMeshPair, mergeSplitGroups,
          splitToComponents, mergeSmallComponents, mergeComponents,
-         selectSplits, repairMesh, intersectMeshPair } from 'trimesh-boolean';
+         selectSplits, repairMesh, intersectMeshPair,
+         heffalumpClassify, shouldUseHeffalump,
+         reclassifyTriangles, reclassifyAtPoint, reclassifyRegion } from 'trimesh-boolean';
 
 // Triangle soup: simple {v0, v1, v2} objects
 var meshA = [
@@ -91,6 +93,23 @@ var bms = bmsBooleanOp(meshA, meshB, null, { preRepair: true });
 // BMS + splitToComponents for per-region analysis
 var comps = splitToComponents(bms.groups);
 // 9 components for double-crossing terrain + convoluted block
+
+// ── Heffalump Classifier (v0.5.5) — per-triangle classification for defective meshes ──
+import { heffalumpClassify, shouldUseHeffalump } from 'trimesh-boolean';
+
+// Auto-detect if meshes have non-manifold edges
+if (shouldUseHeffalump(meshA, meshB)) {
+  // heffalumpClassify classifies each triangle individually
+  // Works on meshes with fragmented boundaries, cracks, and holes
+  var hResult = heffalumpClassify(megaSoup, segments, meshA, meshB);
+  // hResult.aInside, hResult.aOutside, hResult.bInside, hResult.bOutside
+  // hResult.componentWalks — boundary walk segments for visualization
+}
+
+// Manual reclassification — fix misclassified triangles interactively
+import { reclassifyAtPoint } from 'trimesh-boolean';
+var fix = reclassifyAtPoint(groups, clickX, clickY, clickZ, 0.01);
+// fix = { moved: true, mesh: "A", from: "inside", to: "outside" }
 
 // Just intersection segments (no boolean)
 var segments = intersectMeshPair(meshA, meshB);
@@ -174,7 +193,7 @@ Select specific split groups by name, with optional normal flipping.
 
 ### BMS Pipeline (v0.4.0+)
 
-The BMS (Brent's Mega Soup) pipeline is a boolean pipeline designed for open surfaces. It solves the core problems of the original pipeline: shared Steiner points, identity-based segment chaining, fan triangulation with guaranteed constraint edges, and hybrid classification (v0.5.0).
+The BMS (Brent's Mega Soup) pipeline is a boolean pipeline designed for open surfaces. It solves the core problems of the original pipeline: shared Steiner points, identity-based segment chaining, fan triangulation with guaranteed constraint edges, hybrid classification (v0.5.0), and per-triangle heffalump classification for defective meshes (v0.5.5).
 
 ### `bmsBooleanOp(soupA, soupB, operation?, options?)`
 
@@ -197,6 +216,10 @@ Re-triangulate crossed triangles using fan triangulation with pool vertex refere
 
 Chain intersection segments using pool vertex identity (integer ID lookup, not distance threshold). Two segments sharing a pool vertex connect by definition.
 
+### `chainedOpenEdge(tris, megaSoup?, segments?)`
+
+Walk the complete open boundary of a mesh as a closed polygon. Uses a half-edge structure to correctly navigate bowtie (non-manifold) vertices. Returns the largest loop as an ordered array of `{key, vertex}`, with the first vertex repeated at the end.
+
 ### `bmsClosePolylines(polylines, trisA, trisB, megaSoup?, segments?)`
 
 Build mesh edge polygons connecting intersection polylines via graph-walks and boundary edge-walks. Graph-walks avoid crossing intersection lines (barrier-aware BFS).
@@ -208,6 +231,55 @@ Hybrid classification (v0.5.0). Barrier flood-fill produces connected components
 - **Closed meshes**: barrier-normal — dot product of component direction vs other mesh's face normal at barrier edges.
 
 Also extracts per-component boundary walk segments (`componentWalks`) for visualization.
+
+### Heffalump Classifier (v0.5.5)
+
+The heffalump classifier is a barrier-only classification strategy for meshes with defective topology (non-manifold edges, fragmented boundaries, cracks, holes). Instead of relying on boundary walks (which break when the boundary is fragmented), it classifies each triangle individually:
+
+- **Closed other mesh**: ray-cast each triangle's centroid through the other mesh (odd crossings = inside)
+- **Open other mesh**: find nearest surface triangle and check which side the centroid is on (normal direction = outside)
+
+### `heffalumpClassify(megaSoup, segments, trisA, trisB, opts?)`
+
+Barrier-only classification for meshes with defective topology. Classifies each triangle individually rather than by flood-filled components.
+
+- **megaSoup**: Split triangles with `mesh` tags from `bmsSplit`
+- **segments**: Intersection segments with pool vertex endpoints
+- **trisA** / **trisB**: Original mesh triangles
+- **Returns**: `{ aInside, aOutside, bInside, bOutside, componentWalks }`
+
+### `shouldUseHeffalump(trisA, trisB)`
+
+Detect whether a mesh pair needs the heffalump classifier. Returns `true` if either mesh has non-manifold (over-shared) edges.
+
+- **Returns**: `boolean`
+
+### `reclassifyTriangles(groups, mesh, fromSide, triIndices)`
+
+Move triangles between inside/outside groups by index. Useful for fixing misclassified triangles programmatically.
+
+- **groups**: `{ aInside, aOutside, bInside, bOutside }`
+- **mesh**: `"A"` | `"B"`
+- **fromSide**: `"inside"` | `"outside"` — triangles are moved to the opposite side
+- **triIndices**: `number[]` — indices within the source array to move
+- **Returns**: Updated groups (mutated in place)
+
+### `reclassifyAtPoint(groups, cx, cy, cz, tolerance?)`
+
+Reclassify a single triangle identified by its centroid coordinates. Useful for click-to-toggle in a 3D viewer.
+
+- **cx**, **cy**, **cz**: Centroid coordinates to match
+- **tolerance**: Match tolerance (default: `0.01`)
+- **Returns**: `{ moved: boolean, mesh?: string, from?: string, to?: string }`
+
+### `reclassifyRegion(groups, mesh, fromSide, seedIdx)`
+
+Reclassify a connected region — flood fill from a seed triangle to move all connected same-side triangles together.
+
+- **mesh**: `"A"` | `"B"`
+- **fromSide**: `"inside"` | `"outside"`
+- **seedIdx**: Index of the seed triangle in the source array
+- **Returns**: `number` — count of triangles moved
 
 ### `createVertexPool(tolerance)`
 
@@ -252,13 +324,16 @@ Individual repair steps, usable standalone:
 | `removeDegenerateTriangles(tris, minArea?, sliverRatio?)` | Remove zero-area and sliver triangles |
 | `extractBoundaryLoops(tris)` | Find open boundary loops |
 | `triangulateLoop(loop)` | Triangulate a 3D polygon loop |
-| `capBoundaryLoops(tris)` | Cap all boundary loops |
+| `capBoundaryLoops(tris)` | Cap all boundary loops (parallel) |
+| `capBoundaryLoopsSequential(tris)` | Cap all boundary loops (sequential) |
 | `stitchByProximity(tris, tolerance?)` | Connect nearby boundary edges |
 | `cleanCrossingTriangles(tris)` | Remove over-shared edge duplicates |
 | `removeOverlappingTriangles(tris, tol?)` | Remove anti-parallel internal walls |
 | `forceCloseIndexedMesh(points, triangles)` | Force-close an indexed mesh |
 | `fillOpenEdgeLoops(soup)` | Fill closed loops of open edges with fan triangles |
 | `weldBoundaryVertices(tris, tolerance)` | Weld boundary-only vertices |
+| `soupToIndexed(tris, tolerance)` | Alias for `weldVertices` — convert soup to indexed mesh |
+| `indexedToSoup(weldedTris)` | Alias for `weldedToSoup` — convert indexed mesh back to soup |
 
 ### Component Functions
 
@@ -294,6 +369,10 @@ Individual repair steps, usable standalone:
 | `buildSpatialGridOnAxes(tris, cellSize, getA, getB)` | Build spatial hash on arbitrary axes |
 | `queryGrid(grid, bb, cellSize)` | Query XY spatial hash |
 | `queryGridOnAxes(grid, a, b, cellSize)` | Query arbitrary-axis spatial hash |
+| `computeBBox(tris)` | Compute axis-aligned bounding box of a triangle array |
+| `triBBox(tri)` | Compute bounding box of a single triangle |
+| `bboxOverlap(a, b)` | Test if two bounding boxes overlap |
+| `estimateAvgEdge(tris)` | Estimate average edge length of a triangle array |
 
 ### Boolean Internals (Advanced)
 
@@ -325,6 +404,8 @@ Individual repair steps, usable standalone:
 | `cross(a, b)` | 3D cross product |
 | `lerpVert(a, b, t)` | Linear vertex interpolation |
 | `countOpenEdges(tris)` | Count boundary and non-manifold edges |
+| `vKey(v)` | Vertex to string key for spatial hashing |
+| `edgeKey(k1, k2)` | Canonical edge key from two vertex keys |
 
 ## Working with Kirra Surface Data
 
@@ -446,6 +527,8 @@ Weld the combined triangle soup into an indexed mesh and return `{ soup, points,
 
 - **[delaunator](https://github.com/mapbox/delaunator)** — Fast Delaunay triangulation
 - **[@kninnug/constrainautor](https://github.com/kninnug/Constrainautor)** — Constrained Delaunay
+- **[robust-predicates](https://github.com/mourner/robust-predicates)** — Exact arithmetic orientation and incircle tests
+- **[tiny-exact-math](https://www.npmjs.com/package/tiny-exact-math)** — Exact cross product and dot product for degenerate-case handling
 
 Optional peer dependency:
 - **[three](https://threejs.org/)** `>=0.150.0` — Only needed for `trimesh-boolean/three` adapter
