@@ -9,17 +9,22 @@
 
 	/* ── Top toolbar ── */
 	#toolbar {
-		display: flex; align-items: center; gap: 12px; padding: 8px 16px;
-		background: #111; border-bottom: 1px solid #333; flex-wrap: wrap;
+		padding: 4px 16px;
+		background: #111; border-bottom: 1px solid #333;
 	}
+	.toolbar-row {
+		display: flex; align-items: center; gap: 10px; padding: 3px 0;
+		flex-wrap: nowrap; overflow-x: auto; white-space: nowrap;
+	}
+	.toolbar-row .sep { width: 1px; height: 16px; background: #444; flex-shrink: 0; }
 	#toolbar h1 { font-size: 1rem; color: #cc2222; white-space: nowrap; }
-	#toolbar label { font-size: 0.8rem; color: #999; }
+	#toolbar label { font-size: 0.8rem; color: #ddd; }
 	#toolbar select, #toolbar button {
-		padding: 4px 10px; border: 1px solid #444; background: #222; color: #bbb;
+		padding: 4px 10px; border: 1px solid #555; background: #333; color: #ddd;
 		border-radius: 3px; font-size: 0.8rem; cursor: pointer;
 	}
 	#toolbar select:focus, #toolbar button:focus { outline: 1px solid #cc2222; }
-	#toolbar button:hover { background: #333; }
+	#toolbar button:hover { background: #444; }
 	#toolbar button.active { background: #cc2222; color: #fff; border-color: #cc2222; }
 	.nav-link {
 		padding: 4px 12px; background: #cc2222; color: #fff; font-weight: 600;
@@ -57,85 +62,114 @@
 	.comp-eye.off { opacity: 0.25; }
 	.comp-swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.2); }
 	.comp-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	button.active { background: rgba(255,255,255,0.15); box-shadow: inset 0 0 0 2px currentColor; }
+	#viewport.reclassify-mode { cursor: crosshair; }
+	#reclassify-hint {
+		display: none; position: fixed; bottom: 20px; left: 50%;
+		transform: translateX(-50%); padding: 8px 16px;
+		background: rgba(255,102,0,0.9); color: #fff; border-radius: 6px;
+		font: bold 13px monospace; z-index: 100; pointer-events: none;
+	}
+	#reclassify-hint.active { display: block; }
+	#processing-overlay {
+		display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+		background: rgba(0,0,0,0.5); z-index: 9999;
+		justify-content: center; align-items: center;
+		font: bold 18px monospace; color: #fff; letter-spacing: 1px;
+	}
+	#processing-overlay.active { display: flex; }
 </style>
 </head>
 <body>
+<div id="processing-overlay">Processing...</div>
+<div id="reclassify-hint">Click triangle to reassign | Shift+Click for region</div>
+<div id="reclassify-menu" style="display:none;position:fixed;z-index:10000;background:#222;border:1px solid #666;border-radius:4px;padding:4px;font:12px monospace;">
+	<div style="color:#888;padding:2px 8px;margin-bottom:2px;">Assign to:</div>
+	<button onclick="doReclassify('aInside')" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#E6192C;border:none;cursor:pointer;margin:1px 0;">A-inside</button>
+	<button onclick="doReclassify('aOutside')" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#F47920;border:none;cursor:pointer;margin:1px 0;">A-outside</button>
+	<button onclick="doReclassify('bInside')" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#4472C4;border:none;cursor:pointer;margin:1px 0;">B-inside</button>
+	<button onclick="doReclassify('bOutside')" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#00B7C2;border:none;cursor:pointer;margin:1px 0;">B-outside</button>
+	<button onclick="doReclassify(null)" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#888;border:none;cursor:pointer;margin:1px 0;">Cancel</button>
+</div>
 <div id="app">
 	<div id="toolbar">
-		<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.3</span></h1>
-		<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
-		<div class="sep"></div>
-
-		<button type="button" id="btn-kap-import" title="Load triangulated surfaces from a Kirra .kap file">Import KAP</button>
-		<button type="button" id="btn-kap-export" title="Save Mesh A and Mesh B as a minimal Kirra-compatible .kap">Export KAP</button>
-		<input type="file" id="kap-file-input" accept=".kap,.zip" style="display:none" />
-
-		<div class="sep"></div>
-
-		<label>Mesh A:</label>
-		<select id="meshA">
-			<optgroup label="Kirra Surfaces">
-				<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
-				<option value="kirra-cup">Kirra Cup (16 tris)</option>
-				<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
-				<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
-				<option value="kirra-shell" selected>Shell (8565 tris)</option>
-				<option value="kirra-presplit-a">Presplit-A (56 tris)</option>
-			</optgroup>
-			<optgroup label="Procedural">
-				<option value="cube">Cube</option>
-				<option value="cube-large">Large Cube</option>
-				<option value="flat-terrain">Flat Terrain</option>
-				<option value="wavy-terrain">Wavy Terrain</option>
-				<option value="inclined-terrain">Inclined Terrain</option>
-			</optgroup>
-		</select>
-
-		<label>Mesh B:</label>
-		<select id="meshB">
-			<optgroup label="Kirra Surfaces">
-				<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
-				<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
-				<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
-				<option value="kirra-cup">Kirra Cup (16 tris)</option>
-				<option value="kirra-shell">Shell (8565 tris)</option>
-				<option value="kirra-presplit-a" selected>Presplit-A (56 tris)</option>
-			</optgroup>
-			<optgroup label="Procedural">
-				<option value="cube-offset">Cube (offset)</option>
-				<option value="cube">Cube</option>
-				<option value="pit-shell">Steep Pit Shell</option>
-				<option value="flat-terrain">Flat Terrain</option>
-				<option value="flat-cut">Flat Cut Plane</option>
-			</optgroup>
-		</select>
-
-		<div class="sep"></div>
-
-		<button id="btn-input" onclick="runOp('input')">Inputs</button>
-		<button id="btn-splits" onclick="runOp('splits')">Splits</button>
-		<button id="btn-bms-splits" onclick="runOp('bms-splits')" style="border-color:#39B54A;color:#39B54A">BMS Splits</button>
-		<button id="btn-subtract" onclick="runOp('subtract')">A &minus; B</button>
-		<button id="btn-subtract-inv" onclick="runOp('subtract-inv')">B &minus; A</button>
-		<button id="btn-union" onclick="runOp('union')">A &cup; B</button>
-		<button id="btn-intersect" onclick="runOp('intersect')">A &cap; B</button>
-		<button id="btn-custom" onclick="runOp('custom')">Custom</button>
-
-		<div class="sep"></div>
-		<label><input type="checkbox" id="chk-wireframe"> Wireframe</label>
-		<label><input type="checkbox" id="chk-edges" checked> Edges</label>
-		<label><input type="checkbox" id="chk-open-edges"> Open Edges</label>
-		<label><input type="checkbox" id="chk-nonmanifold"> Non-Manifold</label>
-		<label><input type="checkbox" id="chk-fan-tris"> Fan Tris</label>
-		<div class="sep"></div>
-		<label><input type="checkbox" id="chk-prerepair" checked> Fix T-Junctions</label>
-		<label><input type="checkbox" id="chk-fill-gaps"> Fill Gaps (Fan)</label>
-		<label><input type="checkbox" id="chk-force-close"> Force Close (Idx)</label>
-		<label><input type="checkbox" id="chk-merge-small"> Merge Small</label>
-		<div class="sep"></div>
-		<label style="color:#39B54A"><input type="checkbox" id="chk-bms-pipe"> BMS Pipe</label>
-		<label style="color:#ffdd00"><input type="checkbox" id="chk-show-isect" checked> Intersect</label>
-		<label style="color:#ff00ff"><input type="checkbox" id="chk-show-walks" checked> Walks</label>
+		<div class="toolbar-row">
+			<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.5</span></h1>
+			<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
+			<div class="sep"></div>
+			<button type="button" id="btn-kap-import" title="Load triangulated surfaces from a Kirra .kap file">Import KAP</button>
+			<button type="button" id="btn-kap-export" title="Save Mesh A and Mesh B as a minimal Kirra-compatible .kap">Export KAP</button>
+			<input type="file" id="kap-file-input" accept=".kap,.zip" style="display:none" />
+			<div class="sep"></div>
+			<label>Mesh A:</label>
+			<select id="meshA">
+				<optgroup label="Kirra Surfaces">
+					<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
+					<option value="kirra-cup">Kirra Cup (16 tris)</option>
+					<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
+					<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
+					<option value="kirra-shell" selected>Shell (8565 tris)</option>
+					<option value="kirra-presplit-a">Presplit-A (56 tris)</option>
+				</optgroup>
+				<optgroup label="Procedural">
+					<option value="cube">Cube</option>
+					<option value="cube-large">Large Cube</option>
+					<option value="flat-terrain">Flat Terrain</option>
+					<option value="wavy-terrain">Wavy Terrain</option>
+					<option value="inclined-terrain">Inclined Terrain</option>
+				</optgroup>
+			</select>
+			<label>Mesh B:</label>
+			<select id="meshB">
+				<optgroup label="Kirra Surfaces">
+					<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
+					<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
+					<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
+					<option value="kirra-cup">Kirra Cup (16 tris)</option>
+					<option value="kirra-shell">Shell (8565 tris)</option>
+					<option value="kirra-presplit-a" selected>Presplit-A (56 tris)</option>
+				</optgroup>
+				<optgroup label="Procedural">
+					<option value="cube-offset">Cube (offset)</option>
+					<option value="cube">Cube</option>
+					<option value="pit-shell">Steep Pit Shell</option>
+					<option value="flat-terrain">Flat Terrain</option>
+					<option value="flat-cut">Flat Cut Plane</option>
+				</optgroup>
+			</select>
+		</div>
+		<div class="toolbar-row">
+			<button id="btn-input" onclick="runOp('input')">Inputs</button>
+			<button id="btn-splits" onclick="setPipeline('orig')">Splits</button>
+			<button id="btn-bms-splits" onclick="setPipeline('bms')">BMS-Heffalump Splits</button>
+			<div class="sep"></div>
+			<button id="btn-subtract" onclick="runOp('subtract')">A &minus; B</button>
+			<button id="btn-subtract-inv" onclick="runOp('subtract-inv')">B &minus; A</button>
+			<button id="btn-union" onclick="runOp('union')">A &cup; B</button>
+			<button id="btn-intersect" onclick="runOp('intersect')">A &cap; B</button>
+			<div class="sep"></div>
+			<button id="btn-comp-union" onclick="runOp('comp-union')" title="Complement of union: inside both">(A&cup;B)&prime;</button>
+			<button id="btn-comp-intersect" onclick="runOp('comp-intersect')" title="Complement of intersection: outside both">(A&cap;B)&prime;</button>
+			<button id="btn-comp-subtract" onclick="runOp('comp-subtract')" title="Complement of difference">(A&minus;B)&prime;</button>
+			<div class="sep"></div>
+			<button id="btn-custom" onclick="runOp('custom')">Custom</button>
+		</div>
+		<div class="toolbar-row">
+			<label><input type="checkbox" id="chk-prerepair" checked> Fix T-Junctions</label>
+			<label><input type="checkbox" id="chk-fill-gaps"> Fill Gaps (Fan)</label>
+			<label><input type="checkbox" id="chk-force-close"> Force Close (Idx)</label>
+			<label><input type="checkbox" id="chk-fan-tris"> Fan Tris</label>
+			<label><input type="checkbox" id="chk-merge-small"> Merge Small</label>
+			<label><input type="checkbox" id="chk-reclassify"> Reclassify</label>
+		</div>
+		<div class="toolbar-row">
+			<label><input type="checkbox" id="chk-wireframe"> Wireframe</label>
+			<label><input type="checkbox" id="chk-edges" checked> Edges</label>
+			<label><input type="checkbox" id="chk-open-edges"> Open Edges</label>
+			<label><input type="checkbox" id="chk-nonmanifold"> Non-Manifold</label>
+			<label><input type="checkbox" id="chk-show-isect" checked> Intersect</label>
+			<label><input type="checkbox" id="chk-show-walks" checked> Walks</label>
+		</div>
 	</div>
 
 	<div id="main-row">
@@ -178,7 +212,9 @@ import {
 	computeProjectedArea, estimateAvgEdge,
 	resolveTJunctions, weldBoundaryVertices,
 	fillOpenEdgeLoops, forceCloseIndexedMesh,
-	bmsBooleanOp, bmsIntersect, bmsSplit, bmsChain, bmsClosePolylines
+	bmsBooleanOp, bmsIntersect, bmsSplit, bmsChain, bmsClosePolylines,
+	heffalumpClassify, shouldUseHeffalump,
+	reclassifyAtPoint, reclassifyRegion
 } from '../src/index.js';
 import { parseKapSurfaces, buildMinimalKapBlob } from './kap-io.js';
 
@@ -220,9 +256,7 @@ dirLight.position.set(5, -7, 10);
 scene.add(dirLight);
 
 // Grid helper — XY plane (Z-up)
-var gridHelper = new THREE.GridHelper(300, 30, 0x333333, 0x222222);
-gridHelper.rotation.x = Math.PI / 2;
-scene.add(gridHelper);
+// Grid removed — cleaner view for mine geometry
 
 var axesHelper = new THREE.AxesHelper(20);
 scene.add(axesHelper);
@@ -703,6 +737,12 @@ function resultStats(result, op, dt) {
 		lines.push('<span class="highlight">R = A \u222a B</span>  (keep A-outside-B + B-outside-A)');
 	} else if (op === 'intersect') {
 		lines.push('<span class="highlight">R = A \u2229 B</span>  (keep A-inside-B + B-inside-A)');
+	} else if (op === 'comp-union') {
+		lines.push('<span class="highlight">R = (A \u222a B)\u2032</span>  (complement of union: A-inside + B-inside)');
+	} else if (op === 'comp-intersect') {
+		lines.push('<span class="highlight">R = (A \u2229 B)\u2032</span>  (complement of intersection: A-outside + B-outside)');
+	} else if (op === 'comp-subtract') {
+		lines.push('<span class="highlight">R = (A \\ B)\u2032</span>  (complement of difference: A-inside + B-outside + B-inside)');
 	}
 
 	return lines.join('<br>');
@@ -719,13 +759,49 @@ var preRepair = true;
 var forceCloseWithFan = false;
 var forceCloseIndexed = false;
 var mergeSmall = false;
-var useBmsPipe = false;
+var reclassifyMode = false;
 var showIsect = true;
 var showWalks = true;
+
+// Pipeline architecture: cache the split result, operations reuse it
+var activePipeline = "bms";   // "orig" | "bms"
+var cachedSplit = null;        // { groups, segments, meshEdgePolys, componentWalks, rawPolylines, pool }
+var cachedMeshKey = null;      // invalidation key: meshA + meshB + pipeline + fixes
+var useBmsPipe = false;        // legacy compat (mapped from activePipeline)
+var useHeffalump = false;      // legacy compat
+
+function getCacheKey() {
+	var selA = document.getElementById('meshA').value;
+	var selB = document.getElementById('meshB').value;
+	return selA + '|' + selB + '|' + activePipeline + '|' + preRepair + '|' + forceCloseWithFan + '|' + forceCloseIndexed;
+}
+
+function invalidateCache() { cachedSplit = null; cachedMeshKey = null; }
+
+window.setPipeline = function(pipe) {
+	activePipeline = pipe;
+	invalidateCache();
+	runOp(pipe === 'bms' ? 'bms-splits' : 'splits');
+};
 
 var skipFit = false;
 window.runOp = function(op) {
 	currentOp = op;
+
+	// Highlight active buttons — deferred to after all rendering completes.
+	// Something in the render pipeline clears button classes, so we apply
+	// highlights in requestAnimationFrame to guarantee they stick.
+	requestAnimationFrame(function() {
+		var _allBtns = document.querySelectorAll('#toolbar button');
+		for (var abi = 0; abi < _allBtns.length; abi++) _allBtns[abi].classList.remove('active');
+		// Pipeline button
+		if (activePipeline === 'bms') document.getElementById('btn-bms-splits').classList.add('active');
+		else if (activePipeline === 'orig') document.getElementById('btn-splits').classList.add('active');
+		// Operation button
+		var _opBtn = document.getElementById('btn-' + currentOp);
+		if (_opBtn) _opBtn.classList.add('active');
+	});
+
 	clearResult();
 
 	var selA = document.getElementById('meshA').value;
@@ -882,7 +958,7 @@ window.runOp = function(op) {
 	}
 
 	// ── Splits view: show the 4 classification groups with distinct colours ──
-	if (op === 'splits') {
+	if (op === 'splits' && activePipeline === 'orig') {
 		var t0s = performance.now();
 		var split;
 		try {
@@ -926,7 +1002,7 @@ window.runOp = function(op) {
 		for (var gi = 0; gi < groupEntries.length; gi++) {
 			var ge = groupEntries[gi];
 			if (ge.soup.length === 0) continue;
-			var opa = (showFanTris) ? 0.85 : 0.75;
+			var opa = (showFanTris) ? 0.6 : 0.5;
 			var gMesh = soupToThreeMesh(ge.soup, splitColors[ge.key], opa);
 			gMesh.material.wireframe = showWireframe;
 			resultGroup.add(gMesh);
@@ -1010,19 +1086,39 @@ window.runOp = function(op) {
 		return;
 	}
 
-	// ── BMS Splits view: Pipeline C (Brent's Mega Soup) ──
-	if (op === 'bms-splits') {
-		var t0bms = performance.now();
-		var bmsResult;
-		try {
-			bmsResult = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
-		} catch(e) {
-			statResult.innerHTML = '<span class="highlight">BMS error: ' + e.message + '</span>';
-			console.error(e);
-			return;
-		}
-		var dtbms = (performance.now() - t0bms).toFixed(1);
+	// ── BMS Splits view (also handles op === 'splits' when activePipeline === 'bms') ──
+	if (op === 'bms-splits' || (op === 'splits' && activePipeline === 'bms')) {
+		// Use cache or run pipeline
+		var cacheKey = getCacheKey();
+		if (!cachedSplit || cachedMeshKey !== cacheKey) {
+			if (!window._bmsRunning) {
+				var overlay = document.getElementById('processing-overlay');
+				overlay.textContent = 'BMS-Heffalump running...';
+				overlay.classList.add('active');
+				window._bmsRunning = true;
+				setTimeout(function() { runOp(op); }, 30);
+				return;
+			}
+			window._bmsRunning = false;
+			document.getElementById('processing-overlay').classList.remove('active');
 
+			var t0bms = performance.now();
+			try {
+				cachedSplit = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
+				cachedMeshKey = cacheKey;
+			} catch(e) {
+				statResult.innerHTML = '<span class="highlight">BMS error: ' + e.message + '</span>';
+				console.error(e);
+				return;
+			}
+			var dtbms = (performance.now() - t0bms).toFixed(1);
+		} else {
+			window._bmsRunning = false;
+			document.getElementById('processing-overlay').classList.remove('active');
+			var dtbms = 'cached';
+		}
+
+		var bmsResult = cachedSplit;
 		if (!bmsResult) {
 			statResult.innerHTML = '<span class="highlight">No BMS result — meshes may not intersect</span>';
 			if (!skipFit) fitCamera();
@@ -1052,7 +1148,7 @@ window.runOp = function(op) {
 		for (var bgi = 0; bgi < bmsGroupEntries.length; bgi++) {
 			var bge = bmsGroupEntries[bgi];
 			if (bge.soup.length === 0) continue;
-			var bopa = (showFanTris) ? 0.85 : 0.75;
+			var bopa = (showFanTris) ? 0.6 : 0.5;
 			var bgMesh = soupToThreeMesh(bge.soup, bmsSplitColors[bge.key], bopa);
 			bgMesh.material.wireframe = showWireframe;
 			resultGroup.add(bgMesh);
@@ -1131,7 +1227,7 @@ window.runOp = function(op) {
 
 		// Stats panel
 		var bmsLines = [];
-		bmsLines.push('<span class="highlight">BMS Pipeline</span> (' + dtbms + ' ms)');
+		bmsLines.push('<span class="highlight">BMS-Heffalump Pipeline</span> (' + dtbms + ' ms)');
 		bmsLines.push('Segments: <b>' + bmsResult.segments.length + '</b>');
 		bmsLines.push('Polylines: <b>' + (bmsResult.polylines ? bmsResult.polylines.length : 0) + '</b>');
 		if (bmsResult.pool) bmsLines.push('Pool vertices: <b>' + bmsResult.pool.size() + '</b>');
@@ -1171,26 +1267,62 @@ window.runOp = function(op) {
 		var t0c = performance.now();
 		var split;
 		var bmsCloseData = null;
-		try {
-			if (useBmsPipe) {
-				var bmsR = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
-				if (!bmsR) { statResult.innerHTML = 'No BMS result'; return; }
-				split = { groups: bmsR.groups, segments: bmsR.segments };
-				bmsCloseData = bmsR.meshEdgePolys;
-				window._meshEdgePolys = bmsCloseData;
-				window._componentWalks = bmsR.componentWalks || null;
+
+		// If reclassifying, reuse the stored groups (already mutated)
+		if (reclassifyMode && window._reclassifyData) {
+			split = { groups: window._reclassifyData.groups, segments: window._reclassifyData.segments };
+			bmsCloseData = window._reclassifyData.meshEdgePolys;
+		} else {
+			// Use the pipeline cache (populated by BMS Splits or Orig Splits)
+			var cacheKey = getCacheKey();
+			if (!cachedSplit || cachedMeshKey !== cacheKey) {
+				// Need to run the pipeline — show overlay and yield
+				if (!window._customRunning) {
+					var overlay = document.getElementById('processing-overlay');
+					overlay.textContent = activePipeline === 'bms' ? 'BMS-Heffalump running...' : 'Splitting...';
+					overlay.classList.add('active');
+					window._customRunning = true;
+					setTimeout(function() { runOp('custom'); }, 30);
+					return;
+				}
+				window._customRunning = false;
+				document.getElementById('processing-overlay').classList.remove('active');
+
+				try {
+					if (activePipeline === "bms") {
+						var bmsR = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
+						if (!bmsR) { statResult.innerHTML = 'No BMS result'; return; }
+						cachedSplit = bmsR;
+					} else {
+						var oldSplit = splitMeshPair(dataA.soup, dataB.soup);
+						cachedSplit = { groups: oldSplit.groups, segments: oldSplit.segments || [],
+							meshEdgePolys: null, componentWalks: null };
+					}
+					cachedMeshKey = cacheKey;
+				} catch(e) {
+					statResult.innerHTML = '<span class="highlight">Error: ' + e.message + '</span>';
+					console.error(e);
+					return;
+				}
 			} else {
-				split = splitMeshPair(dataA.soup, dataB.soup);
+				// Cache hit — clear any stale overlay
+				window._customRunning = false;
+				document.getElementById('processing-overlay').classList.remove('active');
 			}
-		} catch(e) {
-			statResult.innerHTML = '<span class="highlight">Error: ' + e.message + '</span>';
-			console.error(e);
-			return;
+			split = { groups: cachedSplit.groups, segments: cachedSplit.segments || [] };
+			bmsCloseData = cachedSplit.meshEdgePolys;
+			window._meshEdgePolys = bmsCloseData;
+			window._componentWalks = cachedSplit.componentWalks || null;
+			window._reclassifyData = {
+				groups: cachedSplit.groups, segments: cachedSplit.segments,
+				meshEdgePolys: bmsCloseData
+			};
 		}
 		if (!split) {
 			statResult.innerHTML = 'No split result (meshes may not intersect)';
 			return;
 		}
+		// Store groups for reclassify click handler
 		var comps = splitToComponents(split.groups);
 		if (mergeSmall) {
 			comps = mergeSmallComponents(comps, 50);
@@ -1249,7 +1381,7 @@ window.runOp = function(op) {
 		window._customComps = comps;
 
 		// Step C3) Build the component list in the Result panel
-		var pipeLabel = useBmsPipe ? '<span style="color:#39B54A">BMS Pipe</span>' : 'Old Pipe';
+		var pipeLabel = activePipeline === 'bms' ? '<span style="color:#39B54A">BMS-Heffalump</span>' : 'Orig Pipe';
 		var compHtml = '<b>Custom splits</b> — ' + pipeLabel + ' (' + dtc + ' ms)<br>' +
 			comps.length + ' components from ' + (split.segments ? split.segments.length : 0) + ' segments<hr>';
 		compHtml += '<ul class="comp-list" id="comp-list">';
@@ -1278,7 +1410,7 @@ window.runOp = function(op) {
 		// Step C5) Render visible components into the scene
 		for (var ri = 0; ri < comps.length; ri++) {
 			if (!comps[ri].visible) continue;
-			var cMesh = soupToThreeMesh(comps[ri].soup, comps[ri].color, 0.85);
+			var cMesh = soupToThreeMesh(comps[ri].soup, comps[ri].color, 0.55);
 			cMesh.material.wireframe = showWireframe;
 			cMesh.material.side = THREE.DoubleSide;
 			resultGroup.add(cMesh);
@@ -1301,9 +1433,8 @@ window.runOp = function(op) {
 		}
 
 		// Step C6) Attach click handlers for eye toggles
-		setTimeout(function() {
-			var listEl = document.getElementById('comp-list');
-			if (!listEl) return;
+		var listEl = document.getElementById('comp-list');
+		if (listEl) {
 			listEl.addEventListener('click', function(ev) {
 				var target = ev.target;
 				while (target && !target.dataset.idx && target !== listEl) target = target.parentElement;
@@ -1313,7 +1444,7 @@ window.runOp = function(op) {
 				window._customComps[idx].visible = !window._customComps[idx].visible;
 				skipFit = true; runOp('custom'); skipFit = false;
 			});
-		}, 0);
+		}
 
 		// Shared line rendering helper
 		function renderCPolyVerts(verts, mat) {
@@ -1386,26 +1517,124 @@ window.runOp = function(op) {
 			console.warn("BMS overlay failed:", e3.message);
 		}
 
+		// Step C8) Direct intersection segment rendering (for heffalump mode
+		// where meshEdgePolys are empty but we still want to show the cuts)
+		if (showIsect && split.segments && split.segments.length > 0) {
+			var hasEpSegments = bmsCloseData && (
+				(bmsCloseData.A && bmsCloseData.A.segments && bmsCloseData.A.segments.length > 0) ||
+				(bmsCloseData.B && bmsCloseData.B.segments && bmsCloseData.B.segments.length > 0));
+			if (!hasEpSegments) {
+				var isectMat = new LineMaterial({
+					color: 0x00ffcc, linewidth: 5,
+					worldUnits: false, dashed: false, depthTest: false, transparent: true,
+					resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+				});
+				for (var rsi = 0; rsi < split.segments.length; rsi++) {
+					var rseg = split.segments[rsi];
+					if (rseg.p0 && rseg.p1) {
+						renderCPolyVerts([rseg.p0, rseg.p1], isectMat);
+					}
+				}
+			}
+		}
+
 		if (!skipFit) fitCamera();
 		return;
 	}
 
-	// Boolean operation — inverse ops swap A and B
+	// Boolean operation
 	var boolOp = op;
-	var boolSoupA = dataA.soup;
-	var boolSoupB = dataB.soup;
-	if (op === 'subtract-inv') {
-		boolOp = 'subtract';
-		boolSoupA = dataB.soup;
-		boolSoupB = dataA.soup;
-	}
 
 	var t0 = performance.now();
 	var result;
 	try {
-		result = boolean(boolSoupA, boolSoupB, boolOp);
+		if (activePipeline === "bms") {
+			// Use BMS pipeline — run or reuse cache
+			var cacheKey = getCacheKey();
+			if (!cachedSplit || cachedMeshKey !== cacheKey) {
+				var bmsR = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
+				if (bmsR) {
+					cachedSplit = bmsR;
+					cachedMeshKey = cacheKey;
+				}
+			}
+			if (cachedSplit) {
+				var g = cachedSplit.groups;
+				var combined = [];
+				function flipTris(arr) {
+					var out = [];
+					for (var fi = 0; fi < arr.length; fi++) {
+						var ft = arr[fi];
+						out.push({ v0: ft.v0, v1: ft.v2, v2: ft.v1 });
+					}
+					return out;
+				}
+				if (boolOp === 'subtract') {
+					// A\B = A-outside + flip(B-inside)
+					combined = g.aOutside.concat(flipTris(g.bInside));
+				} else if (boolOp === 'subtract-inv') {
+					// B\A = B-outside + flip(A-inside)
+					combined = g.bOutside.concat(flipTris(g.aInside));
+				} else if (boolOp === 'union') {
+					// A∪B = A-outside + B-outside
+					combined = g.aOutside.concat(g.bOutside);
+				} else if (boolOp === 'intersect') {
+					// A∩B = A-inside + B-inside
+					combined = g.aInside.concat(g.bInside);
+				} else if (boolOp === 'comp-union') {
+					// (A∪B)' = everything inside both = A-inside + B-inside
+					combined = g.aInside.concat(g.bInside);
+				} else if (boolOp === 'comp-intersect') {
+					// (A∩B)' = everything not in both = A-outside + B-outside
+					combined = g.aOutside.concat(g.bOutside);
+				} else if (boolOp === 'comp-subtract') {
+					// (A-B)' = everything not exclusively in A = A-inside + B-outside + B-inside
+					combined = g.aInside.concat(g.bOutside).concat(g.bInside);
+				}
+				if (combined.length > 0) {
+					var w = weldVertices(combined, 0.0001);
+					result = { soup: combined, points: w.points, triangles: w.triangles };
+				}
+			}
+		} else {
+			// Original pipeline — also cache the split groups for reclassify
+			var cacheKey2 = getCacheKey();
+			if (!cachedSplit || cachedMeshKey !== cacheKey2) {
+				var origSplit = splitMeshPair(dataA.soup, dataB.soup);
+				if (origSplit) {
+					cachedSplit = { groups: origSplit.groups, segments: origSplit.segments || [] };
+					cachedMeshKey = cacheKey2;
+				}
+			}
+			if (cachedSplit) {
+				var g2 = cachedSplit.groups;
+				var combined2 = [];
+				function flipTris2(arr) {
+					var out = [];
+					for (var fi2 = 0; fi2 < arr.length; fi2++) {
+						var ft2 = arr[fi2];
+						out.push({ v0: ft2.v0, v1: ft2.v2, v2: ft2.v1 });
+					}
+					return out;
+				}
+				if (boolOp === 'subtract') combined2 = g2.aOutside.concat(flipTris2(g2.bInside));
+				else if (boolOp === 'subtract-inv') combined2 = g2.bOutside.concat(flipTris2(g2.aInside));
+				else if (boolOp === 'union') combined2 = g2.aOutside.concat(g2.bOutside);
+				else if (boolOp === 'intersect') combined2 = g2.aInside.concat(g2.bInside);
+				else if (boolOp === 'comp-union') combined2 = g2.aInside.concat(g2.bInside);
+				else if (boolOp === 'comp-intersect') combined2 = g2.aOutside.concat(g2.bOutside);
+				else if (boolOp === 'comp-subtract') combined2 = g2.aInside.concat(g2.bOutside).concat(g2.bInside);
+				if (combined2.length > 0) {
+					var w2 = weldVertices(combined2, 0.0001);
+					result = { soup: combined2, points: w2.points, triangles: w2.triangles };
+				}
+			} else {
+				result = boolean(dataA.soup, dataB.soup, boolOp);
+			}
+		}
 	} catch(e) {
 		statResult.innerHTML = '<span class="highlight">Error: ' + e.message + '</span>';
+		console.error(e);
 		return;
 	}
 	var dt = (performance.now() - t0).toFixed(1);
@@ -1456,8 +1685,8 @@ window.runOp = function(op) {
 	}
 
 	// Result mesh
-	var colors = { subtract: 0xF47920, 'subtract-inv': 0x4472C4, union: 0x39B54A, intersect: 0x8B3FA0, custom: 0x00B7C2 };
-	var resultMesh = soupToThreeMesh(result.soup, colors[op] || 0xcccccc, 1.0);
+	var colors = { subtract: 0xF47920, 'subtract-inv': 0x4472C4, union: 0x39B54A, intersect: 0x8B3FA0, 'comp-union': 0xC2185B, 'comp-intersect': 0x00897B, 'comp-subtract': 0xFF6F00, custom: 0x00B7C2 };
+	var resultMesh = soupToThreeMesh(result.soup, colors[op] || 0xcccccc, 0.7);
 	resultMesh.material.wireframe = showWireframe;
 	resultGroup.add(resultMesh);
 
@@ -1512,8 +1741,8 @@ function fitCamera() {
 
 // ── UI event handlers ──
 
-document.getElementById('meshA').addEventListener('change', function() { runOp(currentOp); });
-document.getElementById('meshB').addEventListener('change', function() { runOp(currentOp); });
+document.getElementById('meshA').addEventListener('change', function() { invalidateCache(); runOp(currentOp); });
+document.getElementById('meshB').addEventListener('change', function() { invalidateCache(); runOp(currentOp); });
 
 document.getElementById('chk-wireframe').addEventListener('change', function(e) {
 	showWireframe = e.target.checked;
@@ -1544,26 +1773,24 @@ document.getElementById('chk-fan-tris').addEventListener('change', function(e) {
 
 document.getElementById('chk-prerepair').addEventListener('change', function(e) {
 	preRepair = e.target.checked;
+	invalidateCache();
 	skipFit = true; runOp(currentOp); skipFit = false;
 });
 
 document.getElementById('chk-fill-gaps').addEventListener('change', function(e) {
 	forceCloseWithFan = e.target.checked;
+	invalidateCache();
 	skipFit = true; runOp(currentOp); skipFit = false;
 });
 
 document.getElementById('chk-force-close').addEventListener('change', function(e) {
 	forceCloseIndexed = e.target.checked;
+	invalidateCache();
 	skipFit = true; runOp(currentOp); skipFit = false;
 });
 
 document.getElementById('chk-merge-small').addEventListener('change', function(e) {
 	mergeSmall = e.target.checked;
-	skipFit = true; runOp(currentOp); skipFit = false;
-});
-
-document.getElementById('chk-bms-pipe').addEventListener('change', function(e) {
-	useBmsPipe = e.target.checked;
 	skipFit = true; runOp(currentOp); skipFit = false;
 });
 
@@ -1576,6 +1803,187 @@ document.getElementById('chk-show-walks').addEventListener('change', function(e)
 	showWalks = e.target.checked;
 	skipFit = true; runOp(currentOp); skipFit = false;
 });
+
+document.getElementById('chk-reclassify').addEventListener('change', function(e) {
+	reclassifyMode = e.target.checked;
+	document.getElementById('viewport').classList.toggle('reclassify-mode', reclassifyMode);
+	document.getElementById('reclassify-hint').classList.toggle('active', reclassifyMode);
+});
+
+// Reclassify click handler — raycasts into the scene, shows popup to choose group.
+// Works in ALL views using the cached BMS groups.
+(function() {
+	var raycaster = new THREE.Raycaster();
+	var mouse = new THREE.Vector2();
+	var downX = 0, downY = 0;
+	var pendingTri = null; // { cx, cy, cz, shiftKey, groups }
+
+	// Hover highlight — a bright overlay triangle shown on mousemove
+	var highlightMesh = null;
+	var highlightGeo = new THREE.BufferGeometry();
+	var highlightPositions = new Float32Array(9);
+	highlightGeo.setAttribute('position', new THREE.BufferAttribute(highlightPositions, 3));
+	var highlightMat = new THREE.MeshBasicMaterial({
+		color: 0xffff00, side: THREE.DoubleSide,
+		transparent: true, opacity: 0.6, depthTest: false
+	});
+
+	renderer.domElement.addEventListener('pointermove', function(ev) {
+		if (!reclassifyMode) {
+			if (highlightMesh) { scene.remove(highlightMesh); highlightMesh = null; }
+			return;
+		}
+		var rect = renderer.domElement.getBoundingClientRect();
+		mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+		mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+		raycaster.setFromCamera(mouse, camera);
+		var intersects = raycaster.intersectObjects(resultGroup.children, true);
+
+		if (intersects.length === 0 || !intersects[0].face) {
+			if (highlightMesh) { scene.remove(highlightMesh); highlightMesh = null; }
+			return;
+		}
+		var hit = intersects[0];
+		var posAttr = hit.object.geometry.getAttribute('position');
+		var f = hit.face;
+		var m = hit.object.matrixWorld;
+
+		// Copy the 3 face vertices into the highlight geometry
+		for (var vi = 0; vi < 3; vi++) {
+			var idx = [f.a, f.b, f.c][vi];
+			var v = new THREE.Vector3(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx));
+			v.applyMatrix4(m);
+			highlightPositions[vi * 3] = v.x;
+			highlightPositions[vi * 3 + 1] = v.y;
+			highlightPositions[vi * 3 + 2] = v.z;
+		}
+		highlightGeo.attributes.position.needsUpdate = true;
+		highlightGeo.computeBoundingSphere();
+
+		if (!highlightMesh) {
+			highlightMesh = new THREE.Mesh(highlightGeo, highlightMat);
+			highlightMesh.renderOrder = 1000;
+		}
+		if (!highlightMesh.parent) scene.add(highlightMesh);
+	});
+
+	renderer.domElement.addEventListener('pointerdown', function(ev) {
+		downX = ev.clientX; downY = ev.clientY;
+	});
+
+	// Find which group a triangle centroid belongs to
+	function findTriGroup(groups, cx, cy, cz) {
+		var keys = ['aInside', 'aOutside', 'bInside', 'bOutside'];
+		var tol2 = 0.01 * 0.01;
+		for (var ki = 0; ki < keys.length; ki++) {
+			var arr = groups[keys[ki]];
+			if (!arr) continue;
+			for (var ti = 0; ti < arr.length; ti++) {
+				var tri = arr[ti];
+				var tx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3;
+				var ty = (tri.v0.y + tri.v1.y + tri.v2.y) / 3;
+				var tz = (tri.v0.z + tri.v1.z + tri.v2.z) / 3;
+				var dx = tx - cx, dy = ty - cy, dz = tz - cz;
+				if (dx*dx + dy*dy + dz*dz < tol2) {
+					return { key: keys[ki], idx: ti };
+				}
+			}
+		}
+		return null;
+	}
+
+	// Global function called by popup buttons
+	window.doReclassify = function(targetGroup) {
+		var menu = document.getElementById('reclassify-menu');
+		menu.style.display = 'none';
+		if (!targetGroup || !pendingTri) return;
+
+		var groups = pendingTri.groups;
+		var found = findTriGroup(groups, pendingTri.cx, pendingTri.cy, pendingTri.cz);
+		if (!found) return;
+		if (found.key === targetGroup) return; // already in target group
+
+		var src = groups[found.key];
+		var dst = groups[targetGroup];
+		if (!src || !dst) return;
+
+		if (pendingTri.shiftKey) {
+			// Region: flood fill from this triangle and move all connected
+			var meshMap = { aInside: 'A', aOutside: 'A', bInside: 'B', bOutside: 'B' };
+			var sideMap = { aInside: 'inside', aOutside: 'outside', bInside: 'inside', bOutside: 'outside' };
+			var count = reclassifyRegion(groups, meshMap[found.key], sideMap[found.key], found.idx);
+			console.log("[reclassify] Region: " + count + " tris from " + found.key + " -> " + targetGroup);
+		} else {
+			// Single triangle
+			dst.push(src.splice(found.idx, 1)[0]);
+			console.log("[reclassify] 1 tri from " + found.key + " -> " + targetGroup);
+		}
+		skipFit = true; runOp(currentOp); skipFit = false;
+	};
+
+	renderer.domElement.addEventListener('pointerup', function(ev) {
+		if (!reclassifyMode) return;
+		var groups = (cachedSplit && cachedSplit.groups) ? cachedSplit.groups : null;
+		if (!groups) return;
+
+		var dx = ev.clientX - downX, dy = ev.clientY - downY;
+		if (dx * dx + dy * dy > 25) return;
+
+		var rect = renderer.domElement.getBoundingClientRect();
+		mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+		mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+
+		raycaster.setFromCamera(mouse, camera);
+		var intersects = raycaster.intersectObjects(resultGroup.children, true);
+		if (intersects.length === 0) return;
+
+		var hit = intersects[0];
+		var face = hit.face;
+		var geo = hit.object.geometry;
+		if (!geo || !face) return;
+
+		var posAttr = geo.getAttribute('position');
+		var ia = face.a, ib = face.b, ic = face.c;
+		var ax = posAttr.getX(ia), ay = posAttr.getY(ia), az = posAttr.getZ(ia);
+		var bx = posAttr.getX(ib), by = posAttr.getY(ib), bz = posAttr.getZ(ib);
+		var cx = posAttr.getX(ic), cy = posAttr.getY(ic), cz = posAttr.getZ(ic);
+
+		var m = hit.object.matrixWorld;
+		var va = new THREE.Vector3(ax, ay, az).applyMatrix4(m);
+		var vb = new THREE.Vector3(bx, by, bz).applyMatrix4(m);
+		var vc = new THREE.Vector3(cx, cy, cz).applyMatrix4(m);
+
+		var doff = window._displayOffset || { x: 0, y: 0, z: 0 };
+		var pcx = (va.x + vb.x + vc.x) / 3 + doff.x;
+		var pcy = (va.y + vb.y + vc.y) / 3 + doff.y;
+		var pcz = (va.z + vb.z + vc.z) / 3 + doff.z;
+
+		// Find which group this triangle is currently in
+		var found = findTriGroup(groups, pcx, pcy, pcz);
+		if (!found) return;
+
+		// Store pending and show popup menu near the click
+		pendingTri = { cx: pcx, cy: pcy, cz: pcz, shiftKey: ev.shiftKey, groups: groups };
+		var menu = document.getElementById('reclassify-menu');
+		menu.style.left = ev.clientX + 'px';
+		menu.style.top = ev.clientY + 'px';
+		menu.style.display = 'block';
+		// Highlight current group
+		var btns = menu.querySelectorAll('button');
+		for (var bi = 0; bi < btns.length; bi++) {
+			btns[bi].style.fontWeight = 'normal';
+		}
+		menu.querySelector('div').textContent = (ev.shiftKey ? 'Move region' : 'Move triangle') + ' from ' + found.key + ' to:';
+	});
+
+	// Close menu on click outside
+	document.addEventListener('pointerdown', function(ev) {
+		var menu = document.getElementById('reclassify-menu');
+		if (menu.style.display !== 'none' && !menu.contains(ev.target)) {
+			menu.style.display = 'none';
+		}
+	});
+})();
 
 // Step KAP-1) Import: read surfaces.json from a Kirra .kap ZIP
 document.getElementById("btn-kap-import").addEventListener("click", function () {

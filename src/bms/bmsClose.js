@@ -46,7 +46,11 @@ function chainedOpenEdge(tris) {
 			var nne = (e + 2) % 3;
 			var heKey = ks[e] + "|" + ks[ne];
 			halfEdges[heKey] = true;
-			heNextInTri[heKey] = ks[ne] + "|" + ks[nne];
+			// Keep first occurrence — prevents non-manifold edges from
+			// overwriting with a different triangle's fan data
+			if (heNextInTri[heKey] === undefined) {
+				heNextInTri[heKey] = ks[ne] + "|" + ks[nne];
+			}
 		}
 	}
 
@@ -83,9 +87,13 @@ function chainedOpenEdge(tris) {
 
 		// Walk the fan around V starting from the next half-edge in A→V's triangle
 		var cursor = heNextInTri[bhk]; // V→C in the same triangle as A→V
+		var visited = {};  // cycle detection
+		visited[bhk] = true;
 		var safety = 1000;
 
 		while (safety-- > 0) {
+			if (!cursor || visited[cursor]) break;
+			visited[cursor] = true;
 			if (boundary[cursor]) {
 				nextBoundary[bhk] = cursor;
 				break;

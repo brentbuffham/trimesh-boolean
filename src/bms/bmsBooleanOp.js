@@ -16,6 +16,7 @@ import { bmsSplit } from "./bmsSplit.js";
 import { bmsChain } from "./bmsChain.js";
 import { bmsClosePolylines } from "./bmsClose.js";
 import { bmsClassify } from "./bmsClassify.js";
+import { heffalumpClassify, shouldUseHeffalump } from "./heffalumpClassify.js";
 import { estimateAvgEdge } from "../intersect/spatialGrid.js";
 import { soupCentroid, translateSoup } from "../util/math.js";
 import { resolveTJunctions } from "../repair/resolveTJunctions.js";
@@ -106,13 +107,33 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	// Step 4) Chain intersection segments
 	var polylines = bmsChain(isect.segments);
 
-	// Step 5) Close open polylines along boundary edges + build mesh edge polys
-	var closeResult = bmsClosePolylines(polylines, soupA, soupB, megaSoup, isect.segments);
-	var closedPolylines = closeResult.closedPolylines;
-	var meshEdgePolys = closeResult.meshEdgePolys;
+	// Step 5) Choose classification path.
+	// Clean meshes → ige walk (boundary topology + barrier-normal hybrid)
+	// Defective meshes → heffalump (barrier-only, no boundary needed)
+	var useHeffalump = opts.forceHeffalump || shouldUseHeffalump(soupA, soupB);
 
-	// Step 6) Classify via hybrid boundary-topology / barrier-normal
-	var classifyResult = bmsClassify(megaSoup, closedPolylines, isect.segments, soupA, soupB, meshEdgePolys);
+	var closedPolylines, meshEdgePolys, classifyResult;
+
+	if (useHeffalump) {
+		// The heffalump doesn't need boundary walks for classification,
+		// but we still build meshEdgePolys from raw chains for visualization
+		// (so Intersect/Walks toggles work in all views).
+		var hefEpA = { segments: [], closed: false };
+		var hefEpB = { segments: [], closed: false };
+		for (var hpi = 0; hpi < polylines.length; hpi++) {
+			hefEpA.segments.push({ verts: polylines[hpi].slice(), type: "intersection" });
+			hefEpB.segments.push({ verts: polylines[hpi].slice(), type: "intersection" });
+		}
+		closedPolylines = polylines;
+		meshEdgePolys = { A: hefEpA, B: hefEpB };
+		classifyResult = heffalumpClassify(megaSoup, isect.segments, soupA, soupB);
+	} else {
+		// Clean mesh path — close polylines along boundary + ige walk classification
+		var closeResult = bmsClosePolylines(polylines, soupA, soupB, megaSoup, isect.segments);
+		closedPolylines = closeResult.closedPolylines;
+		meshEdgePolys = closeResult.meshEdgePolys;
+		classifyResult = bmsClassify(megaSoup, closedPolylines, isect.segments, soupA, soupB, meshEdgePolys);
+	}
 
 	var groups = {
 		aInside: classifyResult.aInside,
@@ -155,6 +176,21 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 				for (var cvi = 0; cvi < cvs.length; cvi++) {
 					cvs[cvi] = { x: cvs[cvi].x + cx, y: cvs[cvi].y + cy, z: cvs[cvi].z + cz };
 				}
+			}
+		}
+	}
+
+	// Translate intersection segments and polylines back to original coordinates
+	for (var tsi = 0; tsi < isect.segments.length; tsi++) {
+		var tseg = isect.segments[tsi];
+		tseg.p0 = { x: tseg.p0.x + cx, y: tseg.p0.y + cy, z: tseg.p0.z + cz, id: tseg.p0.id };
+		tseg.p1 = { x: tseg.p1.x + cx, y: tseg.p1.y + cy, z: tseg.p1.z + cz, id: tseg.p1.id };
+	}
+	if (polylines) {
+		for (var tpi = 0; tpi < polylines.length; tpi++) {
+			var tpl = polylines[tpi];
+			for (var tpj = 0; tpj < tpl.length; tpj++) {
+				tpl[tpj] = { x: tpl[tpj].x + cx, y: tpl[tpj].y + cy, z: tpl[tpj].z + cz, id: tpl[tpj].id };
 			}
 		}
 	}
