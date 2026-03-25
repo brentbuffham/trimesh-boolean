@@ -9,17 +9,22 @@
 
 	/* ── Top toolbar ── */
 	#toolbar {
-		display: flex; align-items: center; gap: 12px; padding: 8px 16px;
-		background: #111; border-bottom: 1px solid #333; flex-wrap: wrap;
+		padding: 4px 16px;
+		background: #111; border-bottom: 1px solid #333;
 	}
+	.toolbar-row {
+		display: flex; align-items: center; gap: 10px; padding: 3px 0;
+		flex-wrap: nowrap; overflow-x: auto; white-space: nowrap;
+	}
+	.toolbar-row .sep { width: 1px; height: 16px; background: #444; flex-shrink: 0; }
 	#toolbar h1 { font-size: 1rem; color: #cc2222; white-space: nowrap; }
-	#toolbar label { font-size: 0.8rem; color: #999; }
+	#toolbar label { font-size: 0.8rem; color: #ddd; }
 	#toolbar select, #toolbar button {
-		padding: 4px 10px; border: 1px solid #444; background: #222; color: #bbb;
+		padding: 4px 10px; border: 1px solid #555; background: #333; color: #ddd;
 		border-radius: 3px; font-size: 0.8rem; cursor: pointer;
 	}
 	#toolbar select:focus, #toolbar button:focus { outline: 1px solid #cc2222; }
-	#toolbar button:hover { background: #333; }
+	#toolbar button:hover { background: #444; }
 	#toolbar button.active { background: #cc2222; color: #fff; border-color: #cc2222; }
 	.nav-link {
 		padding: 4px 12px; background: #cc2222; color: #fff; font-weight: 600;
@@ -53,10 +58,26 @@
 	.comp-list { margin: 4px 0; padding: 0; list-style: none; font-size: 11px; }
 	.comp-item { display: flex; align-items: center; gap: 4px; padding: 2px 0; cursor: pointer; user-select: none; }
 	.comp-item:hover { background: rgba(255,255,255,0.07); }
-	.comp-eye { width: 18px; text-align: center; font-size: 13px; opacity: 0.8; }
+	.comp-eye { width: 18px; text-align: center; font-size: 13px; opacity: 0.8; cursor: pointer; }
 	.comp-eye.off { opacity: 0.25; }
 	.comp-swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.2); }
 	.comp-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	button.active { background: rgba(255,255,255,0.15); box-shadow: inset 0 0 0 2px currentColor; }
+	#viewport.reclassify-mode { cursor: crosshair; }
+	#reclassify-hint {
+		display: none; position: fixed; bottom: 20px; left: 50%;
+		transform: translateX(-50%); padding: 8px 16px;
+		background: rgba(255,102,0,0.9); color: #fff; border-radius: 6px;
+		font: bold 13px monospace; z-index: 100; pointer-events: none;
+	}
+	#reclassify-hint.active { display: block; }
+	#processing-overlay {
+		display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+		background: rgba(0,0,0,0.5); z-index: 9999;
+		justify-content: center; align-items: center;
+		font: bold 18px monospace; color: #fff; letter-spacing: 1px;
+	}
+	#processing-overlay.active { display: flex; }
 </style>
 <script type="importmap">
 {
@@ -66,86 +87,108 @@
 	}
 }
 </script>
-  <script type="module" crossorigin src="/trimesh-boolean/assets/index-BluxjBoU.js"></script>
-  <link rel="modulepreload" crossorigin href="/trimesh-boolean/assets/booleanOp-BhCmmezw.js">
+  <script type="module" crossorigin src="/trimesh-boolean/assets/index-BQINaVTl.js"></script>
+  <link rel="modulepreload" crossorigin href="/trimesh-boolean/assets/booleanOp-Dw0YP5VW.js">
 </head>
 <body>
+<div id="processing-overlay">Processing...</div>
+<div id="reclassify-hint">Click triangle to reassign | Shift+Click for region</div>
+<div id="reclassify-menu" style="display:none;position:fixed;z-index:10000;background:#222;border:1px solid #666;border-radius:4px;padding:4px;font:12px monospace;">
+	<div style="color:#888;padding:2px 8px;margin-bottom:2px;">Assign to:</div>
+	<button onclick="doReclassify('aInside')" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#E6192C;border:none;cursor:pointer;margin:1px 0;">A-inside</button>
+	<button onclick="doReclassify('aOutside')" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#F47920;border:none;cursor:pointer;margin:1px 0;">A-outside</button>
+	<button onclick="doReclassify('bInside')" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#4472C4;border:none;cursor:pointer;margin:1px 0;">B-inside</button>
+	<button onclick="doReclassify('bOutside')" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#00B7C2;border:none;cursor:pointer;margin:1px 0;">B-outside</button>
+	<button onclick="doReclassify(null)" style="display:block;width:100%;text-align:left;padding:4px 8px;background:#333;color:#888;border:none;cursor:pointer;margin:1px 0;">Cancel</button>
+</div>
 <div id="app">
 	<div id="toolbar">
-		<h1>trimesh-boolean</h1>
-		<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
-		<div class="sep"></div>
-
-		<button type="button" id="btn-kap-import" title="Load triangulated surfaces from a Kirra .kap file">Import KAP</button>
-		<button type="button" id="btn-kap-export" title="Save Mesh A and Mesh B as a minimal Kirra-compatible .kap">Export KAP</button>
-		<input type="file" id="kap-file-input" accept=".kap,application/zip,application/x-zip-compressed" style="display:none" />
-
-		<div class="sep"></div>
-
-		<label>Mesh A:</label>
-		<select id="meshA">
-			<optgroup label="Kirra Surfaces">
-				<option value="kirra-terrain" selected>Kirra Terrain (11200 tris)</option>
-				<option value="kirra-cup">Kirra Cup (16 tris)</option>
-				<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
-				<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
-			</optgroup>
-			<optgroup label="Procedural">
-				<option value="cube">Cube</option>
-				<option value="cube-large">Large Cube</option>
-				<option value="flat-terrain">Flat Terrain</option>
-				<option value="wavy-terrain">Wavy Terrain</option>
-				<option value="inclined-terrain">Inclined Terrain</option>
-			</optgroup>
-		</select>
-
-		<label>Mesh B:</label>
-		<select id="meshB">
-			<optgroup label="Kirra Surfaces">
-				<option value="kirra-convoluted" selected>Kirra Convoluted (32 tris)</option>
-				<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
-				<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
-				<option value="kirra-cup">Kirra Cup (16 tris)</option>
-			</optgroup>
-			<optgroup label="Procedural">
-				<option value="cube-offset">Cube (offset)</option>
-				<option value="cube">Cube</option>
-				<option value="pit-shell">Steep Pit Shell</option>
-				<option value="flat-terrain">Flat Terrain</option>
-				<option value="flat-cut">Flat Cut Plane</option>
-			</optgroup>
-		</select>
-
-		<div class="sep"></div>
-
-		<button id="btn-input" onclick="runOp('input')">Inputs</button>
-		<button id="btn-splits" onclick="runOp('splits')">Splits</button>
-		<button id="btn-bms-splits" onclick="runOp('bms-splits')" style="border-color:#39B54A;color:#39B54A">BMS Splits</button>
-		<button id="btn-subtract" onclick="runOp('subtract')">A &minus; B</button>
-		<button id="btn-subtract-inv" onclick="runOp('subtract-inv')">B &minus; A</button>
-		<button id="btn-union" onclick="runOp('union')">A &cup; B</button>
-		<button id="btn-intersect" onclick="runOp('intersect')">A &cap; B</button>
-		<button id="btn-custom" onclick="runOp('custom')">Custom</button>
-
-		<div class="sep"></div>
-		<label><input type="checkbox" id="chk-wireframe"> Wireframe</label>
-		<label><input type="checkbox" id="chk-edges" checked> Edges</label>
-		<label><input type="checkbox" id="chk-open-edges"> Open Edges</label>
-		<label><input type="checkbox" id="chk-nonmanifold"> Non-Manifold</label>
-		<label><input type="checkbox" id="chk-fan-tris"> Fan Tris</label>
-		<div class="sep"></div>
-		<label><input type="checkbox" id="chk-prerepair" checked> Fix T-Junctions</label>
-		<label><input type="checkbox" id="chk-fill-gaps"> Fill Gaps (Fan)</label>
-		<label><input type="checkbox" id="chk-force-close"> Force Close (Idx)</label>
-		<label><input type="checkbox" id="chk-merge-small"> Merge Small</label>
-		<div class="sep"></div>
-		<label style="color:#39B54A"><input type="checkbox" id="chk-bms-pipe"> BMS Pipe</label>
-		<label style="color:#ffdd00"><input type="checkbox" id="chk-show-isect" checked> Intersect</label>
-		<label style="color:#ff00ff"><input type="checkbox" id="chk-show-walks" checked> Walks</label>
+		<div class="toolbar-row">
+			<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.5</span></h1>
+			<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
+			<div class="sep"></div>
+			<button type="button" id="btn-kap-import" title="Load triangulated surfaces from a Kirra .kap file">Import KAP</button>
+			<button type="button" id="btn-kap-export" title="Save Mesh A and Mesh B as a minimal Kirra-compatible .kap">Export KAP</button>
+			<input type="file" id="kap-file-input" accept=".kap,.zip" style="display:none" />
+			<div class="sep"></div>
+			<label>Mesh A:</label>
+			<select id="meshA">
+				<optgroup label="Kirra Surfaces">
+					<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
+					<option value="kirra-cup">Kirra Cup (16 tris)</option>
+					<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
+					<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
+					<option value="kirra-shell" selected>Shell (8565 tris)</option>
+					<option value="kirra-presplit-a">Presplit-A (56 tris)</option>
+				</optgroup>
+				<optgroup label="Procedural">
+					<option value="cube">Cube</option>
+					<option value="cube-large">Large Cube</option>
+					<option value="flat-terrain">Flat Terrain</option>
+					<option value="wavy-terrain">Wavy Terrain</option>
+					<option value="inclined-terrain">Inclined Terrain</option>
+				</optgroup>
+			</select>
+			<label>Mesh B:</label>
+			<select id="meshB">
+				<optgroup label="Kirra Surfaces">
+					<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
+					<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
+					<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
+					<option value="kirra-cup">Kirra Cup (16 tris)</option>
+					<option value="kirra-shell">Shell (8565 tris)</option>
+					<option value="kirra-presplit-a" selected>Presplit-A (56 tris)</option>
+				</optgroup>
+				<optgroup label="Procedural">
+					<option value="cube-offset">Cube (offset)</option>
+					<option value="cube">Cube</option>
+					<option value="pit-shell">Steep Pit Shell</option>
+					<option value="flat-terrain">Flat Terrain</option>
+					<option value="flat-cut">Flat Cut Plane</option>
+				</optgroup>
+			</select>
+		</div>
+		<div class="toolbar-row">
+			<button id="btn-input" onclick="runOp('input')">Inputs</button>
+			<button id="btn-splits" onclick="setPipeline('orig')">Splits</button>
+			<button id="btn-bms-splits" onclick="setPipeline('bms')">BMS-Heffalump Splits</button>
+			<div class="sep"></div>
+			<button id="btn-subtract" onclick="runOp('subtract')">A &minus; B</button>
+			<button id="btn-subtract-inv" onclick="runOp('subtract-inv')">B &minus; A</button>
+			<button id="btn-union" onclick="runOp('union')">A &cup; B</button>
+			<button id="btn-intersect" onclick="runOp('intersect')">A &cap; B</button>
+			<div class="sep"></div>
+			<button id="btn-comp-union" onclick="runOp('comp-union')" title="Complement of union: inside both">(A&cup;B)&prime;</button>
+			<button id="btn-comp-intersect" onclick="runOp('comp-intersect')" title="Complement of intersection: outside both">(A&cap;B)&prime;</button>
+			<button id="btn-comp-subtract" onclick="runOp('comp-subtract')" title="Complement of difference">(A&minus;B)&prime;</button>
+			<div class="sep"></div>
+			<button id="btn-custom" onclick="runOp('custom')">Custom</button>
+		</div>
+		<div class="toolbar-row">
+			<label><input type="checkbox" id="chk-prerepair" checked> Fix T-Junctions</label>
+			<label><input type="checkbox" id="chk-fill-gaps"> Fill Gaps (Fan)</label>
+			<label><input type="checkbox" id="chk-force-close"> Force Close (Idx)</label>
+			<label><input type="checkbox" id="chk-fan-tris"> Fan Tris</label>
+			<label><input type="checkbox" id="chk-merge-small"> Merge Small</label>
+			<label><input type="checkbox" id="chk-reclassify"> Reclassify</label>
+		</div>
+		<div class="toolbar-row">
+			<label><input type="checkbox" id="chk-wireframe"> Wireframe</label>
+			<label><input type="checkbox" id="chk-edges" checked> Edges</label>
+			<label><input type="checkbox" id="chk-open-edges"> Open Edges</label>
+			<label><input type="checkbox" id="chk-nonmanifold"> Non-Manifold</label>
+			<label><input type="checkbox" id="chk-show-isect" checked> Intersect</label>
+			<label><input type="checkbox" id="chk-show-walks" checked> Walks</label>
+		</div>
 	</div>
 
 	<div id="main-row">
-		<div id="viewport"></div>
+		<div id="viewport">
+			<div id="mesh-warning" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+				background:rgba(0,0,0,0.85);color:#ff6600;padding:20px 30px;border-radius:8px;font-size:14px;
+				font-family:'Courier New',monospace;text-align:center;z-index:100;border:1px solid #ff6600;max-width:400px;">
+			</div>
+		</div>
 		<div id="info-panel">
 			<h3>Inputs</h3>
 			<div class="stat" id="stat-inputs">Select meshes and click an operation</div>

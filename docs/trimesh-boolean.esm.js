@@ -1,796 +1,8 @@
-/**
- * @module util/math
- *
- * Core math utilities for triangle mesh operations.
- */
-
-/**
- * 3D Euclidean distance between two points.
- * @param {{ x: number, y: number, z: number }} a
- * @param {{ x: number, y: number, z: number }} b
- * @returns {number}
- */
-function dist3(a, b) {
-	var dx = a.x - b.x;
-	var dy = a.y - b.y;
-	var dz = a.z - b.z;
-	return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-/**
- * Squared 3D distance (avoids sqrt for comparisons).
- * @param {{ x: number, y: number, z: number }} a
- * @param {{ x: number, y: number, z: number }} b
- * @returns {number}
- */
-function distSq3(a, b) {
-	var dx = a.x - b.x;
-	var dy = a.y - b.y;
-	var dz = a.z - b.z;
-	return dx * dx + dy * dy + dz * dz;
-}
-
-/**
- * Compute the area of a triangle in 3D using the cross-product method.
- * @param {{ v0: Object, v1: Object, v2: Object }} tri
- * @returns {number} Area in square units
- */
-function triangleArea3D(tri) {
-	var ux = tri.v1.x - tri.v0.x;
-	var uy = tri.v1.y - tri.v0.y;
-	var uz = tri.v1.z - tri.v0.z;
-	var vx = tri.v2.x - tri.v0.x;
-	var vy = tri.v2.y - tri.v0.y;
-	var vz = tri.v2.z - tri.v0.z;
-	var cx = uy * vz - uz * vy;
-	var cy = uz * vx - ux * vz;
-	var cz = ux * vy - uy * vx;
-	return 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
-}
-
-/**
- * Compute axis-aligned bounding box from an array of points.
- * @param {Array<{ x: number, y: number, z: number }>} points
- * @returns {{ minX: number, maxX: number, minY: number, maxY: number, minZ: number, maxZ: number }}
- */
-function computeBounds(points) {
-	var minX = Infinity, minY = Infinity, minZ = Infinity;
-	var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-	for (var i = 0; i < points.length; i++) {
-		var p = points[i];
-		if (p.x < minX) minX = p.x;
-		if (p.y < minY) minY = p.y;
-		if (p.z < minZ) minZ = p.z;
-		if (p.x > maxX) maxX = p.x;
-		if (p.y > maxY) maxY = p.y;
-		if (p.z > maxZ) maxZ = p.z;
-	}
-	return { minX: minX, maxX: maxX, minY: minY, maxY: maxY, minZ: minZ, maxZ: maxZ };
-}
-
-/**
- * Cross product of two 3D vectors.
- * @param {{ x: number, y: number, z: number }} a
- * @param {{ x: number, y: number, z: number }} b
- * @returns {{ x: number, y: number, z: number }}
- */
-function cross(a, b) {
-	return {
-		x: a.y * b.z - a.z * b.y,
-		y: a.z * b.x - a.x * b.z,
-		z: a.x * b.y - a.y * b.x
-	};
-}
-
-/**
- * Linearly interpolate between two vertices.
- * @param {{ x: number, y: number, z: number }} a
- * @param {{ x: number, y: number, z: number }} b
- * @param {number} t - Interpolation factor [0, 1]
- * @returns {{ x: number, y: number, z: number }}
- */
-function lerpVert(a, b, t) {
-	return {
-		x: a.x + t * (b.x - a.x),
-		y: a.y + t * (b.y - a.y),
-		z: a.z + t * (b.z - a.z)
-	};
-}
-
-/**
- * Standard vertex key for spatial hashing (6 decimal places).
- * @param {{ x: number, y: number, z: number }} v
- * @returns {string}
- */
-function vKey(v) {
-	return v.x.toFixed(6) + "," + v.y.toFixed(6) + "," + v.z.toFixed(6);
-}
-
-/**
- * Canonical edge key (order-independent).
- * @param {string} ka - Vertex key A
- * @param {string} kb - Vertex key B
- * @returns {string}
- */
-function edgeKey(ka, kb) {
-	return ka < kb ? ka + "|" + kb : kb + "|" + ka;
-}
-
-/**
- * Count open (boundary) and non-manifold (over-shared) edges in a triangle soup.
- * @param {Array} tris - Array of {v0, v1, v2}
- * @returns {{ openEdges: number, overShared: number, total: number }}
- */
-function countOpenEdges(tris) {
-	var edgeMap = {};
-
-	for (var i = 0; i < tris.length; i++) {
-		var tri = tris[i];
-		var verts = [tri.v0, tri.v1, tri.v2];
-		var keys = [vKey(verts[0]), vKey(verts[1]), vKey(verts[2])];
-
-		for (var e = 0; e < 3; e++) {
-			var ne = (e + 1) % 3;
-			var ek = edgeKey(keys[e], keys[ne]);
-			if (!edgeMap[ek]) {
-				edgeMap[ek] = 0;
-			}
-			edgeMap[ek]++;
-		}
-	}
-
-	var openEdges = 0;
-	var overShared = 0;
-	var total = 0;
-
-	for (var ek2 in edgeMap) {
-		total++;
-		if (edgeMap[ek2] === 1) {
-			openEdges++;
-		} else if (edgeMap[ek2] > 2) {
-			overShared++;
-		}
-	}
-
-	return { openEdges: openEdges, overShared: overShared, total: total };
-}
-
-/**
- * @module normals/triNormal
- *
- * Compute the unit normal of a triangle from its three vertices.
- */
-
-
-/**
- * Compute the unit face normal of a triangle.
- *
- * Uses the cross product of edges (v0->v1) x (v0->v2) and normalises
- * to unit length.  Returns the Z-up fallback {0,0,1} for degenerate
- * (zero-area) triangles.
- *
- * @param {{ v0: {x:number,y:number,z:number}, v1: {x:number,y:number,z:number}, v2: {x:number,y:number,z:number} }} tri
- * @returns {{ x: number, y: number, z: number }} Unit normal vector
- */
-function triNormal(tri) {
-    var e1 = { x: tri.v1.x - tri.v0.x, y: tri.v1.y - tri.v0.y, z: tri.v1.z - tri.v0.z };
-    var e2 = { x: tri.v2.x - tri.v0.x, y: tri.v2.y - tri.v0.y, z: tri.v2.z - tri.v0.z };
-    var n = cross(e1, e2);
-    var len = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
-    if (len < 1e-15) return { x: 0, y: 0, z: 1 };
-    return { x: n.x / len, y: n.y / len, z: n.z / len };
-}
-
-/**
- * @module intersect/triTriIntersection
- *
- * Moller triangle-triangle intersection test.
- *
- * Determines whether two triangles intersect and, if so, computes the
- * line segment that lies on both triangles.  Based on the Moller (1997)
- * separating-axis / interval-overlap method.
- *
- * Exports:
- *  - triTriIntersection(triA, triB)          -- segment or null
- *  - triTriIntersectionDetailed(triA, triB)  -- signed distances + segLen
- *  - computeTriInterval(tri, lineDir, linePoint, d0, d1, d2)
- *  - findLinePoint(nA, dA, nB, dB, lineDir)
- */
-
-
-/**
- * Moller triangle-triangle intersection.
- *
- * Projects each triangle onto the plane of the other, computes the
- * parametric overlap of their crossing intervals on the plane-plane
- * intersection line, and returns the resulting 3-D segment.
- *
- * @param {{ v0: Object, v1: Object, v2: Object }} triA
- * @param {{ v0: Object, v1: Object, v2: Object }} triB
- * @returns {{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number} } | null}
- *          Intersection segment, or null when no intersection exists.
- */
-function triTriIntersection(triA, triB) {
-    // Plane of triangle B
-    var nB = triNormal(triB);
-    var dB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
-
-    // Signed distances of triA vertices to plane B
-    var dA0 = nB.x * triA.v0.x + nB.y * triA.v0.y + nB.z * triA.v0.z + dB;
-    var dA1 = nB.x * triA.v1.x + nB.y * triA.v1.y + nB.z * triA.v1.z + dB;
-    var dA2 = nB.x * triA.v2.x + nB.y * triA.v2.y + nB.z * triA.v2.z + dB;
-
-    // All on same side -> no intersection
-    if (dA0 > 0 && dA1 > 0 && dA2 > 0) return null;
-    if (dA0 < 0 && dA1 < 0 && dA2 < 0) return null;
-
-    // Plane of triangle A
-    var nA = triNormal(triA);
-    var dA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
-
-    // Signed distances of triB vertices to plane A
-    var dB0 = nA.x * triB.v0.x + nA.y * triB.v0.y + nA.z * triB.v0.z + dA;
-    var dB1 = nA.x * triB.v1.x + nA.y * triB.v1.y + nA.z * triB.v1.z + dA;
-    var dB2 = nA.x * triB.v2.x + nA.y * triB.v2.y + nA.z * triB.v2.z + dA;
-
-    // All on same side -> no intersection
-    if (dB0 > 0 && dB1 > 0 && dB2 > 0) return null;
-    if (dB0 < 0 && dB1 < 0 && dB2 < 0) return null;
-
-    // Near-parallel planes
-    var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
-    if (Math.abs(dotN) > 0.9999) return null;
-
-    // Intersection line direction
-    var lineDir = cross(nA, nB);
-    var lineDirLen = Math.sqrt(lineDir.x * lineDir.x + lineDir.y * lineDir.y + lineDir.z * lineDir.z);
-    if (lineDirLen < 1e-12) return null;
-    lineDir.x /= lineDirLen;
-    lineDir.y /= lineDirLen;
-    lineDir.z /= lineDirLen;
-
-    // A point on the intersection line (needed for relative projection)
-    var linePoint = findLinePoint(nA, dA, nB, dB, lineDir);
-    if (!linePoint) return null;
-
-    // Project each triangle's crossing edges onto the line
-    var intervalA = computeTriInterval(triA, lineDir, linePoint, dA0, dA1, dA2);
-    if (!intervalA) return null;
-
-    var intervalB = computeTriInterval(triB, lineDir, linePoint, dB0, dB1, dB2);
-    if (!intervalB) return null;
-
-    // Overlap of intervals
-    var overlapMin = Math.max(intervalA.min, intervalB.min);
-    var overlapMax = Math.min(intervalA.max, intervalB.max);
-
-    if (overlapMin >= overlapMax - 1e-10) return null;
-
-    // Convert parametric overlap back to 3-D
-    var p0 = {
-        x: linePoint.x + lineDir.x * overlapMin,
-        y: linePoint.y + lineDir.y * overlapMin,
-        z: linePoint.z + lineDir.z * overlapMin
-    };
-    var p1 = {
-        x: linePoint.x + lineDir.x * overlapMax,
-        y: linePoint.y + lineDir.y * overlapMax,
-        z: linePoint.z + lineDir.z * overlapMax
-    };
-
-    // Skip degenerate segments
-    var dx = p0.x - p1.x, dy = p0.y - p1.y, dz = p0.z - p1.z;
-    if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 1e-8) return null;
-
-    return { p0: p0, p1: p1 };
-}
-
-/**
- * Moller triangle-triangle intersection with signed-distance metadata.
- *
- * Identical rejection logic to {@link triTriIntersection} but instead of
- * returning the 3-D segment it returns the signed-distance arrays and the
- * parametric segment length, which callers (e.g. boolean classifiers) need
- * for inside/outside determination.
- *
- * @param {{ v0: Object, v1: Object, v2: Object }} triA
- * @param {{ v0: Object, v1: Object, v2: Object }} triB
- * @returns {{ dA: [number,number,number], dB: [number,number,number], segLen: number } | null}
- *          dA = signed distances of triA vertices to plane(triB),
- *          dB = signed distances of triB vertices to plane(triA),
- *          segLen = parametric length of the intersection segment.
- */
-function triTriIntersectionDetailed(triA, triB) {
-    var nB = triNormal(triB);
-    var dB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
-
-    var dA0 = nB.x * triA.v0.x + nB.y * triA.v0.y + nB.z * triA.v0.z + dB;
-    var dA1 = nB.x * triA.v1.x + nB.y * triA.v1.y + nB.z * triA.v1.z + dB;
-    var dA2 = nB.x * triA.v2.x + nB.y * triA.v2.y + nB.z * triA.v2.z + dB;
-
-    if (dA0 > 0 && dA1 > 0 && dA2 > 0) return null;
-    if (dA0 < 0 && dA1 < 0 && dA2 < 0) return null;
-
-    var nA = triNormal(triA);
-    var dA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
-
-    var dB0 = nA.x * triB.v0.x + nA.y * triB.v0.y + nA.z * triB.v0.z + dA;
-    var dB1 = nA.x * triB.v1.x + nA.y * triB.v1.y + nA.z * triB.v1.z + dA;
-    var dB2 = nA.x * triB.v2.x + nA.y * triB.v2.y + nA.z * triB.v2.z + dA;
-
-    if (dB0 > 0 && dB1 > 0 && dB2 > 0) return null;
-    if (dB0 < 0 && dB1 < 0 && dB2 < 0) return null;
-
-    var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
-    if (Math.abs(dotN) > 0.9999) return null;
-
-    var lineDir = cross(nA, nB);
-    var lineDirLen = Math.sqrt(lineDir.x * lineDir.x + lineDir.y * lineDir.y + lineDir.z * lineDir.z);
-    if (lineDirLen < 1e-12) return null;
-    lineDir.x /= lineDirLen; lineDir.y /= lineDirLen; lineDir.z /= lineDirLen;
-
-    var linePoint = findLinePoint(nA, dA, nB, dB, lineDir);
-    if (!linePoint) return null;
-
-    var intervalA = computeTriInterval(triA, lineDir, linePoint, dA0, dA1, dA2);
-    if (!intervalA) return null;
-
-    var intervalB = computeTriInterval(triB, lineDir, linePoint, dB0, dB1, dB2);
-    if (!intervalB) return null;
-
-    var overlapMin = Math.max(intervalA.min, intervalB.min);
-    var overlapMax = Math.min(intervalA.max, intervalB.max);
-    if (overlapMin >= overlapMax - 1e-10) return null;
-
-    var segLen = overlapMax - overlapMin;
-    if (segLen < 1e-8) return null;
-
-    return {
-        dA: [dA0, dA1, dA2],
-        dB: [dB0, dB1, dB2],
-        segLen: segLen
-    };
-}
-
-/**
- * Compute the parametric interval where a triangle crosses the
- * plane-plane intersection line.
- *
- * For each triangle edge that straddles the opposing plane (sign change
- * in the signed distances d0, d1, d2) the crossing point is projected
- * onto `lineDir` relative to `linePoint`.  Vertices exactly on the plane
- * are also projected.
- *
- * @param {{ v0: Object, v1: Object, v2: Object }} tri
- * @param {{ x: number, y: number, z: number }} lineDir  - Unit direction of intersection line
- * @param {{ x: number, y: number, z: number }} linePoint - Reference point on the line
- * @param {number} d0 - Signed distance of tri.v0 to the opposing plane
- * @param {number} d1 - Signed distance of tri.v1 to the opposing plane
- * @param {number} d2 - Signed distance of tri.v2 to the opposing plane
- * @returns {{ min: number, max: number } | null} Parametric interval, or null if fewer than 2 crossings
- */
-function computeTriInterval(tri, lineDir, linePoint, d0, d1, d2) {
-    var verts = [tri.v0, tri.v1, tri.v2];
-    var dists = [d0, d1, d2];
-    var params = [];
-
-    // Find edges that cross the plane (sign change in distances)
-    for (var i = 0; i < 3; i++) {
-        var j = (i + 1) % 3;
-        var di = dists[i];
-        var dj = dists[j];
-
-        if ((di > 0 && dj < 0) || (di < 0 && dj > 0)) {
-            // Edge crosses the plane
-            var t = di / (di - dj);
-            var pt = {
-                x: verts[i].x + t * (verts[j].x - verts[i].x),
-                y: verts[i].y + t * (verts[j].y - verts[i].y),
-                z: verts[i].z + t * (verts[j].z - verts[i].z)
-            };
-            // Relative projection onto line (relative to linePoint for UTM precision)
-            var param = (pt.x - linePoint.x) * lineDir.x + (pt.y - linePoint.y) * lineDir.y + (pt.z - linePoint.z) * lineDir.z;
-            params.push(param);
-        } else if (Math.abs(di) < 1e-10) {
-            // Vertex on the plane -- relative projection
-            var param2 = (verts[i].x - linePoint.x) * lineDir.x + (verts[i].y - linePoint.y) * lineDir.y + (verts[i].z - linePoint.z) * lineDir.z;
-            params.push(param2);
-        }
-    }
-
-    if (params.length < 2) return null;
-
-    // Deduplicate very close values
-    params.sort(function (a, b) { return a - b; });
-
-    return { min: params[0], max: params[params.length - 1] };
-}
-
-/**
- * Find a point on the intersection line of two planes.
- *
- * Sets the dominant component of `lineDir` to zero and solves the
- * resulting 2x2 system via Cramer's rule.
- *
- * @param {{ x: number, y: number, z: number }} nA - Normal of plane A
- * @param {number} dA - Plane constant for A  (nA . p + dA = 0)
- * @param {{ x: number, y: number, z: number }} nB - Normal of plane B
- * @param {number} dB - Plane constant for B
- * @param {{ x: number, y: number, z: number }} lineDir - Direction of the intersection line
- * @returns {{ x: number, y: number, z: number } | null}
- */
-function findLinePoint(nA, dA, nB, dB, lineDir) {
-    // Find the dominant axis of lineDir to set it to 0
-    var ax = Math.abs(lineDir.x);
-    var ay = Math.abs(lineDir.y);
-    var az = Math.abs(lineDir.z);
-
-    var px, py, pz;
-
-    if (az >= ax && az >= ay) {
-        // Set z = 0, solve for x, y via Cramer's rule
-        var det = nA.x * nB.y - nA.y * nB.x;
-        if (Math.abs(det) < 1e-12) return null;
-        px = (-dA * nB.y + dB * nA.y) / det;
-        py = (nA.x * (-dB) - nB.x * (-dA)) / det;
-        pz = 0;
-    } else if (ay >= ax) {
-        // Set y = 0, solve for x, z via Cramer's rule
-        var det2 = nA.x * nB.z - nA.z * nB.x;
-        if (Math.abs(det2) < 1e-12) return null;
-        px = (-dA * nB.z + dB * nA.z) / det2;
-        py = 0;
-        pz = (nA.x * (-dB) - nB.x * (-dA)) / det2;
-    } else {
-        // Set x = 0, solve for y, z via Cramer's rule
-        var det3 = nA.y * nB.z - nA.z * nB.y;
-        if (Math.abs(det3) < 1e-12) return null;
-        px = 0;
-        py = (-dA * nB.z + dB * nA.z) / det3;
-        pz = (nA.y * (-dB) - nB.y * (-dA)) / det3;
-    }
-
-    return { x: px, y: py, z: pz };
-}
-
-/**
- * @module intersect/spatialGrid
- *
- * Uniform spatial grid for accelerating triangle-pair intersection tests.
- *
- * Triangles are binned into 2-D (XY) grid cells based on their axis-aligned
- * bounding boxes.  Querying the grid with a bounding box returns candidate
- * triangle indices that share at least one cell, dramatically reducing the
- * number of exact Moller tests required.
- *
- * Exports:
- *  - buildSpatialGrid(tris, cellSize)
- *  - queryGrid(grid, bb, cellSize)
- *  - computeBBox(tris)
- *  - triBBox(tri)
- *  - bboxOverlap(a, b)
- *  - estimateAvgEdge(tris)
- */
-
-
-/**
- * Build a 2-D spatial hash grid on arbitrary axes.
- *
- * Unlike {@link buildSpatialGrid} which always hashes on XY,
- * this function accepts accessor functions to extract the two
- * bucketing coordinates.  For example, pass `v => v.y, v => v.z`
- * to build a YZ grid suitable for X-direction ray casting.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
- * @param {number} cellSize - Width/height of each grid cell (world units)
- * @param {function(Object): number} getA - Extracts first axis value from vertex
- * @param {function(Object): number} getB - Extracts second axis value from vertex
- * @returns {Object.<string, number[]>} Grid mapping cell keys to triangle index arrays
- */
-function buildSpatialGridOnAxes(tris, cellSize, getA, getB) {
-	var grid = {};
-
-	for (var i = 0; i < tris.length; i++) {
-		var t = tris[i];
-		var verts = [t.v0, t.v1, t.v2];
-
-		var minA = Infinity, maxA = -Infinity;
-		var minB = Infinity, maxB = -Infinity;
-		for (var j = 0; j < 3; j++) {
-			var a = getA(verts[j]), b = getB(verts[j]);
-			if (a < minA) minA = a;
-			if (a > maxA) maxA = a;
-			if (b < minB) minB = b;
-			if (b > maxB) maxB = b;
-		}
-
-		var a0 = Math.floor(minA / cellSize);
-		var b0 = Math.floor(minB / cellSize);
-		var a1 = Math.floor(maxA / cellSize);
-		var b1 = Math.floor(maxB / cellSize);
-
-		for (var ga = a0; ga <= a1; ga++) {
-			for (var gb = b0; gb <= b1; gb++) {
-				var key = ga + "," + gb;
-				if (!grid[key]) grid[key] = [];
-				grid[key].push(i);
-			}
-		}
-	}
-
-	return grid;
-}
-
-/**
- * Query a grid built by {@link buildSpatialGridOnAxes} for a single point.
- *
- * Returns the triangle indices stored in the cell containing the
- * given (a, b) coordinates.  No deduplication is needed because
- * point queries always hit exactly one cell.
- *
- * @param {Object.<string, number[]>} grid - Grid built by buildSpatialGridOnAxes
- * @param {number} a - First axis coordinate of the query point
- * @param {number} b - Second axis coordinate of the query point
- * @param {number} cellSize - Same cell size used when building the grid
- * @returns {number[]} Triangle indices (empty array if cell is empty)
- */
-function queryGridOnAxes(grid, a, b, cellSize) {
-	var ga = Math.floor(a / cellSize);
-	var gb = Math.floor(b / cellSize);
-	var key = ga + "," + gb;
-	var cell = grid[key];
-	return cell ? cell : [];
-}
-
-/**
- * Build a 2-D spatial hash grid from an array of triangles.
- *
- * Each triangle is inserted into every XY cell that its axis-aligned
- * bounding box overlaps.  The grid is keyed by "cellX,cellY" strings
- * and each bucket holds an array of triangle indices.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
- * @param {number} cellSize - Width/height of each grid cell (world units)
- * @returns {Object.<string, number[]>} Grid mapping cell keys to triangle index arrays
- */
-function buildSpatialGrid(tris, cellSize) {
-    var grid = {};
-
-    for (var i = 0; i < tris.length; i++) {
-        var bb = triBBox(tris[i]);
-        var x0 = Math.floor(bb.minX / cellSize);
-        var y0 = Math.floor(bb.minY / cellSize);
-        var x1 = Math.floor(bb.maxX / cellSize);
-        var y1 = Math.floor(bb.maxY / cellSize);
-
-        for (var gx = x0; gx <= x1; gx++) {
-            for (var gy = y0; gy <= y1; gy++) {
-                var key = gx + "," + gy;
-                if (!grid[key]) grid[key] = [];
-                grid[key].push(i);
-            }
-        }
-    }
-
-    return grid;
-}
-
-/**
- * Query the spatial grid for triangle indices whose cells overlap a
- * given bounding box.
- *
- * Returned indices are de-duplicated (a triangle spanning multiple cells
- * appears only once).
- *
- * @param {Object.<string, number[]>} grid - Grid built by {@link buildSpatialGrid}
- * @param {{ minX: number, minY: number, maxX: number, maxY: number }} bb - Query bounding box
- * @param {number} cellSize - Same cell size used when building the grid
- * @returns {number[]} Unique triangle indices
- */
-function queryGrid(grid, bb, cellSize) {
-    var x0 = Math.floor(bb.minX / cellSize);
-    var y0 = Math.floor(bb.minY / cellSize);
-    var x1 = Math.floor(bb.maxX / cellSize);
-    var y1 = Math.floor(bb.maxY / cellSize);
-
-    var seen = {};
-    var result = [];
-
-    for (var gx = x0; gx <= x1; gx++) {
-        for (var gy = y0; gy <= y1; gy++) {
-            var key = gx + "," + gy;
-            var cell = grid[key];
-            if (!cell) continue;
-            for (var c = 0; c < cell.length; c++) {
-                var idx = cell[c];
-                if (!seen[idx]) {
-                    seen[idx] = true;
-                    result.push(idx);
-                }
-            }
-        }
-    }
-
-    return result;
-}
-
-/**
- * Compute the axis-aligned bounding box of a triangle array.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
- * @returns {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }}
- */
-function computeBBox(tris) {
-    var minX = Infinity, minY = Infinity, minZ = Infinity;
-    var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-
-    for (var i = 0; i < tris.length; i++) {
-        var t = tris[i];
-        var verts = [t.v0, t.v1, t.v2];
-        for (var j = 0; j < 3; j++) {
-            var v = verts[j];
-            if (v.x < minX) minX = v.x;
-            if (v.y < minY) minY = v.y;
-            if (v.z < minZ) minZ = v.z;
-            if (v.x > maxX) maxX = v.x;
-            if (v.y > maxY) maxY = v.y;
-            if (v.z > maxZ) maxZ = v.z;
-        }
-    }
-
-    return { minX: minX, minY: minY, minZ: minZ, maxX: maxX, maxY: maxY, maxZ: maxZ };
-}
-
-/**
- * Compute the axis-aligned bounding box of a single triangle.
- *
- * @param {{ v0: Object, v1: Object, v2: Object }} tri
- * @returns {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }}
- */
-function triBBox(tri) {
-    return {
-        minX: Math.min(tri.v0.x, tri.v1.x, tri.v2.x),
-        minY: Math.min(tri.v0.y, tri.v1.y, tri.v2.y),
-        minZ: Math.min(tri.v0.z, tri.v1.z, tri.v2.z),
-        maxX: Math.max(tri.v0.x, tri.v1.x, tri.v2.x),
-        maxY: Math.max(tri.v0.y, tri.v1.y, tri.v2.y),
-        maxZ: Math.max(tri.v0.z, tri.v1.z, tri.v2.z)
-    };
-}
-
-/**
- * Test whether two axis-aligned bounding boxes overlap in all three axes.
- *
- * @param {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }} a
- * @param {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }} b
- * @returns {boolean}
- */
-function bboxOverlap(a, b) {
-    return a.minX <= b.maxX && a.maxX >= b.minX &&
-           a.minY <= b.maxY && a.maxY >= b.minY &&
-           a.minZ <= b.maxZ && a.maxZ >= b.minZ;
-}
-
-/**
- * Estimate the average edge length of a triangle array by sampling
- * up to the first 100 triangles.
- *
- * Useful for choosing a spatial grid cell size proportional to the
- * mesh resolution.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
- * @returns {number} Average edge length (defaults to 1.0 for empty input)
- */
-function estimateAvgEdge(tris) {
-    if (tris.length === 0) return 1.0;
-    var total = 0;
-    var count = Math.min(tris.length, 100);
-    for (var i = 0; i < count; i++) {
-        var t = tris[i];
-        total += dist3(t.v0, t.v1);
-        total += dist3(t.v1, t.v2);
-        total += dist3(t.v2, t.v0);
-    }
-    return total / (count * 3);
-}
-
-/**
- * @module intersect/intersectMeshPair
- *
- * Compute all triangle-triangle intersection segments between two
- * triangle meshes, accelerated by a uniform spatial grid.
- *
- * Exports:
- *  - intersectMeshPair(trisA, trisB)        -- array of {p0, p1} segments
- *  - intersectMeshPairTagged(trisA, trisB)  -- segments with source triangle indices
- */
-
-
-/**
- * Find all intersection segments between two triangle meshes.
- *
- * Builds a spatial grid on mesh B and, for each triangle in mesh A,
- * queries the grid for candidate triangles in B whose bounding boxes
- * overlap, then runs the exact Moller triangle-triangle test on each
- * candidate pair.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisA - First mesh triangles
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB - Second mesh triangles
- * @returns {Array<{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number} }>}
- *          Intersection segments (may be empty)
- */
-function intersectMeshPair(trisA, trisB) {
-    var segments = [];
-
-    // Compute average edge length for grid cell size
-    var avgEdge = estimateAvgEdge(trisB);
-    var cellSize = Math.max(avgEdge * 2, 0.1);
-
-    // Build grid on mesh B
-    var gridB = buildSpatialGrid(trisB, cellSize);
-
-    // For each triangle in A, find candidate triangles in B
-    for (var i = 0; i < trisA.length; i++) {
-        var triA = trisA[i];
-        var bbA = triBBox(triA);
-
-        var candidates = queryGrid(gridB, bbA, cellSize);
-
-        for (var c = 0; c < candidates.length; c++) {
-            var triB = trisB[candidates[c]];
-
-            var seg = triTriIntersection(triA, triB);
-            if (seg) {
-                segments.push(seg);
-            }
-        }
-    }
-
-    return segments;
-}
-
-/**
- * Like {@link intersectMeshPair} but each returned segment carries the
- * source triangle indices from mesh A and mesh B.
- *
- * Useful for boolean operations and classification that need to know
- * which triangles produced each intersection segment.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisA - First mesh triangles
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB - Second mesh triangles
- * @returns {Array<{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number}, idxA: number, idxB: number }>}
- *          Tagged intersection segments (may be empty)
- */
-function intersectMeshPairTagged(trisA, trisB) {
-    var segments = [];
-
-    var avgEdge = estimateAvgEdge(trisB);
-    var cellSize = Math.max(avgEdge * 2, 0.1);
-    var gridB = buildSpatialGrid(trisB, cellSize);
-
-    for (var i = 0; i < trisA.length; i++) {
-        var triA = trisA[i];
-        var bbA = triBBox(triA);
-        var candidates = queryGrid(gridB, bbA, cellSize);
-
-        for (var c = 0; c < candidates.length; c++) {
-            var j = candidates[c];
-            var triB = trisB[j];
-            var seg = triTriIntersection(triA, triB);
-            if (seg) {
-                segments.push({ p0: seg.p0, p1: seg.p1, idxA: i, idxB: j });
-            }
-        }
-    }
-
-    return segments;
-}
-
 const epsilon = 1.1102230246251565e-16;
 const splitter = 134217729;
 const resulterrbound = (3 + 8 * epsilon) * epsilon;
 
-// fast_expansion_sum_zeroelim routine from oritinal code
+// fast_expansion_sum_zeroelim routine from original code
 function sum(elen, e, flen, f, h) {
     let Q, Qnew, hh, bvirt;
     let enow = e[0];
@@ -928,7 +140,7 @@ const B = vec(4);
 const C1 = vec(8);
 const C2 = vec(12);
 const D = vec(16);
-const u$1 = vec(4);
+const u$2 = vec(4);
 
 function orient2dadapt(ax, ay, bx, by, cx, cy, detsum) {
     let acxtail, acytail, bcxtail, bcytail;
@@ -1010,18 +222,18 @@ function orient2dadapt(ax, ay, bx, by, cx, cy, detsum) {
     t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
     _i = s0 - t0;
     bvirt = s0 - _i;
-    u$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    u$2[0] = s0 - (_i + bvirt) + (bvirt - t0);
     _j = s1 + _i;
     bvirt = _j - s1;
     _0 = s1 - (_j - bvirt) + (_i - bvirt);
     _i = _0 - t1;
     bvirt = _0 - _i;
-    u$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u$2[1] = _0 - (_i + bvirt) + (bvirt - t1);
     u3 = _j + _i;
     bvirt = u3 - _j;
-    u$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
-    u$1[3] = u3;
-    const C1len = sum(4, B, 4, u$1, C1);
+    u$2[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    u$2[3] = u3;
+    const C1len = sum(4, B, 4, u$2, C1);
 
     s1 = acx * bcytail;
     c = splitter * acx;
@@ -1041,18 +253,18 @@ function orient2dadapt(ax, ay, bx, by, cx, cy, detsum) {
     t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
     _i = s0 - t0;
     bvirt = s0 - _i;
-    u$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    u$2[0] = s0 - (_i + bvirt) + (bvirt - t0);
     _j = s1 + _i;
     bvirt = _j - s1;
     _0 = s1 - (_j - bvirt) + (_i - bvirt);
     _i = _0 - t1;
     bvirt = _0 - _i;
-    u$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u$2[1] = _0 - (_i + bvirt) + (bvirt - t1);
     u3 = _j + _i;
     bvirt = u3 - _j;
-    u$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
-    u$1[3] = u3;
-    const C2len = sum(C1len, C1, 4, u$1, C2);
+    u$2[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    u$2[3] = u3;
+    const C2len = sum(C1len, C1, 4, u$2, C2);
 
     s1 = acxtail * bcytail;
     c = splitter * acxtail;
@@ -1072,18 +284,18 @@ function orient2dadapt(ax, ay, bx, by, cx, cy, detsum) {
     t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
     _i = s0 - t0;
     bvirt = s0 - _i;
-    u$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    u$2[0] = s0 - (_i + bvirt) + (bvirt - t0);
     _j = s1 + _i;
     bvirt = _j - s1;
     _0 = s1 - (_j - bvirt) + (_i - bvirt);
     _i = _0 - t1;
     bvirt = _0 - _i;
-    u$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u$2[1] = _0 - (_i + bvirt) + (bvirt - t1);
     u3 = _j + _i;
     bvirt = u3 - _j;
-    u$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
-    u$1[3] = u3;
-    const Dlen = sum(C2len, C2, 4, u$1, D);
+    u$2[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    u$2[3] = u3;
+    const Dlen = sum(C2len, C2, 4, u$2, D);
 
     return D[Dlen - 1];
 }
@@ -1097,6 +309,448 @@ function orient2d(ax, ay, bx, by, cx, cy) {
     if (Math.abs(det) >= ccwerrboundA * detsum) return det;
 
     return -orient2dadapt(ax, ay, bx, by, cx, cy, detsum);
+}
+
+const o3derrboundA = (7 + 56 * epsilon) * epsilon;
+const o3derrboundB = (3 + 28 * epsilon) * epsilon;
+const o3derrboundC = (26 + 288 * epsilon) * epsilon * epsilon;
+
+const bc$1 = vec(4);
+const ca$1 = vec(4);
+const ab$1 = vec(4);
+const at_b = vec(4);
+const at_c = vec(4);
+const bt_c = vec(4);
+const bt_a = vec(4);
+const ct_a = vec(4);
+const ct_b = vec(4);
+const bct$1 = vec(8);
+const cat$1 = vec(8);
+const abt$1 = vec(8);
+const u$1 = vec(4);
+
+const _8$1 = vec(8);
+const _8b = vec(8);
+const _16$1 = vec(16);
+const _12 = vec(12);
+
+let fin$1 = vec(192);
+let fin2$1 = vec(192);
+
+function finadd$1(finlen, alen, a) {
+    finlen = sum(finlen, fin$1, alen, a, fin2$1);
+    const tmp = fin$1; fin$1 = fin2$1; fin2$1 = tmp;
+    return finlen;
+}
+
+function tailinit(xtail, ytail, ax, ay, bx, by, a, b) {
+    let bvirt, c, ahi, alo, bhi, blo, _i, _j, _0, s1, s0, t1, t0, u3, negate;
+    if (xtail === 0) {
+        if (ytail === 0) {
+            a[0] = 0;
+            b[0] = 0;
+            return 1;
+        }
+        negate = -ytail;
+        s1 = negate * ax;
+        c = splitter * negate;
+        ahi = c - (c - negate);
+        alo = negate - ahi;
+        c = splitter * ax;
+        bhi = c - (c - ax);
+        blo = ax - bhi;
+        a[0] = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+        a[1] = s1;
+        s1 = ytail * bx;
+        c = splitter * ytail;
+        ahi = c - (c - ytail);
+        alo = ytail - ahi;
+        c = splitter * bx;
+        bhi = c - (c - bx);
+        blo = bx - bhi;
+        b[0] = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+        b[1] = s1;
+        return 2;
+    }
+    if (ytail === 0) {
+        s1 = xtail * ay;
+        c = splitter * xtail;
+        ahi = c - (c - xtail);
+        alo = xtail - ahi;
+        c = splitter * ay;
+        bhi = c - (c - ay);
+        blo = ay - bhi;
+        a[0] = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+        a[1] = s1;
+        negate = -xtail;
+        s1 = negate * by;
+        c = splitter * negate;
+        ahi = c - (c - negate);
+        alo = negate - ahi;
+        c = splitter * by;
+        bhi = c - (c - by);
+        blo = by - bhi;
+        b[0] = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+        b[1] = s1;
+        return 2;
+    }
+    s1 = xtail * ay;
+    c = splitter * xtail;
+    ahi = c - (c - xtail);
+    alo = xtail - ahi;
+    c = splitter * ay;
+    bhi = c - (c - ay);
+    blo = ay - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = ytail * ax;
+    c = splitter * ytail;
+    ahi = c - (c - ytail);
+    alo = ytail - ahi;
+    c = splitter * ax;
+    bhi = c - (c - ax);
+    blo = ax - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    a[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    a[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    a[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    a[3] = u3;
+    s1 = ytail * bx;
+    c = splitter * ytail;
+    ahi = c - (c - ytail);
+    alo = ytail - ahi;
+    c = splitter * bx;
+    bhi = c - (c - bx);
+    blo = bx - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = xtail * by;
+    c = splitter * xtail;
+    ahi = c - (c - xtail);
+    alo = xtail - ahi;
+    c = splitter * by;
+    bhi = c - (c - by);
+    blo = by - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    b[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    b[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    b[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    b[3] = u3;
+    return 4;
+}
+
+function tailadd(finlen, a, b, k, z) {
+    let bvirt, c, ahi, alo, bhi, blo, _i, _j, _k, _0, s1, s0, u3;
+    s1 = a * b;
+    c = splitter * a;
+    ahi = c - (c - a);
+    alo = a - ahi;
+    c = splitter * b;
+    bhi = c - (c - b);
+    blo = b - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    c = splitter * k;
+    bhi = c - (c - k);
+    blo = k - bhi;
+    _i = s0 * k;
+    c = splitter * s0;
+    ahi = c - (c - s0);
+    alo = s0 - ahi;
+    u$1[0] = alo * blo - (_i - ahi * bhi - alo * bhi - ahi * blo);
+    _j = s1 * k;
+    c = splitter * s1;
+    ahi = c - (c - s1);
+    alo = s1 - ahi;
+    _0 = alo * blo - (_j - ahi * bhi - alo * bhi - ahi * blo);
+    _k = _i + _0;
+    bvirt = _k - _i;
+    u$1[1] = _i - (_k - bvirt) + (_0 - bvirt);
+    u3 = _j + _k;
+    u$1[2] = _k - (u3 - _j);
+    u$1[3] = u3;
+    finlen = finadd$1(finlen, 4, u$1);
+    if (z !== 0) {
+        c = splitter * z;
+        bhi = c - (c - z);
+        blo = z - bhi;
+        _i = s0 * z;
+        c = splitter * s0;
+        ahi = c - (c - s0);
+        alo = s0 - ahi;
+        u$1[0] = alo * blo - (_i - ahi * bhi - alo * bhi - ahi * blo);
+        _j = s1 * z;
+        c = splitter * s1;
+        ahi = c - (c - s1);
+        alo = s1 - ahi;
+        _0 = alo * blo - (_j - ahi * bhi - alo * bhi - ahi * blo);
+        _k = _i + _0;
+        bvirt = _k - _i;
+        u$1[1] = _i - (_k - bvirt) + (_0 - bvirt);
+        u3 = _j + _k;
+        u$1[2] = _k - (u3 - _j);
+        u$1[3] = u3;
+        finlen = finadd$1(finlen, 4, u$1);
+    }
+    return finlen;
+}
+
+function orient3dadapt(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, permanent) {
+    let finlen;
+    let adxtail, bdxtail, cdxtail;
+    let adytail, bdytail, cdytail;
+    let adztail, bdztail, cdztail;
+    let bvirt, c, ahi, alo, bhi, blo, _i, _j, _0, s1, s0, t1, t0, u3;
+
+    const adx = ax - dx;
+    const bdx = bx - dx;
+    const cdx = cx - dx;
+    const ady = ay - dy;
+    const bdy = by - dy;
+    const cdy = cy - dy;
+    const adz = az - dz;
+    const bdz = bz - dz;
+    const cdz = cz - dz;
+
+    s1 = bdx * cdy;
+    c = splitter * bdx;
+    ahi = c - (c - bdx);
+    alo = bdx - ahi;
+    c = splitter * cdy;
+    bhi = c - (c - cdy);
+    blo = cdy - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = cdx * bdy;
+    c = splitter * cdx;
+    ahi = c - (c - cdx);
+    alo = cdx - ahi;
+    c = splitter * bdy;
+    bhi = c - (c - bdy);
+    blo = bdy - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    bc$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    bc$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    bc$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    bc$1[3] = u3;
+    s1 = cdx * ady;
+    c = splitter * cdx;
+    ahi = c - (c - cdx);
+    alo = cdx - ahi;
+    c = splitter * ady;
+    bhi = c - (c - ady);
+    blo = ady - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = adx * cdy;
+    c = splitter * adx;
+    ahi = c - (c - adx);
+    alo = adx - ahi;
+    c = splitter * cdy;
+    bhi = c - (c - cdy);
+    blo = cdy - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    ca$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    ca$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    ca$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    ca$1[3] = u3;
+    s1 = adx * bdy;
+    c = splitter * adx;
+    ahi = c - (c - adx);
+    alo = adx - ahi;
+    c = splitter * bdy;
+    bhi = c - (c - bdy);
+    blo = bdy - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = bdx * ady;
+    c = splitter * bdx;
+    ahi = c - (c - bdx);
+    alo = bdx - ahi;
+    c = splitter * ady;
+    bhi = c - (c - ady);
+    blo = ady - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    ab$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    ab$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    ab$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    ab$1[3] = u3;
+
+    finlen = sum(
+        sum(
+            scale(4, bc$1, adz, _8$1), _8$1,
+            scale(4, ca$1, bdz, _8b), _8b, _16$1), _16$1,
+        scale(4, ab$1, cdz, _8$1), _8$1, fin$1);
+
+    let det = estimate(finlen, fin$1);
+    let errbound = o3derrboundB * permanent;
+    if (det >= errbound || -det >= errbound) {
+        return det;
+    }
+
+    bvirt = ax - adx;
+    adxtail = ax - (adx + bvirt) + (bvirt - dx);
+    bvirt = bx - bdx;
+    bdxtail = bx - (bdx + bvirt) + (bvirt - dx);
+    bvirt = cx - cdx;
+    cdxtail = cx - (cdx + bvirt) + (bvirt - dx);
+    bvirt = ay - ady;
+    adytail = ay - (ady + bvirt) + (bvirt - dy);
+    bvirt = by - bdy;
+    bdytail = by - (bdy + bvirt) + (bvirt - dy);
+    bvirt = cy - cdy;
+    cdytail = cy - (cdy + bvirt) + (bvirt - dy);
+    bvirt = az - adz;
+    adztail = az - (adz + bvirt) + (bvirt - dz);
+    bvirt = bz - bdz;
+    bdztail = bz - (bdz + bvirt) + (bvirt - dz);
+    bvirt = cz - cdz;
+    cdztail = cz - (cdz + bvirt) + (bvirt - dz);
+
+    if (adxtail === 0 && bdxtail === 0 && cdxtail === 0 &&
+        adytail === 0 && bdytail === 0 && cdytail === 0 &&
+        adztail === 0 && bdztail === 0 && cdztail === 0) {
+        return det;
+    }
+
+    errbound = o3derrboundC * permanent + resulterrbound * Math.abs(det);
+    det +=
+        adz * (bdx * cdytail + cdy * bdxtail - (bdy * cdxtail + cdx * bdytail)) + adztail * (bdx * cdy - bdy * cdx) +
+        bdz * (cdx * adytail + ady * cdxtail - (cdy * adxtail + adx * cdytail)) + bdztail * (cdx * ady - cdy * adx) +
+        cdz * (adx * bdytail + bdy * adxtail - (ady * bdxtail + bdx * adytail)) + cdztail * (adx * bdy - ady * bdx);
+    if (det >= errbound || -det >= errbound) {
+        return det;
+    }
+
+    const at_len = tailinit(adxtail, adytail, bdx, bdy, cdx, cdy, at_b, at_c);
+    const bt_len = tailinit(bdxtail, bdytail, cdx, cdy, adx, ady, bt_c, bt_a);
+    const ct_len = tailinit(cdxtail, cdytail, adx, ady, bdx, bdy, ct_a, ct_b);
+
+    const bctlen = sum(bt_len, bt_c, ct_len, ct_b, bct$1);
+    finlen = finadd$1(finlen, scale(bctlen, bct$1, adz, _16$1), _16$1);
+
+    const catlen = sum(ct_len, ct_a, at_len, at_c, cat$1);
+    finlen = finadd$1(finlen, scale(catlen, cat$1, bdz, _16$1), _16$1);
+
+    const abtlen = sum(at_len, at_b, bt_len, bt_a, abt$1);
+    finlen = finadd$1(finlen, scale(abtlen, abt$1, cdz, _16$1), _16$1);
+
+    if (adztail !== 0) {
+        finlen = finadd$1(finlen, scale(4, bc$1, adztail, _12), _12);
+        finlen = finadd$1(finlen, scale(bctlen, bct$1, adztail, _16$1), _16$1);
+    }
+    if (bdztail !== 0) {
+        finlen = finadd$1(finlen, scale(4, ca$1, bdztail, _12), _12);
+        finlen = finadd$1(finlen, scale(catlen, cat$1, bdztail, _16$1), _16$1);
+    }
+    if (cdztail !== 0) {
+        finlen = finadd$1(finlen, scale(4, ab$1, cdztail, _12), _12);
+        finlen = finadd$1(finlen, scale(abtlen, abt$1, cdztail, _16$1), _16$1);
+    }
+
+    if (adxtail !== 0) {
+        if (bdytail !== 0) {
+            finlen = tailadd(finlen, adxtail, bdytail, cdz, cdztail);
+        }
+        if (cdytail !== 0) {
+            finlen = tailadd(finlen, -adxtail, cdytail, bdz, bdztail);
+        }
+    }
+    if (bdxtail !== 0) {
+        if (cdytail !== 0) {
+            finlen = tailadd(finlen, bdxtail, cdytail, adz, adztail);
+        }
+        if (adytail !== 0) {
+            finlen = tailadd(finlen, -bdxtail, adytail, cdz, cdztail);
+        }
+    }
+    if (cdxtail !== 0) {
+        if (adytail !== 0) {
+            finlen = tailadd(finlen, cdxtail, adytail, bdz, bdztail);
+        }
+        if (bdytail !== 0) {
+            finlen = tailadd(finlen, -cdxtail, bdytail, adz, adztail);
+        }
+    }
+
+    return fin$1[finlen - 1];
+}
+
+function orient3d(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz) {
+    const adx = ax - dx;
+    const bdx = bx - dx;
+    const cdx = cx - dx;
+    const ady = ay - dy;
+    const bdy = by - dy;
+    const cdy = cy - dy;
+    const adz = az - dz;
+    const bdz = bz - dz;
+    const cdz = cz - dz;
+
+    const bdxcdy = bdx * cdy;
+    const cdxbdy = cdx * bdy;
+
+    const cdxady = cdx * ady;
+    const adxcdy = adx * cdy;
+
+    const adxbdy = adx * bdy;
+    const bdxady = bdx * ady;
+
+    const det =
+        adz * (bdxcdy - cdxbdy) +
+        bdz * (cdxady - adxcdy) +
+        cdz * (adxbdy - bdxady);
+
+    const permanent =
+        (Math.abs(bdxcdy) + Math.abs(cdxbdy)) * Math.abs(adz) +
+        (Math.abs(cdxady) + Math.abs(adxcdy)) * Math.abs(bdz) +
+        (Math.abs(adxbdy) + Math.abs(bdxady)) * Math.abs(cdz);
+
+    const errbound = o3derrboundA * permanent;
+    if (det > errbound || -det > errbound) {
+        return det;
+    }
+
+    return orient3dadapt(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, permanent);
 }
 
 const iccerrboundA = (10 + 96 * epsilon) * epsilon;
@@ -1843,6 +1497,859 @@ function incircle(ax, ay, bx, by, cx, cy, dx, dy) {
         return det;
     }
     return incircleadapt(ax, ay, bx, by, cx, cy, dx, dy, permanent);
+}
+
+/**
+ * @module util/math
+ *
+ * Core math utilities for triangle mesh operations.
+ */
+
+/**
+ * 3D Euclidean distance between two points.
+ * @param {{ x: number, y: number, z: number }} a
+ * @param {{ x: number, y: number, z: number }} b
+ * @returns {number}
+ */
+function dist3(a, b) {
+	var dx = a.x - b.x;
+	var dy = a.y - b.y;
+	var dz = a.z - b.z;
+	return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/**
+ * Squared 3D distance (avoids sqrt for comparisons).
+ * @param {{ x: number, y: number, z: number }} a
+ * @param {{ x: number, y: number, z: number }} b
+ * @returns {number}
+ */
+function distSq3(a, b) {
+	var dx = a.x - b.x;
+	var dy = a.y - b.y;
+	var dz = a.z - b.z;
+	return dx * dx + dy * dy + dz * dz;
+}
+
+/**
+ * Compute the area of a triangle in 3D using the cross-product method.
+ * @param {{ v0: Object, v1: Object, v2: Object }} tri
+ * @returns {number} Area in square units
+ */
+function triangleArea3D(tri) {
+	var ux = tri.v1.x - tri.v0.x;
+	var uy = tri.v1.y - tri.v0.y;
+	var uz = tri.v1.z - tri.v0.z;
+	var vx = tri.v2.x - tri.v0.x;
+	var vy = tri.v2.y - tri.v0.y;
+	var vz = tri.v2.z - tri.v0.z;
+	var cx = uy * vz - uz * vy;
+	var cy = uz * vx - ux * vz;
+	var cz = ux * vy - uy * vx;
+	return 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+}
+
+/**
+ * Compute axis-aligned bounding box from an array of points.
+ * @param {Array<{ x: number, y: number, z: number }>} points
+ * @returns {{ minX: number, maxX: number, minY: number, maxY: number, minZ: number, maxZ: number }}
+ */
+function computeBounds(points) {
+	var minX = Infinity, minY = Infinity, minZ = Infinity;
+	var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+	for (var i = 0; i < points.length; i++) {
+		var p = points[i];
+		if (p.x < minX) minX = p.x;
+		if (p.y < minY) minY = p.y;
+		if (p.z < minZ) minZ = p.z;
+		if (p.x > maxX) maxX = p.x;
+		if (p.y > maxY) maxY = p.y;
+		if (p.z > maxZ) maxZ = p.z;
+	}
+	return { minX: minX, maxX: maxX, minY: minY, maxY: maxY, minZ: minZ, maxZ: maxZ };
+}
+
+/**
+ * Cross product of two 3D vectors.
+ * @param {{ x: number, y: number, z: number }} a
+ * @param {{ x: number, y: number, z: number }} b
+ * @returns {{ x: number, y: number, z: number }}
+ */
+function cross(a, b) {
+	return {
+		x: a.y * b.z - a.z * b.y,
+		y: a.z * b.x - a.x * b.z,
+		z: a.x * b.y - a.y * b.x
+	};
+}
+
+/**
+ * Linearly interpolate between two vertices.
+ * @param {{ x: number, y: number, z: number }} a
+ * @param {{ x: number, y: number, z: number }} b
+ * @param {number} t - Interpolation factor [0, 1]
+ * @returns {{ x: number, y: number, z: number }}
+ */
+function lerpVert(a, b, t) {
+	return {
+		x: a.x + t * (b.x - a.x),
+		y: a.y + t * (b.y - a.y),
+		z: a.z + t * (b.z - a.z)
+	};
+}
+
+/**
+ * Standard vertex key for spatial hashing (6 decimal places).
+ * @param {{ x: number, y: number, z: number }} v
+ * @returns {string}
+ */
+function vKey(v) {
+	return v.x.toFixed(6) + "," + v.y.toFixed(6) + "," + v.z.toFixed(6);
+}
+
+/**
+ * Canonical edge key (order-independent).
+ * @param {string} ka - Vertex key A
+ * @param {string} kb - Vertex key B
+ * @returns {string}
+ */
+function edgeKey(ka, kb) {
+	return ka < kb ? ka + "|" + kb : kb + "|" + ka;
+}
+
+/**
+ * Compute shared centroid of two triangle soups.
+ */
+function soupCentroid(soupA, soupB) {
+	var sx = 0, sy = 0, sz = 0, n = 0;
+	for (var i = 0; i < soupA.length; i++) {
+		var t = soupA[i];
+		sx += t.v0.x + t.v1.x + t.v2.x;
+		sy += t.v0.y + t.v1.y + t.v2.y;
+		sz += t.v0.z + t.v1.z + t.v2.z;
+		n += 3;
+	}
+	for (var j = 0; j < soupB.length; j++) {
+		var t2 = soupB[j];
+		sx += t2.v0.x + t2.v1.x + t2.v2.x;
+		sy += t2.v0.y + t2.v1.y + t2.v2.y;
+		sz += t2.v0.z + t2.v1.z + t2.v2.z;
+		n += 3;
+	}
+	return { x: sx / n, y: sy / n, z: sz / n };
+}
+
+/**
+ * Translate a triangle soup by an offset.
+ */
+function translateSoup(soup, dx, dy, dz) {
+	var out = new Array(soup.length);
+	for (var i = 0; i < soup.length; i++) {
+		var t = soup[i];
+		out[i] = {
+			v0: { x: t.v0.x + dx, y: t.v0.y + dy, z: t.v0.z + dz },
+			v1: { x: t.v1.x + dx, y: t.v1.y + dy, z: t.v1.z + dz },
+			v2: { x: t.v2.x + dx, y: t.v2.y + dy, z: t.v2.z + dz }
+		};
+	}
+	return out;
+}
+
+/**
+ * Count open (boundary) and non-manifold (over-shared) edges in a triangle soup.
+ * @param {Array} tris - Array of {v0, v1, v2}
+ * @returns {{ openEdges: number, overShared: number, total: number }}
+ */
+function countOpenEdges(tris) {
+	var edgeMap = {};
+
+	for (var i = 0; i < tris.length; i++) {
+		var tri = tris[i];
+		var verts = [tri.v0, tri.v1, tri.v2];
+		var keys = [vKey(verts[0]), vKey(verts[1]), vKey(verts[2])];
+
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var ek = edgeKey(keys[e], keys[ne]);
+			if (!edgeMap[ek]) {
+				edgeMap[ek] = 0;
+			}
+			edgeMap[ek]++;
+		}
+	}
+
+	var openEdges = 0;
+	var overShared = 0;
+	var total = 0;
+
+	for (var ek2 in edgeMap) {
+		total++;
+		if (edgeMap[ek2] === 1) {
+			openEdges++;
+		} else if (edgeMap[ek2] > 2) {
+			overShared++;
+		}
+	}
+
+	return { openEdges: openEdges, overShared: overShared, total: total };
+}
+
+/**
+ * @module normals/triNormal
+ *
+ * Compute the unit normal of a triangle from its three vertices.
+ */
+
+
+/**
+ * Compute the unit face normal of a triangle.
+ *
+ * Uses the cross product of edges (v0->v1) x (v0->v2) and normalises
+ * to unit length.  Returns the Z-up fallback {0,0,1} for degenerate
+ * (zero-area) triangles.
+ *
+ * @param {{ v0: {x:number,y:number,z:number}, v1: {x:number,y:number,z:number}, v2: {x:number,y:number,z:number} }} tri
+ * @returns {{ x: number, y: number, z: number }} Unit normal vector
+ */
+function triNormal(tri) {
+    var e1 = { x: tri.v1.x - tri.v0.x, y: tri.v1.y - tri.v0.y, z: tri.v1.z - tri.v0.z };
+    var e2 = { x: tri.v2.x - tri.v0.x, y: tri.v2.y - tri.v0.y, z: tri.v2.z - tri.v0.z };
+    var n = cross(e1, e2);
+    var len = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    if (len < 1e-15) return { x: 0, y: 0, z: 1 };
+    return { x: n.x / len, y: n.y / len, z: n.z / len };
+}
+
+/**
+ * @module intersect/triTriIntersection
+ *
+ * Moller triangle-triangle intersection test.
+ *
+ * Determines whether two triangles intersect and, if so, computes the
+ * line segment that lies on both triangles.  Based on the Moller (1997)
+ * separating-axis / interval-overlap method.
+ *
+ * Exports:
+ *  - triTriIntersection(triA, triB)          -- segment or null
+ *  - triTriIntersectionDetailed(triA, triB)  -- signed distances + segLen
+ *  - computeTriInterval(tri, lineDir, linePoint, d0, d1, d2)
+ *  - findLinePoint(nA, dA, nB, dB, lineDir)
+ */
+
+
+/**
+ * Moller triangle-triangle intersection.
+ *
+ * Projects each triangle onto the plane of the other, computes the
+ * parametric overlap of their crossing intervals on the plane-plane
+ * intersection line, and returns the resulting 3-D segment.
+ *
+ * @param {{ v0: Object, v1: Object, v2: Object }} triA
+ * @param {{ v0: Object, v1: Object, v2: Object }} triB
+ * @returns {{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number} } | null}
+ *          Intersection segment, or null when no intersection exists.
+ */
+function triTriIntersection(triA, triB) {
+    // Robust orientation: signed distances of triA vertices to plane(triB)
+    // orient3d returns a value proportional to 6× signed tetrahedron volume;
+    // its sign is guaranteed correct even for near-degenerate configurations.
+    var dA0 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v0.x, triA.v0.y, triA.v0.z);
+    var dA1 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v1.x, triA.v1.y, triA.v1.z);
+    var dA2 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v2.x, triA.v2.y, triA.v2.z);
+
+    // All on same side -> no intersection
+    if (dA0 > 0 && dA1 > 0 && dA2 > 0) return null;
+    if (dA0 < 0 && dA1 < 0 && dA2 < 0) return null;
+
+    // Robust orientation: signed distances of triB vertices to plane(triA)
+    var dB0 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v0.x, triB.v0.y, triB.v0.z);
+    var dB1 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v1.x, triB.v1.y, triB.v1.z);
+    var dB2 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v2.x, triB.v2.y, triB.v2.z);
+
+    // All on same side -> no intersection
+    if (dB0 > 0 && dB1 > 0 && dB2 > 0) return null;
+    if (dB0 < 0 && dB1 < 0 && dB2 < 0) return null;
+
+    // Float normals for geometric computation (line direction, projections)
+    var nA = triNormal(triA);
+    var nB = triNormal(triB);
+
+    // Near-parallel planes
+    var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
+    if (Math.abs(dotN) > 0.9999) return null;
+
+    // Intersection line direction
+    var lineDir = cross(nA, nB);
+    var lineDirLen = Math.sqrt(lineDir.x * lineDir.x + lineDir.y * lineDir.y + lineDir.z * lineDir.z);
+    if (lineDirLen < 1e-12) return null;
+    lineDir.x /= lineDirLen;
+    lineDir.y /= lineDirLen;
+    lineDir.z /= lineDirLen;
+
+    // Plane constants for line-point computation
+    var planeDA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
+    var planeDB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
+
+    // A point on the intersection line (needed for relative projection)
+    var linePoint = findLinePoint(nA, planeDA, nB, planeDB, lineDir);
+    if (!linePoint) return null;
+
+    // Project each triangle's crossing edges onto the line
+    var intervalA = computeTriInterval(triA, lineDir, linePoint, dA0, dA1, dA2);
+    if (!intervalA) return null;
+
+    var intervalB = computeTriInterval(triB, lineDir, linePoint, dB0, dB1, dB2);
+    if (!intervalB) return null;
+
+    // Overlap of intervals
+    var overlapMin = Math.max(intervalA.min, intervalB.min);
+    var overlapMax = Math.min(intervalA.max, intervalB.max);
+
+    if (overlapMin >= overlapMax - 1e-10) return null;
+
+    // Convert parametric overlap back to 3-D
+    var p0 = {
+        x: linePoint.x + lineDir.x * overlapMin,
+        y: linePoint.y + lineDir.y * overlapMin,
+        z: linePoint.z + lineDir.z * overlapMin
+    };
+    var p1 = {
+        x: linePoint.x + lineDir.x * overlapMax,
+        y: linePoint.y + lineDir.y * overlapMax,
+        z: linePoint.z + lineDir.z * overlapMax
+    };
+
+    // Reproject onto both triangle planes to eliminate floating-point drift.
+    // Solves for the minimal correction in the span of both normals so the
+    // point lies exactly on both planes: P' = P - alpha*nA - beta*nB
+    var denom = 1 - dotN * dotN;
+    if (Math.abs(denom) > 1e-15) {
+        var invD = 1 / denom;
+        var rA0 = nA.x * p0.x + nA.y * p0.y + nA.z * p0.z + planeDA;
+        var rB0 = nB.x * p0.x + nB.y * p0.y + nB.z * p0.z + planeDB;
+        var a0 = (rA0 - dotN * rB0) * invD;
+        var b0 = (rB0 - dotN * rA0) * invD;
+        p0.x -= a0 * nA.x + b0 * nB.x;
+        p0.y -= a0 * nA.y + b0 * nB.y;
+        p0.z -= a0 * nA.z + b0 * nB.z;
+
+        var rA1 = nA.x * p1.x + nA.y * p1.y + nA.z * p1.z + planeDA;
+        var rB1 = nB.x * p1.x + nB.y * p1.y + nB.z * p1.z + planeDB;
+        var a1 = (rA1 - dotN * rB1) * invD;
+        var b1 = (rB1 - dotN * rA1) * invD;
+        p1.x -= a1 * nA.x + b1 * nB.x;
+        p1.y -= a1 * nA.y + b1 * nB.y;
+        p1.z -= a1 * nA.z + b1 * nB.z;
+    }
+
+    // Skip degenerate segments
+    var dx = p0.x - p1.x, dy = p0.y - p1.y, dz = p0.z - p1.z;
+    if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 1e-8) return null;
+
+    return { p0: p0, p1: p1 };
+}
+
+/**
+ * Moller triangle-triangle intersection with signed-distance metadata.
+ *
+ * Identical rejection logic to {@link triTriIntersection} but instead of
+ * returning the 3-D segment it returns the signed-distance arrays and the
+ * parametric segment length, which callers (e.g. boolean classifiers) need
+ * for inside/outside determination.
+ *
+ * @param {{ v0: Object, v1: Object, v2: Object }} triA
+ * @param {{ v0: Object, v1: Object, v2: Object }} triB
+ * @returns {{ dA: [number,number,number], dB: [number,number,number], segLen: number } | null}
+ *          dA = signed distances of triA vertices to plane(triB),
+ *          dB = signed distances of triB vertices to plane(triA),
+ *          segLen = parametric length of the intersection segment.
+ */
+function triTriIntersectionDetailed(triA, triB) {
+    // Robust orientation: signed distances of triA vertices to plane(triB)
+    var dA0 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v0.x, triA.v0.y, triA.v0.z);
+    var dA1 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v1.x, triA.v1.y, triA.v1.z);
+    var dA2 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v2.x, triA.v2.y, triA.v2.z);
+
+    if (dA0 > 0 && dA1 > 0 && dA2 > 0) return null;
+    if (dA0 < 0 && dA1 < 0 && dA2 < 0) return null;
+
+    // Robust orientation: signed distances of triB vertices to plane(triA)
+    var dB0 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v0.x, triB.v0.y, triB.v0.z);
+    var dB1 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v1.x, triB.v1.y, triB.v1.z);
+    var dB2 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v2.x, triB.v2.y, triB.v2.z);
+
+    if (dB0 > 0 && dB1 > 0 && dB2 > 0) return null;
+    if (dB0 < 0 && dB1 < 0 && dB2 < 0) return null;
+
+    var nA = triNormal(triA);
+    var nB = triNormal(triB);
+
+    var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
+    if (Math.abs(dotN) > 0.9999) return null;
+
+    var lineDir = cross(nA, nB);
+    var lineDirLen = Math.sqrt(lineDir.x * lineDir.x + lineDir.y * lineDir.y + lineDir.z * lineDir.z);
+    if (lineDirLen < 1e-12) return null;
+    lineDir.x /= lineDirLen; lineDir.y /= lineDirLen; lineDir.z /= lineDirLen;
+
+    var planeDA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
+    var planeDB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
+
+    var linePoint = findLinePoint(nA, planeDA, nB, planeDB, lineDir);
+    if (!linePoint) return null;
+
+    var intervalA = computeTriInterval(triA, lineDir, linePoint, dA0, dA1, dA2);
+    if (!intervalA) return null;
+
+    var intervalB = computeTriInterval(triB, lineDir, linePoint, dB0, dB1, dB2);
+    if (!intervalB) return null;
+
+    var overlapMin = Math.max(intervalA.min, intervalB.min);
+    var overlapMax = Math.min(intervalA.max, intervalB.max);
+    if (overlapMin >= overlapMax - 1e-10) return null;
+
+    var segLen = overlapMax - overlapMin;
+    if (segLen < 1e-8) return null;
+
+    return {
+        dA: [dA0, dA1, dA2],
+        dB: [dB0, dB1, dB2],
+        segLen: segLen
+    };
+}
+
+/**
+ * Compute the parametric interval where a triangle crosses the
+ * plane-plane intersection line.
+ *
+ * For each triangle edge that straddles the opposing plane (sign change
+ * in the signed distances d0, d1, d2) the crossing point is projected
+ * onto `lineDir` relative to `linePoint`.  Vertices exactly on the plane
+ * are also projected.
+ *
+ * @param {{ v0: Object, v1: Object, v2: Object }} tri
+ * @param {{ x: number, y: number, z: number }} lineDir  - Unit direction of intersection line
+ * @param {{ x: number, y: number, z: number }} linePoint - Reference point on the line
+ * @param {number} d0 - Signed distance of tri.v0 to the opposing plane
+ * @param {number} d1 - Signed distance of tri.v1 to the opposing plane
+ * @param {number} d2 - Signed distance of tri.v2 to the opposing plane
+ * @returns {{ min: number, max: number } | null} Parametric interval, or null if fewer than 2 crossings
+ */
+function computeTriInterval(tri, lineDir, linePoint, d0, d1, d2) {
+    var verts = [tri.v0, tri.v1, tri.v2];
+    var dists = [d0, d1, d2];
+    var params = [];
+
+    // Find edges that cross the plane (sign change in distances)
+    for (var i = 0; i < 3; i++) {
+        var j = (i + 1) % 3;
+        var di = dists[i];
+        var dj = dists[j];
+
+        if ((di > 0 && dj < 0) || (di < 0 && dj > 0)) {
+            // Edge crosses the plane
+            var t = di / (di - dj);
+            var pt = {
+                x: verts[i].x + t * (verts[j].x - verts[i].x),
+                y: verts[i].y + t * (verts[j].y - verts[i].y),
+                z: verts[i].z + t * (verts[j].z - verts[i].z)
+            };
+            // Relative projection onto line (relative to linePoint for UTM precision)
+            var param = (pt.x - linePoint.x) * lineDir.x + (pt.y - linePoint.y) * lineDir.y + (pt.z - linePoint.z) * lineDir.z;
+            params.push(param);
+        } else if (di === 0) {
+            // Vertex on the plane -- relative projection
+            var param2 = (verts[i].x - linePoint.x) * lineDir.x + (verts[i].y - linePoint.y) * lineDir.y + (verts[i].z - linePoint.z) * lineDir.z;
+            params.push(param2);
+        }
+    }
+
+    if (params.length < 2) return null;
+
+    // Deduplicate very close values
+    params.sort(function (a, b) { return a - b; });
+
+    return { min: params[0], max: params[params.length - 1] };
+}
+
+/**
+ * Find a point on the intersection line of two planes.
+ *
+ * Sets the dominant component of `lineDir` to zero and solves the
+ * resulting 2x2 system via Cramer's rule.
+ *
+ * @param {{ x: number, y: number, z: number }} nA - Normal of plane A
+ * @param {number} dA - Plane constant for A  (nA . p + dA = 0)
+ * @param {{ x: number, y: number, z: number }} nB - Normal of plane B
+ * @param {number} dB - Plane constant for B
+ * @param {{ x: number, y: number, z: number }} lineDir - Direction of the intersection line
+ * @returns {{ x: number, y: number, z: number } | null}
+ */
+function findLinePoint(nA, dA, nB, dB, lineDir) {
+    // Find the dominant axis of lineDir to set it to 0
+    var ax = Math.abs(lineDir.x);
+    var ay = Math.abs(lineDir.y);
+    var az = Math.abs(lineDir.z);
+
+    var px, py, pz;
+
+    if (az >= ax && az >= ay) {
+        // Set z = 0, solve for x, y via Cramer's rule
+        var det = nA.x * nB.y - nA.y * nB.x;
+        if (Math.abs(det) < 1e-12) return null;
+        px = (-dA * nB.y + dB * nA.y) / det;
+        py = (nA.x * (-dB) - nB.x * (-dA)) / det;
+        pz = 0;
+    } else if (ay >= ax) {
+        // Set y = 0, solve for x, z via Cramer's rule
+        var det2 = nA.x * nB.z - nA.z * nB.x;
+        if (Math.abs(det2) < 1e-12) return null;
+        px = (-dA * nB.z + dB * nA.z) / det2;
+        py = 0;
+        pz = (nA.x * (-dB) - nB.x * (-dA)) / det2;
+    } else {
+        // Set x = 0, solve for y, z via Cramer's rule
+        var det3 = nA.y * nB.z - nA.z * nB.y;
+        if (Math.abs(det3) < 1e-12) return null;
+        px = 0;
+        py = (-dA * nB.z + dB * nA.z) / det3;
+        pz = (nA.y * (-dB) - nB.y * (-dA)) / det3;
+    }
+
+    return { x: px, y: py, z: pz };
+}
+
+/**
+ * @module intersect/spatialGrid
+ *
+ * Uniform spatial grid for accelerating triangle-pair intersection tests.
+ *
+ * Triangles are binned into 2-D (XY) grid cells based on their axis-aligned
+ * bounding boxes.  Querying the grid with a bounding box returns candidate
+ * triangle indices that share at least one cell, dramatically reducing the
+ * number of exact Moller tests required.
+ *
+ * Exports:
+ *  - buildSpatialGrid(tris, cellSize)
+ *  - queryGrid(grid, bb, cellSize)
+ *  - computeBBox(tris)
+ *  - triBBox(tri)
+ *  - bboxOverlap(a, b)
+ *  - estimateAvgEdge(tris)
+ */
+
+
+/**
+ * Build a 2-D spatial hash grid on arbitrary axes.
+ *
+ * Unlike {@link buildSpatialGrid} which always hashes on XY,
+ * this function accepts accessor functions to extract the two
+ * bucketing coordinates.  For example, pass `v => v.y, v => v.z`
+ * to build a YZ grid suitable for X-direction ray casting.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
+ * @param {number} cellSize - Width/height of each grid cell (world units)
+ * @param {function(Object): number} getA - Extracts first axis value from vertex
+ * @param {function(Object): number} getB - Extracts second axis value from vertex
+ * @returns {Object.<string, number[]>} Grid mapping cell keys to triangle index arrays
+ */
+function buildSpatialGridOnAxes(tris, cellSize, getA, getB) {
+	var grid = {};
+
+	for (var i = 0; i < tris.length; i++) {
+		var t = tris[i];
+		var verts = [t.v0, t.v1, t.v2];
+
+		var minA = Infinity, maxA = -Infinity;
+		var minB = Infinity, maxB = -Infinity;
+		for (var j = 0; j < 3; j++) {
+			var a = getA(verts[j]), b = getB(verts[j]);
+			if (a < minA) minA = a;
+			if (a > maxA) maxA = a;
+			if (b < minB) minB = b;
+			if (b > maxB) maxB = b;
+		}
+
+		var a0 = Math.floor(minA / cellSize);
+		var b0 = Math.floor(minB / cellSize);
+		var a1 = Math.floor(maxA / cellSize);
+		var b1 = Math.floor(maxB / cellSize);
+
+		for (var ga = a0; ga <= a1; ga++) {
+			for (var gb = b0; gb <= b1; gb++) {
+				var key = ga + "," + gb;
+				if (!grid[key]) grid[key] = [];
+				grid[key].push(i);
+			}
+		}
+	}
+
+	return grid;
+}
+
+/**
+ * Query a grid built by {@link buildSpatialGridOnAxes} for a single point.
+ *
+ * Returns the triangle indices stored in the cell containing the
+ * given (a, b) coordinates.  No deduplication is needed because
+ * point queries always hit exactly one cell.
+ *
+ * @param {Object.<string, number[]>} grid - Grid built by buildSpatialGridOnAxes
+ * @param {number} a - First axis coordinate of the query point
+ * @param {number} b - Second axis coordinate of the query point
+ * @param {number} cellSize - Same cell size used when building the grid
+ * @returns {number[]} Triangle indices (empty array if cell is empty)
+ */
+function queryGridOnAxes(grid, a, b, cellSize) {
+	var ga = Math.floor(a / cellSize);
+	var gb = Math.floor(b / cellSize);
+	var key = ga + "," + gb;
+	var cell = grid[key];
+	return cell ? cell : [];
+}
+
+/**
+ * Build a 2-D spatial hash grid from an array of triangles.
+ *
+ * Each triangle is inserted into every XY cell that its axis-aligned
+ * bounding box overlaps.  The grid is keyed by "cellX,cellY" strings
+ * and each bucket holds an array of triangle indices.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
+ * @param {number} cellSize - Width/height of each grid cell (world units)
+ * @returns {Object.<string, number[]>} Grid mapping cell keys to triangle index arrays
+ */
+function buildSpatialGrid(tris, cellSize) {
+    var grid = {};
+
+    for (var i = 0; i < tris.length; i++) {
+        var bb = triBBox(tris[i]);
+        var x0 = Math.floor(bb.minX / cellSize);
+        var y0 = Math.floor(bb.minY / cellSize);
+        var x1 = Math.floor(bb.maxX / cellSize);
+        var y1 = Math.floor(bb.maxY / cellSize);
+
+        for (var gx = x0; gx <= x1; gx++) {
+            for (var gy = y0; gy <= y1; gy++) {
+                var key = gx + "," + gy;
+                if (!grid[key]) grid[key] = [];
+                grid[key].push(i);
+            }
+        }
+    }
+
+    return grid;
+}
+
+/**
+ * Query the spatial grid for triangle indices whose cells overlap a
+ * given bounding box.
+ *
+ * Returned indices are de-duplicated (a triangle spanning multiple cells
+ * appears only once).
+ *
+ * @param {Object.<string, number[]>} grid - Grid built by {@link buildSpatialGrid}
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }} bb - Query bounding box
+ * @param {number} cellSize - Same cell size used when building the grid
+ * @returns {number[]} Unique triangle indices
+ */
+function queryGrid(grid, bb, cellSize) {
+    var x0 = Math.floor(bb.minX / cellSize);
+    var y0 = Math.floor(bb.minY / cellSize);
+    var x1 = Math.floor(bb.maxX / cellSize);
+    var y1 = Math.floor(bb.maxY / cellSize);
+
+    var seen = {};
+    var result = [];
+
+    for (var gx = x0; gx <= x1; gx++) {
+        for (var gy = y0; gy <= y1; gy++) {
+            var key = gx + "," + gy;
+            var cell = grid[key];
+            if (!cell) continue;
+            for (var c = 0; c < cell.length; c++) {
+                var idx = cell[c];
+                if (!seen[idx]) {
+                    seen[idx] = true;
+                    result.push(idx);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * Compute the axis-aligned bounding box of a triangle array.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
+ * @returns {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }}
+ */
+function computeBBox(tris) {
+    var minX = Infinity, minY = Infinity, minZ = Infinity;
+    var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (var i = 0; i < tris.length; i++) {
+        var t = tris[i];
+        var verts = [t.v0, t.v1, t.v2];
+        for (var j = 0; j < 3; j++) {
+            var v = verts[j];
+            if (v.x < minX) minX = v.x;
+            if (v.y < minY) minY = v.y;
+            if (v.z < minZ) minZ = v.z;
+            if (v.x > maxX) maxX = v.x;
+            if (v.y > maxY) maxY = v.y;
+            if (v.z > maxZ) maxZ = v.z;
+        }
+    }
+
+    return { minX: minX, minY: minY, minZ: minZ, maxX: maxX, maxY: maxY, maxZ: maxZ };
+}
+
+/**
+ * Compute the axis-aligned bounding box of a single triangle.
+ *
+ * @param {{ v0: Object, v1: Object, v2: Object }} tri
+ * @returns {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }}
+ */
+function triBBox(tri) {
+    return {
+        minX: Math.min(tri.v0.x, tri.v1.x, tri.v2.x),
+        minY: Math.min(tri.v0.y, tri.v1.y, tri.v2.y),
+        minZ: Math.min(tri.v0.z, tri.v1.z, tri.v2.z),
+        maxX: Math.max(tri.v0.x, tri.v1.x, tri.v2.x),
+        maxY: Math.max(tri.v0.y, tri.v1.y, tri.v2.y),
+        maxZ: Math.max(tri.v0.z, tri.v1.z, tri.v2.z)
+    };
+}
+
+/**
+ * Test whether two axis-aligned bounding boxes overlap in all three axes.
+ *
+ * @param {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }} a
+ * @param {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }} b
+ * @returns {boolean}
+ */
+function bboxOverlap(a, b) {
+    return a.minX <= b.maxX && a.maxX >= b.minX &&
+           a.minY <= b.maxY && a.maxY >= b.minY &&
+           a.minZ <= b.maxZ && a.maxZ >= b.minZ;
+}
+
+/**
+ * Estimate the average edge length of a triangle array by sampling
+ * up to the first 100 triangles.
+ *
+ * Useful for choosing a spatial grid cell size proportional to the
+ * mesh resolution.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
+ * @returns {number} Average edge length (defaults to 1.0 for empty input)
+ */
+function estimateAvgEdge(tris) {
+    if (tris.length === 0) return 1.0;
+    var total = 0;
+    var count = Math.min(tris.length, 100);
+    for (var i = 0; i < count; i++) {
+        var t = tris[i];
+        total += dist3(t.v0, t.v1);
+        total += dist3(t.v1, t.v2);
+        total += dist3(t.v2, t.v0);
+    }
+    return total / (count * 3);
+}
+
+/**
+ * @module intersect/intersectMeshPair
+ *
+ * Compute all triangle-triangle intersection segments between two
+ * triangle meshes, accelerated by a uniform spatial grid.
+ *
+ * Exports:
+ *  - intersectMeshPair(trisA, trisB)        -- array of {p0, p1} segments
+ *  - intersectMeshPairTagged(trisA, trisB)  -- segments with source triangle indices
+ */
+
+
+/**
+ * Find all intersection segments between two triangle meshes.
+ *
+ * Builds a spatial grid on mesh B and, for each triangle in mesh A,
+ * queries the grid for candidate triangles in B whose bounding boxes
+ * overlap, then runs the exact Moller triangle-triangle test on each
+ * candidate pair.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisA - First mesh triangles
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB - Second mesh triangles
+ * @returns {Array<{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number} }>}
+ *          Intersection segments (may be empty)
+ */
+function intersectMeshPair(trisA, trisB) {
+    var segments = [];
+
+    // Compute average edge length for grid cell size
+    var avgEdge = estimateAvgEdge(trisB);
+    var cellSize = Math.max(avgEdge * 2, 0.1);
+
+    // Build grid on mesh B
+    var gridB = buildSpatialGrid(trisB, cellSize);
+
+    // For each triangle in A, find candidate triangles in B
+    for (var i = 0; i < trisA.length; i++) {
+        var triA = trisA[i];
+        var bbA = triBBox(triA);
+
+        var candidates = queryGrid(gridB, bbA, cellSize);
+
+        for (var c = 0; c < candidates.length; c++) {
+            var triB = trisB[candidates[c]];
+
+            var seg = triTriIntersection(triA, triB);
+            if (seg) {
+                segments.push(seg);
+            }
+        }
+    }
+
+    return segments;
+}
+
+/**
+ * Like {@link intersectMeshPair} but each returned segment carries the
+ * source triangle indices from mesh A and mesh B.
+ *
+ * Useful for boolean operations and classification that need to know
+ * which triangles produced each intersection segment.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisA - First mesh triangles
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB - Second mesh triangles
+ * @returns {Array<{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number}, idxA: number, idxB: number }>}
+ *          Tagged intersection segments (may be empty)
+ */
+function intersectMeshPairTagged(trisA, trisB) {
+    var segments = [];
+
+    var avgEdge = estimateAvgEdge(trisB);
+    var cellSize = Math.max(avgEdge * 2, 0.1);
+    var gridB = buildSpatialGrid(trisB, cellSize);
+
+    for (var i = 0; i < trisA.length; i++) {
+        var triA = trisA[i];
+        var bbA = triBBox(triA);
+        var candidates = queryGrid(gridB, bbA, cellSize);
+
+        for (var c = 0; c < candidates.length; c++) {
+            var j = candidates[c];
+            var triB = trisB[j];
+            var seg = triTriIntersection(triA, triB);
+            if (seg) {
+                segments.push({ p0: seg.p0, p1: seg.p1, idxA: i, idxB: j });
+            }
+        }
+    }
+
+    return segments;
 }
 
 const EPSILON = Math.pow(2, -52);
@@ -5524,6 +6031,12 @@ function splitMeshPair(soupA, soupB) {
 		return null;
 	}
 
+	// Step 0) Translate to origin for floating-point precision
+	var centroid = soupCentroid(soupA, soupB);
+	var cx = centroid.x, cy = centroid.y, cz = centroid.z;
+	soupA = translateSoup(soupA, -cx, -cy, -cz);
+	soupB = translateSoup(soupB, -cx, -cy, -cz);
+
 	// Step 1) Get tagged intersection segments
 	var taggedSegments = intersectMeshPairTagged(soupA, soupB);
 
@@ -5531,9 +6044,9 @@ function splitMeshPair(soupA, soupB) {
 		return {
 			groups: {
 				aInside: [],
-				aOutside: soupA.slice(),
+				aOutside: translateSoup(soupA, cx, cy, cz),
 				bInside: [],
-				bOutside: soupB.slice()
+				bOutside: translateSoup(soupB, cx, cy, cz)
 			},
 			segments: []
 		};
@@ -5595,12 +6108,13 @@ function splitMeshPair(soupA, soupB) {
 	if (groupsB.inside.length > 0) groupsB.inside = propagateNormals(groupsB.inside);
 	if (groupsB.outside.length > 0) groupsB.outside = propagateNormals(groupsB.outside);
 
+	// Translate results back to original coordinates
 	return {
 		groups: {
-			aInside: groupsA.inside,
-			aOutside: groupsA.outside,
-			bInside: groupsB.inside,
-			bOutside: groupsB.outside
+			aInside: translateSoup(groupsA.inside, cx, cy, cz),
+			aOutside: translateSoup(groupsA.outside, cx, cy, cz),
+			bInside: translateSoup(groupsB.inside, cx, cy, cz),
+			bOutside: translateSoup(groupsB.outside, cx, cy, cz)
 		},
 		segments: taggedSegments
 	};
@@ -7680,6 +8194,9 @@ function bmsIntersect(trisA, trisB, options) {
  * Chain intersection segments into ordered polylines using pool vertex
  * identity (integer ID lookup). No distance threshold — two segments
  * that share a pool vertex are connected by definition.
+ *
+ * At junction vertices (degree 3+), picks the smoothest continuation
+ * by comparing outgoing directions against the incoming direction.
  */
 
 /**
@@ -7687,6 +8204,10 @@ function bmsIntersect(trisA, trisB, options) {
  *
  * Uses pool vertex IDs for O(1) adjacency lookup. Two segments sharing
  * the same PoolVertex are guaranteed to connect (same object reference).
+ *
+ * At junction vertices where multiple unused segments meet, the algorithm
+ * picks the segment whose direction is most aligned with the incoming
+ * direction (largest dot product), preventing U-turns and backtracks.
  *
  * @param {Array<{ p0: PoolVertex, p1: PoolVertex, idxA: number, idxB: number }>} segments
  * @returns {Array<Array<PoolVertex>>} Array of polylines (each an array of pool vertices)
@@ -7710,6 +8231,63 @@ function bmsChain(segments) {
 	}
 
 	var used = new Uint8Array(segments.length);
+
+	/**
+	 * Compute unit direction from prev to curr.
+	 * Returns null if the points are coincident.
+	 */
+	function direction(prev, curr) {
+		var dx = curr.x - prev.x;
+		var dy = curr.y - prev.y;
+		var dz = curr.z - prev.z;
+		var len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+		if (len < 1e-15) return null;
+		return { x: dx / len, y: dy / len, z: dz / len };
+	}
+
+	/**
+	 * Pick the best unused neighbor at `vert`. When `inDir` is provided
+	 * (junction resolution), pick the neighbor whose outgoing direction
+	 * has the largest dot product with inDir (smoothest continuation).
+	 * When inDir is null (first step), pick any unused neighbor.
+	 */
+	function pickBest(vert, inDir) {
+		var neighbors = adj[vert.id];
+		if (!neighbors) return null;
+
+		var best = null;
+		var bestDot = -Infinity;
+
+		for (var ni = 0; ni < neighbors.length; ni++) {
+			var nb = neighbors[ni];
+			if (used[nb.segIdx]) continue;
+
+			if (!inDir) {
+				// No incoming direction — return first available
+				return nb;
+			}
+
+			// Compute outgoing direction and score by alignment
+			var dx = nb.otherEnd.x - vert.x;
+			var dy = nb.otherEnd.y - vert.y;
+			var dz = nb.otherEnd.z - vert.z;
+			var len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+			if (len < 1e-15) {
+				// Degenerate segment — lowest priority
+				if (!best) { best = nb; bestDot = -Infinity; }
+				continue;
+			}
+
+			var dot = (dx * inDir.x + dy * inDir.y + dz * inDir.z) / len;
+			if (dot > bestDot) {
+				bestDot = dot;
+				best = nb;
+			}
+		}
+
+		return best;
+	}
+
 	var polylines = [];
 
 	for (var s = 0; s < segments.length; s++) {
@@ -7720,51 +8298,45 @@ function bmsChain(segments) {
 		var tailChain = [segments[s].p0, segments[s].p1];
 		var headChain = [];
 
-		// Extend tail
-		var extending = true;
-		while (extending) {
-			extending = false;
+		// Extend tail with angle-based junction resolution
+		while (true) {
 			var tailVert = tailChain[tailChain.length - 1];
-			var neighbors = adj[tailVert.id];
-			if (!neighbors) break;
+			var tailPrev = tailChain[tailChain.length - 2];
+			var inDir = direction(tailPrev, tailVert);
+			var nb = pickBest(tailVert, inDir);
+			if (!nb) break;
 
-			for (var ni = 0; ni < neighbors.length; ni++) {
-				var nb = neighbors[ni];
-				if (used[nb.segIdx]) continue;
-
-				// Check if this would close the loop
-				if (nb.otherEnd === tailChain[0]) {
-					// Close the loop — don't add the vertex again,
-					// the caller checks first === last by reference
-					used[nb.segIdx] = 1;
-					tailChain.push(nb.otherEnd);
-					return buildResult(headChain, tailChain, polylines, used, segments, adj);
-				}
-
+			// Check if this would close the loop
+			var chainStart = headChain.length > 0 ? headChain[headChain.length - 1] : tailChain[0];
+			if (nb.otherEnd === chainStart) {
 				used[nb.segIdx] = 1;
 				tailChain.push(nb.otherEnd);
-				extending = true;
-				break; // Only follow one neighbor per step
+				break; // Loop closed
 			}
+
+			used[nb.segIdx] = 1;
+			tailChain.push(nb.otherEnd);
 		}
 
-		// Extend head
-		extending = true;
-		while (extending) {
-			extending = false;
-			var headVert = headChain.length > 0 ? headChain[headChain.length - 1] : tailChain[0];
-			var headNeighbors = adj[headVert.id];
-			if (!headNeighbors) break;
-
-			for (var hi = 0; hi < headNeighbors.length; hi++) {
-				var hb = headNeighbors[hi];
-				if (used[hb.segIdx]) continue;
-
-				used[hb.segIdx] = 1;
-				headChain.push(hb.otherEnd);
-				extending = true;
-				break;
+		// Extend head with angle-based junction resolution
+		while (true) {
+			var headVert, headPrev;
+			if (headChain.length >= 2) {
+				headVert = headChain[headChain.length - 1];
+				headPrev = headChain[headChain.length - 2];
+			} else if (headChain.length === 1) {
+				headVert = headChain[0];
+				headPrev = tailChain[0];
+			} else {
+				headVert = tailChain[0];
+				headPrev = tailChain[1];
 			}
+			var hDir = direction(headPrev, headVert);
+			var hNb = pickBest(headVert, hDir);
+			if (!hNb) break;
+
+			used[hNb.segIdx] = 1;
+			headChain.push(hNb.otherEnd);
 		}
 
 		// Combine: reverse headChain + tailChain
@@ -7783,69 +8355,245 @@ function bmsChain(segments) {
 }
 
 /**
- * Helper to finish building result when a loop closes during tail extension.
- * Continues chaining remaining unused segments.
+ * tiny-exact-math
+ * Minimal rational arithmetic library for exact geometric predicates.
  */
-function buildResult(headChain, tailChain, polylines, used, segments, adj) {
-	// Combine current chain
-	var chain;
-	if (headChain.length > 0) {
-		headChain.reverse();
-		chain = headChain.concat(tailChain);
-	} else {
-		chain = tailChain;
-	}
-	polylines.push(chain);
 
-	// Continue with remaining unused segments
-	for (var s = 0; s < segments.length; s++) {
-		if (used[s]) continue;
-		used[s] = 1;
+/**
+ * Compute the greatest common divisor of two BigInts using the Euclidean
+ * algorithm. The result is always non-negative.
+ *
+ * @param {bigint} a
+ * @param {bigint} b
+ * @returns {bigint}
+ */
+function gcd(a, b) {
+  a = a < 0n ? -a : a;
+  b = b < 0n ? -b : b;
+  while (b !== 0n) {
+    const t = b;
+    b = a % b;
+    a = t;
+  }
+  return a;
+}
 
-		var tChain = [segments[s].p0, segments[s].p1];
-		var hChain = [];
+/**
+ * Convert a JavaScript number (integer or floating-point) to a Rational.
+ *
+ * Strategy: use `String(n)`, which produces the *shortest* decimal
+ * representation that round-trips back to the same IEEE 754 double (Grisu /
+ * Ryu algorithm in V8).  Parse the resulting decimal string into a
+ * numerator/denominator pair, handling the sign, fractional part, and
+ * optional scientific-notation exponent separately to avoid BigInt parsing
+ * errors (e.g. BigInt("-05") would throw).
+ *
+ * @param {number} n
+ * @returns {Rational}
+ */
+function fromNumber(n) {
+  if (!isFinite(n)) {
+    throw new RangeError("Cannot convert non-finite number to Rational");
+  }
+  if (n === 0) return new Rational(0n, 1n);
 
-		// Extend tail
-		var extending = true;
-		while (extending) {
-			extending = false;
-			var tailVert = tChain[tChain.length - 1];
-			var neighbors = adj[tailVert.id];
-			if (!neighbors) break;
-			for (var ni = 0; ni < neighbors.length; ni++) {
-				if (used[neighbors[ni].segIdx]) continue;
-				used[neighbors[ni].segIdx] = 1;
-				tChain.push(neighbors[ni].otherEnd);
-				extending = true;
-				break;
-			}
-		}
+  const str = String(n);
+  const negative = str.charCodeAt(0) === 45; // '-'
+  const abs = negative ? str.slice(1) : str;
 
-		// Extend head
-		extending = true;
-		while (extending) {
-			extending = false;
-			var headVert = hChain.length > 0 ? hChain[hChain.length - 1] : tChain[0];
-			var headNeighbors = adj[headVert.id];
-			if (!headNeighbors) break;
-			for (var hi = 0; hi < headNeighbors.length; hi++) {
-				if (used[headNeighbors[hi].segIdx]) continue;
-				used[headNeighbors[hi].segIdx] = 1;
-				hChain.push(headNeighbors[hi].otherEnd);
-				extending = true;
-				break;
-			}
-		}
+  // Handle scientific notation produced for very large / very small values
+  // e.g. "1.5e-7" or "1e+21"
+  const eIdx = abs.indexOf("e");
+  if (eIdx !== -1) {
+    const base = abs.slice(0, eIdx);
+    const exp = parseInt(abs.slice(eIdx + 1), 10);
+    const r = _parseDecimalString(base, negative);
+    const pow = 10n ** BigInt(Math.abs(exp));
+    return exp >= 0
+      ? new Rational(r.numerator * pow, r.denominator)
+      : new Rational(r.numerator, r.denominator * pow);
+  }
 
-		if (hChain.length > 0) {
-			hChain.reverse();
-			polylines.push(hChain.concat(tChain));
-		} else {
-			polylines.push(tChain);
-		}
-	}
+  return _parseDecimalString(abs, negative);
+}
 
-	return polylines;
+/**
+ * Parse a plain decimal string (no sign, no exponent) into a Rational.
+ * @param {string} abs  – digits with optional "."
+ * @param {boolean} negative
+ * @returns {Rational}
+ */
+function _parseDecimalString(abs, negative) {
+  const dotIndex = abs.indexOf(".");
+  if (dotIndex === -1) {
+    const num = negative ? -BigInt(abs) : BigInt(abs);
+    return new Rational(num, 1n);
+  }
+
+  const intDigits = abs.slice(0, dotIndex) || "0";
+  const fracDigits = abs.slice(dotIndex + 1);
+  const combined = intDigits + fracDigits; // sign removed, safe for BigInt
+  const num = negative ? -BigInt(combined) : BigInt(combined);
+  const den = 10n ** BigInt(fracDigits.length);
+  return new Rational(num, den);
+}
+
+/**
+ * A rational number stored as two BigInts (numerator and denominator).
+ * The value is always kept in lowest terms with a non-negative denominator.
+ */
+class Rational {
+  /**
+   * @param {bigint|number} numerator
+   * @param {bigint|number} denominator
+   */
+  constructor(numerator, denominator = 1n) {
+    let num = BigInt(numerator);
+    let den = BigInt(denominator);
+
+    if (den === 0n) {
+      throw new RangeError("Denominator must not be zero");
+    }
+
+    // Normalise: keep denominator positive
+    if (den < 0n) {
+      num = -num;
+      den = -den;
+    }
+
+    const g = gcd(num < 0n ? -num : num, den);
+    this.numerator = num / g;
+    this.denominator = den / g;
+  }
+
+  // ── Arithmetic ────────────────────────────────────────────────────────────
+
+  /**
+   * Return a new Rational equal to this + other.
+   * @param {Rational} other
+   * @returns {Rational}
+   */
+  add(other) {
+    return new Rational(
+      this.numerator * other.denominator + other.numerator * this.denominator,
+      this.denominator * other.denominator
+    );
+  }
+
+  /**
+   * Return a new Rational equal to this - other.
+   * @param {Rational} other
+   * @returns {Rational}
+   */
+  subtract(other) {
+    return new Rational(
+      this.numerator * other.denominator - other.numerator * this.denominator,
+      this.denominator * other.denominator
+    );
+  }
+
+  /**
+   * Return a new Rational equal to this * other.
+   * @param {Rational} other
+   * @returns {Rational}
+   */
+  multiply(other) {
+    return new Rational(
+      this.numerator * other.numerator,
+      this.denominator * other.denominator
+    );
+  }
+
+  /**
+   * Return a new Rational equal to this / other.
+   * @param {Rational} other
+   * @returns {Rational}
+   */
+  divide(other) {
+    if (other.numerator === 0n) {
+      throw new RangeError("Division by zero");
+    }
+    return new Rational(
+      this.numerator * other.denominator,
+      this.denominator * other.numerator
+    );
+  }
+
+  // ── Comparison ────────────────────────────────────────────────────────────
+
+  /**
+   * Return the sign of this rational: -1, 0, or 1.
+   * @returns {number}
+   */
+  sign() {
+    if (this.numerator === 0n) return 0;
+    return this.numerator > 0n ? 1 : -1;
+  }
+
+  /**
+   * Return true if this rational equals zero.
+   * @returns {boolean}
+   */
+  isZero() {
+    return this.numerator === 0n;
+  }
+
+  /**
+   * Convert to a JavaScript number (may lose precision).
+   * @returns {number}
+   */
+  toNumber() {
+    return Number(this.numerator) / Number(this.denominator);
+  }
+
+  /**
+   * Human-readable string representation.
+   * @returns {string}
+   */
+  toString() {
+    if (this.denominator === 1n) return String(this.numerator);
+    return `${this.numerator}/${this.denominator}`;
+  }
+}
+
+// ── Geometric predicate ──────────────────────────────────────────────────────
+
+/**
+ * Compute the orientation (sign of the 2×2 determinant) of three 2-D points.
+ *
+ * Given points p1, p2, p3 each with numeric `x` and `y` properties, the
+ * determinant is:
+ *
+ *   | p2.x - p1.x   p3.x - p1.x |
+ *   | p2.y - p1.y   p3.y - p1.y |
+ *
+ * = (p2.x - p1.x)(p3.y - p1.y) - (p3.x - p1.x)(p2.y - p1.y)
+ *
+ * All coordinates are converted to exact Rationals before the computation so
+ * the result is free of floating-point rounding error.
+ *
+ * @param {{ x: number, y: number }} p1
+ * @param {{ x: number, y: number }} p2
+ * @param {{ x: number, y: number }} p3
+ * @returns {-1 | 0 | 1}  sign of the determinant
+ */
+function determinant(p1, p2, p3) {
+  const x1 = fromNumber(p1.x);
+  const y1 = fromNumber(p1.y);
+  const x2 = fromNumber(p2.x);
+  const y2 = fromNumber(p2.y);
+  const x3 = fromNumber(p3.x);
+  const y3 = fromNumber(p3.y);
+
+  const dx2 = x2.subtract(x1);
+  const dy2 = y2.subtract(y1);
+  const dx3 = x3.subtract(x1);
+  const dy3 = y3.subtract(y1);
+
+  // det = dx2*dy3 - dx3*dy2
+  const det = dx2.multiply(dy3).subtract(dx3.multiply(dy2));
+
+  return det.sign();
 }
 
 /**
@@ -7921,7 +8669,6 @@ function bmsRetriangulate(tri, segments) {
 	var seenIds = {};
 	var v0Key = vKey(tri.v0), v1Key = vKey(tri.v1), v2Key = vKey(tri.v2);
 
-	var BARY_TOL = -1e-4;
 	var validSteiner = []; // pool vertex objects
 
 	// pts array: indices 0,1,2 = original vertices, 3+ = pool vertices
@@ -7935,6 +8682,39 @@ function bmsRetriangulate(tri, segments) {
 	keyToIndex[v0Key] = 0;
 	keyToIndex[v1Key] = 1;
 	keyToIndex[v2Key] = 2;
+
+	// Exact point-in-triangle test using rational arithmetic.
+	// Projects ORIGINAL 3D coordinates to the best-fit 2D plane (XY, XZ, or YZ)
+	// to avoid float errors from the toLocal projection.
+	var anx = Math.abs(lnx), any = Math.abs(lny), anz = Math.abs(lnz);
+	var projA, projB; // which axes to use for 2D projection
+	if (anx >= any && anx >= anz) {
+		// Normal dominated by X → project to YZ plane
+		projA = function(v) { return v.y; };
+		projB = function(v) { return v.z; };
+	} else if (any >= anz) {
+		// Normal dominated by Y → project to XZ plane
+		projA = function(v) { return v.x; };
+		projB = function(v) { return v.z; };
+	} else {
+		// Normal dominated by Z → project to XY plane
+		projA = function(v) { return v.x; };
+		projB = function(v) { return v.y; };
+	}
+	var tv0 = { x: projA(tri.v0), y: projB(tri.v0) };
+	var tv1 = { x: projA(tri.v1), y: projB(tri.v1) };
+	var tv2 = { x: projA(tri.v2), y: projB(tri.v2) };
+
+	function exactPointInTri3D(p) {
+		var pp = { x: projA(p), y: projB(p) };
+		var d0 = determinant(tv0, tv1, pp);
+		var d1 = determinant(tv1, tv2, pp);
+		var d2 = determinant(tv2, tv0, pp);
+		var hasNeg = (d0 < 0) || (d1 < 0) || (d2 < 0);
+		var hasPos = (d0 > 0) || (d1 > 0) || (d2 > 0);
+		return !(hasNeg && hasPos);
+	}
+	var BARY_TOL = -1e-4; // float fallback tolerance
 
 	for (var s = 0; s < segments.length; s++) {
 		var seg = segments[s];
@@ -7954,11 +8734,21 @@ function bmsRetriangulate(tri, segments) {
 			if (p.id !== undefined && seenIds[p.id]) continue;
 			if (p.id !== undefined) seenIds[p.id] = true;
 
-			// Validate: must be inside the triangle (barycentric check)
-			var lp = toLocal(p);
-			var bc = baryCoords(lp[0], lp[1]);
-			if (bc[0] < BARY_TOL || bc[1] < BARY_TOL || bc[2] < BARY_TOL) {
-				continue;
+			// Validate: must be inside the triangle.
+			// Primary: exact rational test on original 3D coords (projected to best plane)
+			// Fallback: float barycentric with tolerance (handles near-edge Steiner points
+			// whose computed position drifted slightly outside due to float intersection math)
+			if (!exactPointInTri3D(p)) {
+				var lp = toLocal(p);
+				var bc = baryCoords(lp[0], lp[1]);
+				if (bc[0] < BARY_TOL || bc[1] < BARY_TOL || bc[2] < BARY_TOL) {
+					// Last chance: accept if the point is very close to an edge
+					// (within 1% of triangle size) — intersection drift
+					var minBC = Math.min(bc[0], bc[1], bc[2]);
+					if (minBC < -0.01) {
+						continue;
+					}
+				}
 			}
 
 			// Add pool vertex object directly (same reference!)
@@ -8301,59 +9091,127 @@ function bmsSplit(trisA, trisB, intersectResult) {
 // ── Boundary extraction ──
 
 /**
- * Extract ordered boundary loop(s) from a triangle soup.
- * Returns the largest loop as an ordered array of {key, vertex}.
+ * chainedOpenEdge — Walk the complete open boundary of a mesh as a CLOSED polygon.
+ *
+ * Uses a half-edge structure to correctly navigate bowtie (non-manifold)
+ * vertices. At each boundary vertex, the next boundary half-edge is found
+ * by walking the triangle fan around the vertex until the next boundary
+ * edge is reached.
+ *
+ * Returns the largest loop as an ordered array of {key, vertex},
+ * with the first vertex repeated at the end to close the polygon.
+ * Returns [] if the mesh has no open edges.
  */
-function extractBoundaryLoop(tris) {
-	var edgeCount = {};
-	var edgeVerts = {};
+function chainedOpenEdge(tris) {
+	// Step 1: Build half-edge structure
+	// Each directed half-edge is keyed as "fromKey|toKey"
+	var vertMap = {};     // vertKey → vertex object
+	var halfEdges = {};   // "from|to" → true (exists)
+	var heNextInTri = {}; // "from|to" → "to|next" (next half-edge in same triangle)
 
 	for (var i = 0; i < tris.length; i++) {
 		var tri = tris[i];
 		var vs = [tri.v0, tri.v1, tri.v2];
 		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+
 		for (var e = 0; e < 3; e++) {
+			vertMap[ks[e]] = vs[e];
 			var ne = (e + 1) % 3;
-			var ek = edgeKey(ks[e], ks[ne]);
-			if (!edgeCount[ek]) { edgeCount[ek] = 0; edgeVerts[ek] = { ka: ks[e], kb: ks[ne], a: vs[e], b: vs[ne] }; }
-			edgeCount[ek]++;
+			var nne = (e + 2) % 3;
+			var heKey = ks[e] + "|" + ks[ne];
+			halfEdges[heKey] = true;
+			// Keep first occurrence — prevents non-manifold edges from
+			// overwriting with a different triangle's fan data
+			if (heNextInTri[heKey] === undefined) {
+				heNextInTri[heKey] = ks[ne] + "|" + ks[nne];
+			}
 		}
 	}
 
-	// Build boundary adjacency (edges with count === 1)
-	var bdryAdj = {};
-	var bdryVertMap = {};
-	for (var ek2 in edgeCount) {
-		if (edgeCount[ek2] !== 1) continue;
-		var ev = edgeVerts[ek2];
-		if (!bdryAdj[ev.ka]) bdryAdj[ev.ka] = [];
-		bdryAdj[ev.ka].push(ev.kb);
-		if (!bdryAdj[ev.kb]) bdryAdj[ev.kb] = [];
-		bdryAdj[ev.kb].push(ev.ka);
-		bdryVertMap[ev.ka] = ev.a;
-		bdryVertMap[ev.kb] = ev.b;
+	// Step 2: Find boundary half-edges (no twin exists)
+	var boundary = {};  // "from|to" → true
+	var bdryFromVert = {}; // vertKey → ["from|to", ...] (boundary half-edges starting from this vert)
+
+	for (var hk in halfEdges) {
+		var sep = hk.indexOf("|");
+		var fromK = hk.substring(0, sep);
+		var toK = hk.substring(sep + 1);
+		var twin = toK + "|" + fromK;
+		if (!halfEdges[twin]) {
+			boundary[hk] = true;
+			if (!bdryFromVert[fromK]) bdryFromVert[fromK] = [];
+			bdryFromVert[fromK].push(hk);
+		}
 	}
 
-	// Walk the largest boundary loop
-	var visited = {};
+	if (Object.keys(boundary).length === 0) return [];
+
+	// Step 3: Build "next boundary" map
+	// For boundary half-edge A→V, find the next boundary half-edge V→B
+	// by walking the triangle fan around V:
+	//   A→V is in some triangle → next in that triangle is V→C
+	//   if V→C is boundary → done (next = V→C)
+	//   if V→C is interior → find twin C→V → next in twin's triangle is V→D
+	//   repeat until we find a boundary half-edge
+	var nextBoundary = {}; // "A|V" → "V|B"
+
+	for (var bhk in boundary) {
+		var sep2 = bhk.indexOf("|");
+		bhk.substring(sep2 + 1);
+
+		// Walk the fan around V starting from the next half-edge in A→V's triangle
+		var cursor = heNextInTri[bhk]; // V→C in the same triangle as A→V
+		var visited = {};  // cycle detection
+		visited[bhk] = true;
+		var safety = 1000;
+
+		while (safety-- > 0) {
+			if (!cursor || visited[cursor]) break;
+			visited[cursor] = true;
+			if (boundary[cursor]) {
+				nextBoundary[bhk] = cursor;
+				break;
+			}
+			// cursor is interior V→D — find twin D→V, then get next in that triangle
+			var csep = cursor.indexOf("|");
+			var cFrom = cursor.substring(0, csep);
+			var cTo = cursor.substring(csep + 1);
+			var cTwin = cTo + "|" + cFrom;
+			if (!halfEdges[cTwin]) break; // broken mesh
+			cursor = heNextInTri[cTwin]; // next in twin's triangle = V→E
+		}
+	}
+
+	// Step 4: Walk boundary loops using nextBoundary
+	var used = {};
 	var bestLoop = null;
 
-	for (var startKey in bdryAdj) {
-		if (visited[startKey]) continue;
+	for (var startHE in boundary) {
+		if (used[startHE]) continue;
+
 		var loop = [];
-		var current = startKey;
-		while (current && !visited[current]) {
-			visited[current] = true;
-			loop.push({ key: current, vertex: bdryVertMap[current] });
-			var neighbors = bdryAdj[current];
-			var next = null;
-			if (neighbors) {
-				for (var ni = 0; ni < neighbors.length; ni++) {
-					if (!visited[neighbors[ni]]) { next = neighbors[ni]; break; }
+		var cur = startHE;
+		var safety2 = Object.keys(boundary).length + 2;
+
+		while (safety2-- > 0) {
+			if (used[cur]) {
+				// If we closed back to start, add closing vertex
+				if (cur === startHE && loop.length > 0) {
+					var csep2 = cur.indexOf("|");
+					var closingKey = cur.substring(0, csep2);
+					loop.push({ key: closingKey, vertex: vertMap[closingKey] });
 				}
+				break;
 			}
-			current = next;
+			used[cur] = true;
+			var csep3 = cur.indexOf("|");
+			var curFrom = cur.substring(0, csep3);
+			loop.push({ key: curFrom, vertex: vertMap[curFrom] });
+
+			cur = nextBoundary[cur];
+			if (!cur) break;
 		}
+
 		if (!bestLoop || loop.length > bestLoop.length) bestLoop = loop;
 	}
 
@@ -8445,42 +9303,6 @@ function graphWalkToSet(startKey, targetSet, meshAdj, meshVertMap, maxSteps) {
 	return { path: path, targetKey: found };
 }
 
-/**
- * Walk along boundary loop from index startIdx to endIdx (inclusive).
- * Walks in the forward direction (wrapping around).
- */
-function walkBoundarySegment(loop, startIdx, endIdx) {
-	var result = [];
-	var n = loop.length;
-	var i = startIdx;
-	while (true) {
-		result.push(loop[i].vertex);
-		if (i === endIdx) break;
-		i = (i + 1) % n;
-		if (result.length > n + 1) break; // safety
-	}
-	return result;
-}
-
-// ── Main entry point ──
-
-/**
- * Build mesh edge polygons and closed polylines.
- *
- * For each mesh, builds ONE closed polygon connecting all intersection
- * chains via graph-walks and the mesh's open boundary.
- *
- * @param {Array<Array<PoolVertex>>} polylines - From bmsChain
- * @param {Array} trisA - Original mesh A triangles
- * @param {Array} trisB - Original mesh B triangles
- * @returns {{
- *   closedPolylines: Array<Array<Object>>,
- *   meshEdgePolys: {
- *     A: { segments: Array<{verts: Array, type: string}>, closed: boolean },
- *     B: { segments: Array<{verts: Array, type: string}>, closed: boolean }
- *   }
- * }}
- */
 function bmsClosePolylines(polylines, trisA, trisB, megaSoup, segments) {
 	if (polylines.length === 0) {
 		return {
@@ -8549,69 +9371,121 @@ function bmsClosePolylines(polylines, trisA, trisB, megaSoup, segments) {
 function buildMeshEdgePoly(chains, meshTris, graphTris, barrierEdgeSet) {
 	if (chains.length === 0) return { segments: [], closed: false };
 
-	// Step 1: Extract boundary loop from ORIGINAL mesh (not mega soup)
-	var boundaryLoop = extractBoundaryLoop(meshTris);
+	// Step 1: Trace open edges — complete closed boundary polygon
+	var boundaryLoop = chainedOpenEdge(meshTris);
 	var hasBoundary = boundaryLoop.length > 0;
 
 	if (!hasBoundary) {
+		// Closed mesh — just trace intersection(s)
 		var segs = [];
 		for (var ci = 0; ci < chains.length; ci++) {
 			segs.push({ verts: chains[ci].slice(), type: "intersection" });
 		}
-		return { segments: segs, closed: false };
+		var isClosed = chains.length > 0 && chains[0].length > 2 &&
+			chains[0][0] === chains[0][chains[0].length - 1];
+		return { segments: segs, closed: isClosed };
 	}
 
-	// Step 2: Build mesh vertex adjacency from GRAPH TRIS (mega soup with pool vertices)
-	// This ensures pool vertex keys are in the adjacency graph
-	// Pass barrier edges so graph-walks go AROUND intersections, not through them
+	// Step 2: Build mesh vertex adjacency (barriers excluded — walks can't cross intersection)
 	var meshGraph = buildMeshVertexAdj(graphTris, barrierEdgeSet);
 
-	// Build boundary vertex set and loop index map
+	// Build boundary vertex set and index map
 	var bdryVertSet = {};
 	var bdryKeyToIdx = {};
 	for (var bi = 0; bi < boundaryLoop.length; bi++) {
 		bdryVertSet[boundaryLoop[bi].key] = true;
 		bdryKeyToIdx[boundaryLoop[bi].key] = bi;
 	}
+	var bdryLen = boundaryLoop.length - 1; // edges (loop is closed, first=last)
 
-	// Step 3: For each chain, find its nearest boundary attachment point
-	// Find the chain vertex closest to any boundary vertex, then graph-walk
-	// from that chain vertex to the boundary to get the attachment.
-	var chainAttachments = [];
+	// Step 3: For EACH chain, find graph walks to boundary.
+	//
+	// Closed chains (loops): ONE graph walk — enter and exit at the same vertex.
+	// Open chains: TWO graph walks — enter at one endpoint, exit at the other.
+	//   gwIn:  boundary → chain entry point
+	//   gwOut: chain exit point → boundary
+	//
+	// connections[] stores: { chainIdx, gwIn, gwOut, bdryIdxIn, bdryIdxOut }
+	var connections = [];
+	var MAX_BFS = 50000;
 
 	for (var ci2 = 0; ci2 < chains.length; ci2++) {
 		var chain = chains[ci2];
+		var chainIsClosed = chain.length > 2 && chain[0] === chain[chain.length - 1];
 
-		// Find the chain vertex nearest to the boundary
-		// Use graph-walk from first chain vertex to boundary
-		var chainVertKeys = {};
-		for (var cvi = 0; cvi < chain.length; cvi++) {
-			chainVertKeys[vKey(chain[cvi])] = cvi;
+		if (chainIsClosed) {
+			// Closed loop: find shortest walk from ANY loop vertex to boundary
+			var bestGW = null;
+			var bestLen = MAX_BFS;
+			var bestVertIdx = -1;
+			for (var cvi = 0; cvi < chain.length; cvi++) {
+				var cvKey = vKey(chain[cvi]);
+				var gw = graphWalkToSet(cvKey, bdryVertSet, meshGraph.adj, meshGraph.vertMap, bestLen);
+				if (gw && gw.path.length < bestLen) {
+					bestLen = gw.path.length;
+					bestGW = gw;
+					bestVertIdx = cvi;
+				}
+			}
+			if (bestGW) {
+				var bIdx = bdryKeyToIdx[bestGW.targetKey];
+				connections.push({
+					chainIdx: ci2,
+					entryVertIdx: bestVertIdx,
+					gwIn: bestGW.path.slice().reverse(),   // boundary → intersection
+					gwOut: bestGW.path.slice(),             // intersection → boundary (same path)
+					bdryIdxIn: bIdx !== undefined ? bIdx : 0,
+					bdryIdxOut: bIdx !== undefined ? bIdx : 0
+				});
+			}
+		} else {
+			// Open chain: find walks from BOTH endpoints
+			var startKey = vKey(chain[0]);
+			var endKey = vKey(chain[chain.length - 1]);
+			var gwStart = graphWalkToSet(startKey, bdryVertSet, meshGraph.adj, meshGraph.vertMap, MAX_BFS);
+			var gwEnd = graphWalkToSet(endKey, bdryVertSet, meshGraph.adj, meshGraph.vertMap, MAX_BFS);
+
+			if (gwStart && gwEnd) {
+				// Enter at start, exit at end
+				var bIdxIn = bdryKeyToIdx[gwStart.targetKey];
+				var bIdxOut = bdryKeyToIdx[gwEnd.targetKey];
+				connections.push({
+					chainIdx: ci2,
+					entryVertIdx: 0,
+					gwIn: gwStart.path.slice().reverse(),  // boundary → chain[0]
+					gwOut: gwEnd.path.slice(),              // chain[last] → boundary
+					bdryIdxIn: bIdxIn !== undefined ? bIdxIn : 0,
+					bdryIdxOut: bIdxOut !== undefined ? bIdxOut : 0
+				});
+			} else if (gwStart) {
+				// Only start reached boundary — use same walk in/out
+				var bIdx2 = bdryKeyToIdx[gwStart.targetKey];
+				connections.push({
+					chainIdx: ci2,
+					entryVertIdx: 0,
+					gwIn: gwStart.path.slice().reverse(),
+					gwOut: gwStart.path.slice(),
+					bdryIdxIn: bIdx2 !== undefined ? bIdx2 : 0,
+					bdryIdxOut: bIdx2 !== undefined ? bIdx2 : 0
+				});
+			} else if (gwEnd) {
+				// Only end reached boundary — reverse chain direction
+				var bIdx3 = bdryKeyToIdx[gwEnd.targetKey];
+				connections.push({
+					chainIdx: ci2,
+					entryVertIdx: chain.length - 1,
+					gwIn: gwEnd.path.slice().reverse(),
+					gwOut: gwEnd.path.slice(),
+					bdryIdxIn: bIdx3 !== undefined ? bIdx3 : 0,
+					bdryIdxOut: bIdx3 !== undefined ? bIdx3 : 0
+				});
+			}
+			// If neither endpoint reached boundary, skip this chain
 		}
-
-		// Try graph-walk from each end of the chain to the boundary
-		var firstKey = vKey(chain[0]);
-		var gw = graphWalkToSet(firstKey, bdryVertSet, meshGraph.adj, meshGraph.vertMap, 10000);
-
-		if (!gw) {
-			// Chain can't reach boundary — skip
-			continue;
-		}
-
-		var bdryIdx = bdryKeyToIdx[gw.targetKey];
-		chainAttachments.push({
-			chainIdx: ci2,
-			chain: chain,
-			chainEntryKey: firstKey,
-			chainEntryIdx: 0,
-			graphWalkToBoundary: gw.path,
-			boundaryKey: gw.targetKey,
-			boundaryLoopIdx: bdryIdx !== undefined ? bdryIdx : 0
-		});
 	}
 
-	if (chainAttachments.length === 0) {
-		// No chains could reach boundary
+	if (connections.length === 0) {
+		// No chain could reach the boundary — fallback
 		var fallbackSegs = [];
 		for (var fi = 0; fi < chains.length; fi++) {
 			fallbackSegs.push({ verts: chains[fi].slice(), type: "intersection" });
@@ -8619,57 +9493,110 @@ function buildMeshEdgePoly(chains, meshTris, graphTris, barrierEdgeSet) {
 		return { segments: fallbackSegs, closed: false };
 	}
 
-	// Step 4: Sort chain attachments by their position along the boundary loop
-	chainAttachments.sort(function (a, b) { return a.boundaryLoopIdx - b.boundaryLoopIdx; });
+	// Step 4: Sort connections by boundary entry index (position around the loop).
+	// This ensures we visit intersections in order as we walk the boundary.
+	connections.sort(function (a, b) { return a.bdryIdxIn - b.bdryIdxIn; });
 
-	// Step 5: Build the mesh edge poly
-	// Walk along boundary, detouring into each chain via graph-walks
+	// Step 5: Build ONE continuous closed polygon.
+	//
+	// Algorithm (unidirectional, visits each intersection in boundary order):
+	//   START at first connection's entry boundary point
+	//   for each connection i:
+	//     walk boundary → to connection[i].bdryIdxIn
+	//     graph walk IN → from boundary to chain entry point
+	//     traverse chain (entry → exit)
+	//     graph walk OUT → from chain exit to boundary
+	//   walk remaining boundary → back to start
+	//   = CLOSED
 	var resultSegments = [];
-	var n = chainAttachments.length;
+	var startBdryIdx = connections[0].bdryIdxIn;
+	// Track current position on boundary (index into boundaryLoop)
+	var curBdryIdx = startBdryIdx;
 
-	for (var ai = 0; ai < n; ai++) {
-		var att = chainAttachments[ai];
-		var nextAtt = chainAttachments[(ai + 1) % n];
+	for (var ci3 = 0; ci3 < connections.length; ci3++) {
+		var conn = connections[ci3];
 
-		// 5a) Graph-walk from boundary to chain entry point (magenta)
-		var gwIn = att.graphWalkToBoundary.slice().reverse(); // boundary→chain, so reverse the chain→boundary path
-		if (gwIn.length >= 2) {
-			resultSegments.push({ verts: gwIn, type: "walk" });
-		}
-
-		// 5b) Follow the intersection chain (yellow)
-		resultSegments.push({ verts: att.chain.slice(), type: "intersection" });
-
-		// 5c) Graph-walk from chain back to boundary (magenta)
-		// For closed chains, we end up back at the entry point, so the walk back
-		// is the same as the walk in (reversed)
-		var chainEndKey = vKey(att.chain[att.chain.length - 1]);
-		var isClosed = (chainEndKey === att.chainEntryKey) || (att.chain[att.chain.length - 1] === att.chain[0]);
-
-		if (isClosed) {
-			// Closed chain — walk back the same way we came in
-			if (att.graphWalkToBoundary.length >= 2) {
-				resultSegments.push({ verts: att.graphWalkToBoundary.slice(), type: "walk" });
-			}
-		} else {
-			// Open chain — graph-walk from the chain END to boundary
-			var gwOut = graphWalkToSet(chainEndKey, bdryVertSet, meshGraph.adj, meshGraph.vertMap, 10000);
-			if (gwOut && gwOut.path.length >= 2) {
-				resultSegments.push({ verts: gwOut.path, type: "walk" });
+		// 5a) Boundary segment: from current position to this connection's entry
+		if (ci3 > 0) {
+			var fromIdx = curBdryIdx;
+			var toIdx = conn.bdryIdxIn;
+			if (fromIdx !== toIdx) {
+				var bdrySegVerts = [];
+				if (toIdx > fromIdx) {
+					for (var bsi = fromIdx; bsi <= toIdx; bsi++) {
+						bdrySegVerts.push(boundaryLoop[bsi].vertex);
+					}
+				} else {
+					// Wrap around boundary
+					for (var bsi2 = fromIdx; bsi2 < bdryLen; bsi2++) {
+						bdrySegVerts.push(boundaryLoop[bsi2].vertex);
+					}
+					for (var bsi3 = 0; bsi3 <= toIdx; bsi3++) {
+						bdrySegVerts.push(boundaryLoop[bsi3].vertex);
+					}
+				}
+				if (bdrySegVerts.length >= 2) {
+					resultSegments.push({ verts: bdrySegVerts, type: "walk" });
+				}
 			}
 		}
 
-		// 5d) Edge-walk along boundary to next chain's attachment (magenta)
-		var fromBdryIdx = att.boundaryLoopIdx;
-		var toBdryIdx = nextAtt.boundaryLoopIdx;
+		// 5b) Graph walk IN: boundary → chain entry vertex
+		if (conn.gwIn.length >= 2) {
+			resultSegments.push({ verts: conn.gwIn, type: "walk" });
+		}
 
-		// Walk forward along boundary from current to next
-		if (fromBdryIdx !== toBdryIdx) {
-			var bdryWalk = walkBoundarySegment(boundaryLoop, fromBdryIdx, toBdryIdx);
-			if (bdryWalk.length >= 2) {
-				resultSegments.push({ verts: bdryWalk, type: "walk" });
+		// 5c) Orient chain so entry vertex is at [0].
+		var chain = chains[conn.chainIdx].slice();
+		var chainIsClosed = chain.length > 2 && chain[0] === chain[chain.length - 1];
+		if (conn.entryVertIdx > 0) {
+			if (chainIsClosed) {
+				// Rotate closed loop: walk vertex at [0] and repeated at [end]
+				var rotChain = [];
+				for (var rci = conn.entryVertIdx; rci < chain.length - 1; rci++) {
+					rotChain.push(chain[rci]);
+				}
+				for (var rci2 = 0; rci2 <= conn.entryVertIdx; rci2++) {
+					rotChain.push(chain[rci2]);
+				}
+				chain = rotChain;
+			} else if (conn.entryVertIdx === chain.length - 1) {
+				// Open chain entered at last vertex — reverse to enter at [0]
+				chain.reverse();
 			}
 		}
+		resultSegments.push({ verts: chain, type: "intersection" });
+
+		// 5d) Graph walk OUT: chain exit vertex → boundary
+		if (conn.gwOut.length >= 2) {
+			resultSegments.push({ verts: conn.gwOut, type: "walk" });
+		}
+
+		// Update current boundary position to exit point
+		curBdryIdx = conn.bdryIdxOut;
+	}
+
+	// 5e) Final boundary segment: from last exit back to first entry (closing).
+	var closingVerts = [];
+	if (curBdryIdx !== startBdryIdx) {
+		// Walk forward from last exit to first entry (wrapping around)
+		for (var cbi = curBdryIdx; cbi < bdryLen; cbi++) {
+			closingVerts.push(boundaryLoop[cbi].vertex);
+		}
+		for (var cbi2 = 0; cbi2 <= startBdryIdx; cbi2++) {
+			closingVerts.push(boundaryLoop[cbi2].vertex);
+		}
+	} else {
+		// Same position — full boundary loop
+		for (var cbi3 = startBdryIdx; cbi3 < bdryLen; cbi3++) {
+			closingVerts.push(boundaryLoop[cbi3].vertex);
+		}
+		for (var cbi4 = 0; cbi4 <= startBdryIdx; cbi4++) {
+			closingVerts.push(boundaryLoop[cbi4].vertex);
+		}
+	}
+	if (closingVerts.length >= 2) {
+		resultSegments.push({ verts: closingVerts, type: "walk" });
 	}
 
 	return { segments: resultSegments, closed: true };
@@ -8678,47 +9605,32 @@ function buildMeshEdgePoly(chains, meshTris, graphTris, barrierEdgeSet) {
 /**
  * @module bms/bmsClassify
  *
- * Segment-constrained flood-fill classification using boundary topology.
- *
- * Intersection segment edges are barriers — flood fill stops at them,
- * producing connected regions. Classification uses TOPOLOGY, not ray casting:
- * the region that touches the input mesh's boundary edges = "outside".
- * All other regions = "inside" (enclosed by the intersection polyline,
- * cut off from the boundary).
- *
- * For closed meshes (no boundary edges), falls back to size heuristic
- * (smaller region = inside).
+ * Hybrid classification (v0.5.0):
+ * - Open meshes: boundary topology (touches mesh boundary = outside)
+ * - Closed meshes: barrier-normal dot product (other mesh's normal at barrier)
+ * Also extracts per-component boundary walks for visualization.
  */
 
 
+// ── Mesh boundary detection ──
+
 /**
- * Build set of boundary edge vertex keys for a triangle soup.
- * Boundary edges appear exactly once. Returns a Set of vertex keys
- * that are endpoints of boundary edges.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
- * @returns {Object.<string, boolean>} Set of vertex keys on boundary
+ * Build a set of vertex keys that lie on the mesh's open boundary.
  */
 function buildBoundaryVertexSet(tris) {
 	var edgeCount = {};
 	var edgeVerts = {};
-
 	for (var i = 0; i < tris.length; i++) {
 		var tri = tris[i];
 		var vs = [tri.v0, tri.v1, tri.v2];
 		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
-
 		for (var e = 0; e < 3; e++) {
 			var ne = (e + 1) % 3;
-			var ek = edgeKey(ks[e], ks[ne]);
-			if (!edgeCount[ek]) {
-				edgeCount[ek] = 0;
-				edgeVerts[ek] = [ks[e], ks[ne]];
-			}
+			var ek = ks[e] < ks[ne] ? ks[e] + "|" + ks[ne] : ks[ne] + "|" + ks[e];
+			if (!edgeCount[ek]) { edgeCount[ek] = 0; edgeVerts[ek] = [ks[e], ks[ne]]; }
 			edgeCount[ek]++;
 		}
 	}
-
 	var boundaryVerts = {};
 	for (var ek2 in edgeCount) {
 		if (edgeCount[ek2] === 1) {
@@ -8727,71 +9639,282 @@ function buildBoundaryVertexSet(tris) {
 			boundaryVerts[verts[1]] = true;
 		}
 	}
-
 	return boundaryVerts;
 }
 
-/**
- * Classify mega soup triangles into inside/outside groups for each mesh.
- *
- * Strategy:
- * 1. Build barrier edges from intersection segments
- * 2. Build edge adjacency excluding barriers
- * 3. Flood fill to find connected components
- * 4. For each mesh: the component touching the mesh's boundary = OUTSIDE
- *    All other components = INSIDE
- * 5. For closed meshes (no boundary): use size heuristic (smaller = inside)
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object, mesh: string, origIdx: number }>} megaSoup
- * @param {Array<Array<PoolVertex>>} closedPolylines
- * @param {Array<{ p0: PoolVertex, p1: PoolVertex, idxA: number, idxB: number }>} segments
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisA - Original mesh A
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB - Original mesh B
- * @returns {{ aInside: Array, aOutside: Array, bInside: Array, bOutside: Array }}
- */
-function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB) {
-	var n = megaSoup.length;
+// ── Boundary topology classification (open meshes) ──
 
-	// -- Step 1: Build barrier edge set from intersection segments --
-	// Also collect all Steiner vertex keys — any edge where BOTH endpoints
-	// are Steiner points is a barrier (even if it's not an exact segment edge).
-	// This closes gaps caused by CDT producing slightly different edges.
-	var barrierEdges = {};
-
-	for (var si = 0; si < segments.length; si++) {
-		var seg = segments[si];
-		// Skip zero-length segments (pool dedup merged p0 and p1)
-		if (seg.p0 === seg.p1) continue;
-		var k0 = vKey(seg.p0);
-		var k1 = vKey(seg.p1);
-		if (k0 === k1) continue; // Same vKey — degenerate
-		var ek = edgeKey(k0, k1);
-		barrierEdges[ek] = true;
-	}
-
-	// -- Step 2: Build edge adjacency across mega soup, excluding barriers --
-	var edgeToTris = {};
-
-	for (var i = 0; i < n; i++) {
-		var tri = megaSoup[i];
+function classifyByBoundaryTopology(comp, megaSoup, boundaryVerts) {
+	for (var ti = 0; ti < comp.triIndices.length; ti++) {
+		var tri = megaSoup[comp.triIndices[ti]];
 		var ks = [vKey(tri.v0), vKey(tri.v1), vKey(tri.v2)];
+		for (var vi = 0; vi < 3; vi++) {
+			if (boundaryVerts[ks[vi]]) return false;
+		}
+	}
+	return true;
+}
+
+// ── Walk-direction classification (open meshes, interior components) ──
+
+/**
+ * Build a map of walk edge directions from meshEdgePolys segments.
+ * Returns { edgeKey → { dx, dy, dz, mx, my, mz } }
+ */
+function buildWalkEdgeDirMap(meshEp) {
+	if (!meshEp || !meshEp.segments) return {};
+	var dirMap = {};
+	var prevVert = null;
+	for (var si = 0; si < meshEp.segments.length; si++) {
+		var seg = meshEp.segments[si];
+		for (var vi = 0; vi < seg.verts.length; vi++) {
+			var v = seg.verts[vi];
+			if (prevVert) {
+				var k0 = vKey(prevVert), k1 = vKey(v);
+				if (k0 !== k1) {
+					var ek = edgeKey(k0, k1);
+					dirMap[ek] = {
+						dx: v.x - prevVert.x, dy: v.y - prevVert.y, dz: v.z - prevVert.z,
+						mx: (prevVert.x + v.x) * 0.5, my: (prevVert.y + v.y) * 0.5, mz: (prevVert.z + v.z) * 0.5
+					};
+				}
+			}
+			prevVert = v;
+		}
+	}
+	return dirMap;
+}
+
+// ── Barrier-normal classification (closed meshes) ──
+
+function classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris) {
+	var compMesh = comp.mesh;
+	var dotSum = 0;
+	var sampleCount = 0;
+	var seenEdges = {};
+
+	for (var ti = 0; ti < comp.triIndices.length; ti++) {
+		var triIdx = comp.triIndices[ti];
+		var tri = megaSoup[triIdx];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
 
 		for (var e = 0; e < 3; e++) {
 			var ne = (e + 1) % 3;
-			var ek2 = edgeKey(ks[e], ks[ne]);
+			var ek = edgeKey(ks[e], ks[ne]);
 
-			if (!edgeToTris[ek2]) edgeToTris[ek2] = [];
-			edgeToTris[ek2].push(i);
+			if (!barrierEdges[ek]) continue;
+			if (seenEdges[ek]) continue;
+			seenEdges[ek] = true;
+
+			var otherIdx = 3 - e - ne;
+			var thirdVert = vs[otherIdx];
+			var edgeV0 = vs[e];
+			var edgeV1 = vs[ne];
+
+			var midX = (edgeV0.x + edgeV1.x) * 0.5;
+			var midY = (edgeV0.y + edgeV1.y) * 0.5;
+			var midZ = (edgeV0.z + edgeV1.z) * 0.5;
+			var intoX = thirdVert.x - midX;
+			var intoY = thirdVert.y - midY;
+			var intoZ = thirdVert.z - midZ;
+
+			var intoLen = Math.sqrt(intoX * intoX + intoY * intoY + intoZ * intoZ);
+			if (intoLen < 1e-12) continue;
+			intoX /= intoLen; intoY /= intoLen; intoZ /= intoLen;
+
+			var sharedTris = edgeToTris[ek];
+			if (!sharedTris) continue;
+
+			var otherNx = 0, otherNy = 0, otherNz = 0;
+			var foundOther = false;
+
+			for (var si = 0; si < sharedTris.length; si++) {
+				var sTri = megaSoup[sharedTris[si]];
+				if (sTri.mesh === compMesh) continue;
+				var e1x = sTri.v1.x - sTri.v0.x, e1y = sTri.v1.y - sTri.v0.y, e1z = sTri.v1.z - sTri.v0.z;
+				var e2x = sTri.v2.x - sTri.v0.x, e2y = sTri.v2.y - sTri.v0.y, e2z = sTri.v2.z - sTri.v0.z;
+				otherNx = e1y * e2z - e1z * e2y;
+				otherNy = e1z * e2x - e1x * e2z;
+				otherNz = e1x * e2y - e1y * e2x;
+				foundOther = true;
+				break;
+			}
+			if (!foundOther) continue;
+
+			var otherLen = Math.sqrt(otherNx * otherNx + otherNy * otherNy + otherNz * otherNz);
+			if (otherLen < 1e-12) continue;
+			otherNx /= otherLen; otherNy /= otherLen; otherNz /= otherLen;
+
+			dotSum += intoX * otherNx + intoY * otherNy + intoZ * otherNz;
+			sampleCount++;
 		}
 	}
 
-	// Build neighbor list, excluding barrier edges
+	if (sampleCount === 0) return false;
+	return (dotSum / sampleCount) < 0;
+}
+
+// ── Per-component boundary walk extraction ──
+
+/**
+ * Extract boundary walk segments for a component.
+ * Returns segments grouped by type: "intersection" (barrier) or "walk" (mesh boundary).
+ *
+ * @returns {Array<{ verts: Array<{x,y,z}>, type: string }>}
+ */
+function extractBoundaryWalk$1(comp, megaSoup, barrierEdges) {
+	// Collect directed boundary half-edges
+	var directedCount = {};
+	var directedVerts = {};
+
+	for (var i = 0; i < comp.triIndices.length; i++) {
+		var tri = megaSoup[comp.triIndices[i]];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var dk = ks[e] + "|" + ks[ne];
+			if (!directedCount[dk]) {
+				directedCount[dk] = 0;
+				directedVerts[dk] = { fromVert: vs[e], toVert: vs[ne] };
+			}
+			directedCount[dk]++;
+		}
+	}
+
+	// Collect boundary half-edges with type
+	var halfEdges = [];
+	for (var dk2 in directedCount) {
+		var parts = dk2.split("|");
+		var fromK = parts[0];
+		var toK = parts[1];
+		var reverseK = toK + "|" + fromK;
+		var ek = edgeKey(fromK, toK);
+
+		var isBarrier = !!barrierEdges[ek];
+		var reverseExists = !!directedCount[reverseK];
+
+		if (!reverseExists || isBarrier) {
+			var verts = directedVerts[dk2];
+			halfEdges.push({
+				from: fromK, to: toK,
+				fromVert: verts.fromVert, toVert: verts.toVert,
+				type: isBarrier ? "intersection" : "walk"
+			});
+		}
+	}
+
+	if (halfEdges.length === 0) return [];
+
+	// Build adjacency: fromVertex -> [halfEdge indices]
+	var outgoing = {};
+	for (var hi = 0; hi < halfEdges.length; hi++) {
+		var fk = halfEdges[hi].from;
+		if (!outgoing[fk]) outgoing[fk] = [];
+		outgoing[fk].push(hi);
+	}
+
+	// Chain into loops, grouping consecutive same-type edges into segments
+	var used = new Array(halfEdges.length);
+	for (var u = 0; u < used.length; u++) used[u] = false;
+
+	var allSegments = [];
+
+	for (var start = 0; start < halfEdges.length; start++) {
+		if (used[start]) continue;
+
+		// Walk this loop
+		var loopEdges = [];
+		var currIdx = start;
+		used[currIdx] = true;
+		loopEdges.push(currIdx);
+
+		var currVert = halfEdges[currIdx].to;
+		var maxIter = halfEdges.length + 1;
+		var iter = 0;
+
+		while (currVert !== halfEdges[start].from && iter < maxIter) {
+			iter++;
+			var candidates = outgoing[currVert];
+			if (!candidates || candidates.length === 0) break;
+
+			var bestIdx = -1;
+			for (var ci = 0; ci < candidates.length; ci++) {
+				if (!used[candidates[ci]]) { bestIdx = candidates[ci]; break; }
+			}
+			if (bestIdx === -1) break;
+
+			used[bestIdx] = true;
+			loopEdges.push(bestIdx);
+			currVert = halfEdges[bestIdx].to;
+		}
+
+		if (loopEdges.length < 2) continue;
+
+		// Group consecutive same-type edges into segments
+		var segType = halfEdges[loopEdges[0]].type;
+		var segVerts = [halfEdges[loopEdges[0]].fromVert, halfEdges[loopEdges[0]].toVert];
+
+		for (var li = 1; li < loopEdges.length; li++) {
+			var he = halfEdges[loopEdges[li]];
+			if (he.type === segType) {
+				segVerts.push(he.toVert);
+			} else {
+				allSegments.push({ verts: segVerts, type: segType });
+				segType = he.type;
+				segVerts = [he.fromVert, he.toVert];
+			}
+		}
+		allSegments.push({ verts: segVerts, type: segType });
+	}
+
+	return allSegments;
+}
+
+// ── Main classify ──
+
+/**
+ * Hybrid classification with per-component boundary walk extraction.
+ *
+ * @returns {{
+ *   aInside: Array, aOutside: Array, bInside: Array, bOutside: Array,
+ *   componentWalks: Array<{ mesh: string, side: string, triCount: number,
+ *     segments: Array<{ verts: Array, type: string }> }>
+ * }}
+ */
+function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB, meshEdgePolys) {
+	var n = megaSoup.length;
+
+	// ── Build barriers ──
+	var barrierEdges = {};
+	for (var si = 0; si < segments.length; si++) {
+		var seg = segments[si];
+		if (seg.p0 === seg.p1) continue;
+		var k0 = vKey(seg.p0), k1 = vKey(seg.p1);
+		if (k0 === k1) continue;
+		barrierEdges[edgeKey(k0, k1)] = true;
+	}
+
+	// ── Build edge adjacency ──
+	var edgeToTris = {};
+	for (var ei = 0; ei < n; ei++) {
+		var eTri = megaSoup[ei];
+		var eKs = [vKey(eTri.v0), vKey(eTri.v1), vKey(eTri.v2)];
+		for (var ee = 0; ee < 3; ee++) {
+			var ene = (ee + 1) % 3;
+			var eek = edgeKey(eKs[ee], eKs[ene]);
+			if (!edgeToTris[eek]) edgeToTris[eek] = [];
+			edgeToTris[eek].push(ei);
+		}
+	}
+
+	// ── Build neighbors excluding barriers ──
 	var neighbors = new Array(n);
 	for (var ni = 0; ni < n; ni++) neighbors[ni] = [];
-
 	for (var ek3 in edgeToTris) {
 		if (barrierEdges[ek3]) continue;
-
 		var triList = edgeToTris[ek3];
 		for (var a = 0; a < triList.length; a++) {
 			for (var b = a + 1; b < triList.length; b++) {
@@ -8801,21 +9924,19 @@ function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB) {
 		}
 	}
 
-	// -- Step 3: Flood fill to find connected components --
-	// Each component gets a unique ID. We track which mesh each component belongs to.
+	// ── Barrier flood fill ──
 	var componentId = new Int32Array(n);
 	for (var ci = 0; ci < n; ci++) componentId[ci] = -1;
 
-	var components = []; // [{mesh, triIndices, triCount}]
+	var components = [];
 	var nextCompId = 0;
 
 	for (var seed = 0; seed < n; seed++) {
 		if (componentId[seed] >= 0) continue;
+		var meshTag = megaSoup[seed].mesh;
 
 		var compId = nextCompId++;
-		var meshTag = megaSoup[seed].mesh;
 		var triIndices = [];
-
 		var queue = [seed];
 		componentId[seed] = compId;
 		var head = 0;
@@ -8823,157 +9944,623 @@ function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB) {
 		while (head < queue.length) {
 			var curr = queue[head++];
 			triIndices.push(curr);
-
 			var nbrs = neighbors[curr];
 			for (var nbi = 0; nbi < nbrs.length; nbi++) {
 				var nb = nbrs[nbi];
 				if (componentId[nb] >= 0) continue;
-				// Only flood within same mesh
 				if (megaSoup[nb].mesh !== meshTag) continue;
 				componentId[nb] = compId;
 				queue.push(nb);
 			}
 		}
 
-		components.push({
-			id: compId,
-			mesh: meshTag,
-			triIndices: triIndices,
-			triCount: triIndices.length
+		components.push({ id: compId, mesh: meshTag, triIndices: triIndices, triCount: triIndices.length });
+	}
+
+	// ── Detect open/closed per mesh ──
+	var boundaryVertsA = buildBoundaryVertexSet(trisA);
+	var boundaryVertsB = buildBoundaryVertexSet(trisB);
+	var isOpenA = Object.keys(boundaryVertsA).length > 0;
+	var isOpenB = Object.keys(boundaryVertsB).length > 0;
+	if (meshEdgePolys) {
+		if (isOpenA && meshEdgePolys.A) buildWalkEdgeDirMap(meshEdgePolys.A);
+		if (isOpenB && meshEdgePolys.B) buildWalkEdgeDirMap(meshEdgePolys.B);
+	}
+
+	// ── Classify each component + extract boundary walks ──
+	var aInside = [], aOutside = [];
+	var bInside = [], bOutside = [];
+	var componentWalks = [];
+
+	for (var gi = 0; gi < components.length; gi++) {
+		var comp = components[gi];
+		var isInside;
+
+		if (comp.triCount === 0) continue;
+
+		var meshComps = 0;
+		for (var mc = 0; mc < components.length; mc++) {
+			if (components[mc].mesh === comp.mesh) meshComps++;
+		}
+
+		if (meshComps === 1) {
+			isInside = false;
+		} else {
+			var isOpen = comp.mesh === "A" ? isOpenA : isOpenB;
+			var bverts = comp.mesh === "A" ? boundaryVertsA : boundaryVertsB;
+
+			if (isOpen) {
+				// Open mesh: boundary touch = outside
+				// Interior components: barrier-normal (other mesh's normal at barrier)
+				var touchesBoundary = !classifyByBoundaryTopology(comp, megaSoup, bverts);
+				if (touchesBoundary) {
+					isInside = false;
+				} else {
+					// Interior component — use barrier-normal (works for both meshes
+					// because it checks the OTHER mesh's normal direction)
+					isInside = classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris);
+				}
+			} else {
+				isInside = classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris);
+			}
+		}
+
+		var side = isInside ? "inside" : "outside";
+
+		var insideArr = comp.mesh === "A" ? aInside : bInside;
+		var outsideArr = comp.mesh === "A" ? aOutside : bOutside;
+		var target = isInside ? insideArr : outsideArr;
+
+		for (var oi = 0; oi < comp.triIndices.length; oi++) {
+			var ot = megaSoup[comp.triIndices[oi]];
+			target.push({ v0: ot.v0, v1: ot.v1, v2: ot.v2 });
+		}
+
+		// Extract boundary walk for this component
+		var walkSegments = extractBoundaryWalk$1(comp, megaSoup, barrierEdges);
+		componentWalks.push({
+			mesh: comp.mesh,
+			side: side,
+			triCount: comp.triCount,
+			segments: walkSegments
 		});
 	}
 
-	// -- Step 4: Build boundary vertex sets for both input meshes --
-	var boundaryVertsA = buildBoundaryVertexSet(trisA);
-	var boundaryVertsB = buildBoundaryVertexSet(trisB);
-	var hasBoundaryA = Object.keys(boundaryVertsA).length > 0;
-	var hasBoundaryB = Object.keys(boundaryVertsB).length > 0;
-
-	// -- Step 5: Classify each component --
-	// For each component, check if ANY of its triangles has a vertex on the
-	// input mesh's boundary. If yes → outside. If no → inside.
-	// For closed meshes (no boundary), use size heuristic per mesh.
-
-	var aInside = [], aOutside = [], bInside = [], bOutside = [];
-
-	// Group components by mesh
-	var aComps = [];
-	var bComps = [];
-	for (var gi = 0; gi < components.length; gi++) {
-		if (components[gi].mesh === "A") aComps.push(components[gi]);
-		else bComps.push(components[gi]);
-	}
-
-	// Classify mesh A components
-	classifyMeshComponents(aComps, megaSoup, hasBoundaryA ? boundaryVertsA : null, aInside, aOutside);
-
-	// Classify mesh B components
-	classifyMeshComponents(bComps, megaSoup, hasBoundaryB ? boundaryVertsB : null, bInside, bOutside);
-
-	// Debug: check how many barrier edges appear in edgeToTris
-	var barrierHit = 0, barrierMiss = 0;
-	for (var dbek in barrierEdges) {
-		if (edgeToTris[dbek]) barrierHit++; else barrierMiss++;
-	}
-	// Log missing barrier edges to diagnose
-	var missingBarriers = [];
-	for (var dbek2 in barrierEdges) {
-		if (!edgeToTris[dbek2]) missingBarriers.push(dbek2);
-	}
-	console.log("[BMS] Barrier edges: " + Object.keys(barrierEdges).length +
-		" total, " + barrierHit + " found in soup edges, " + barrierMiss + " missing");
-	if (missingBarriers.length > 0) {
-		for (var mbi = 0; mbi < missingBarriers.length; mbi++) {
-			console.log("[BMS] MISSING barrier: " + missingBarriers[mbi]);
-		}
-	}
-	console.log("[BMS] Total soup edges: " + Object.keys(edgeToTris).length);
-
-	// Debug: sample a barrier edge and a soup edge to compare format
-	var sampleBarrier = Object.keys(barrierEdges)[0];
-	var sampleSoup = Object.keys(edgeToTris)[0];
-	if (sampleBarrier) console.log("[BMS] Sample barrier edge: " + sampleBarrier.substring(0, 80));
-	if (sampleSoup) console.log("[BMS] Sample soup edge: " + sampleSoup.substring(0, 80));
-
-	console.log("[BMS] Components: " + components.length + " total (" +
-		aComps.length + " A, " + bComps.length + " B). " +
-		"A: " + aInside.length + " inside, " + aOutside.length + " outside. " +
-		"B: " + bInside.length + " inside, " + bOutside.length + " outside.");
+	console.log("[BMS] Classification (walk): A: " + aInside.length + " inside, " +
+		aOutside.length + " outside" + (isOpenA ? " (walk)" : " (dot)") +
+		". B: " + bInside.length + " inside, " +
+		bOutside.length + " outside" + (isOpenB ? " (walk)" : " (dot)") +
+		". Components: " + components.length + ".");
 
 	return {
-		aInside: aInside,
-		aOutside: aOutside,
-		bInside: bInside,
-		bOutside: bOutside
+		aInside: aInside, aOutside: aOutside, bInside: bInside, bOutside: bOutside,
+		componentWalks: componentWalks
 	};
 }
 
 /**
- * Classify a mesh's components as inside/outside.
+ * @module bms/heffalumpClassify
  *
- * If boundaryVerts is provided (open mesh): component touching boundary = outside.
- * If boundaryVerts is null (closed mesh): largest component = outside.
+ * "The Heffalump is elusive and hard to pin down, but once caught,
+ *  it turns out to be exactly what you needed."
  *
- * @param {Array} comps - Components for this mesh
- * @param {Array} megaSoup - Full mega soup
- * @param {Object|null} boundaryVerts - Boundary vertex keys, or null for closed mesh
- * @param {Array} insideOut - Output array for inside triangles
- * @param {Array} outsideOut - Output array for outside triangles
+ * Barrier-only classification for meshes with defective topology
+ * (non-manifold edges, fragmented boundaries, cracks, holes).
+ *
+ * Instead of asking "does this component touch the boundary?" (which
+ * breaks when the boundary is fragmented into 411 pieces), the
+ * heffalump asks a simpler question:
+ *
+ *   "Does this component touch the intersection?"
+ *
+ *   YES → classify by barrier-normal (which side of the cut?)
+ *   NO  → outside (disconnected from the intersection = untouched)
+ *
+ * That's it. No boundary walk. No mesh edge polygon. No fan walk
+ * through non-manifold edges. Just barriers and normals.
+ * One bite at a time.
  */
-function classifyMeshComponents(comps, megaSoup, boundaryVerts, insideOut, outsideOut) {
-	if (comps.length === 0) return;
 
-	// If only one component, it's all outside (no intersection cut it)
-	if (comps.length === 1) {
-		var tris1 = comps[0].triIndices;
-		for (var i1 = 0; i1 < tris1.length; i1++) {
-			var t1 = megaSoup[tris1[i1]];
-			outsideOut.push({ v0: t1.v0, v1: t1.v1, v2: t1.v2 });
+
+// ── The Heffalump's trunk: ray casting for closed mesh classification ──
+//
+// When one mesh is a closed solid, we can definitively test if a point
+// is inside it by casting a ray and counting crossings. Odd = inside.
+// This works even when barriers don't form closed loops.
+
+function isPointInsideClosedMesh(px, py, pz, tris) {
+	// Cast ray along +Z from point, count crossings with triangles
+	var crossings = 0;
+	for (var i = 0; i < tris.length; i++) {
+		var tri = tris[i];
+		var ax = tri.v0.x, ay = tri.v0.y, az = tri.v0.z;
+		var bx = tri.v1.x, by = tri.v1.y, bz = tri.v1.z;
+		var cx = tri.v2.x, cy = tri.v2.y, cz = tri.v2.z;
+
+		// Check if (px, py) is inside the triangle's 2D projection (XY plane)
+		var d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
+		var d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
+		var d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+
+		var hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+		var hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+		if (hasNeg && hasPos) continue; // point outside triangle in XY
+
+		// Compute Z at intersection using barycentric coords
+		var det = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+		if (Math.abs(det) < 1e-20) continue;
+		var invDet = 1.0 / det;
+		var u = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) * invDet;
+		var v = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) * invDet;
+		var w = 1.0 - u - v;
+		var zHit = u * az + v * bz + w * cz;
+
+		if (zHit > pz) crossings++;
+	}
+	return (crossings % 2) === 1;
+}
+
+// ── The Heffalump's tail: nearest-surface classification for open meshes ──
+//
+// When the other mesh is OPEN, we can't ray cast (no closed volume).
+// Instead, find the nearest triangle on the open surface and check
+// which side the point is on. Normal direction = outside.
+
+function isPointInsideOpenSurface(px, py, pz, tris) {
+	var bestDist = Infinity;
+	var bestDot = 0;
+
+	for (var i = 0; i < tris.length; i++) {
+		var tri = tris[i];
+		var tcx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3;
+		var tcy = (tri.v0.y + tri.v1.y + tri.v2.y) / 3;
+		var tcz = (tri.v0.z + tri.v1.z + tri.v2.z) / 3;
+		var dx = px - tcx, dy = py - tcy, dz = pz - tcz;
+		var d = dx * dx + dy * dy + dz * dz;
+
+		if (d < bestDist) {
+			bestDist = d;
+			// Triangle normal (unnormalized is fine — we only care about sign)
+			var e1x = tri.v1.x - tri.v0.x, e1y = tri.v1.y - tri.v0.y, e1z = tri.v1.z - tri.v0.z;
+			var e2x = tri.v2.x - tri.v0.x, e2y = tri.v2.y - tri.v0.y, e2z = tri.v2.z - tri.v0.z;
+			var nx = e1y * e2z - e1z * e2y;
+			var ny = e1z * e2x - e1x * e2z;
+			var nz = e1x * e2y - e1y * e2x;
+			bestDot = dx * nx + dy * ny + dz * nz;
 		}
-		return;
+	}
+	// Opposite to normal direction = inside (below the surface)
+	return bestDot < 0;
+}
+
+// ── The Heffalump's feet: per-component boundary walk extraction ──
+
+function extractBoundaryWalk(comp, megaSoup, barrierEdges) {
+	var directedCount = {};
+	var directedVerts = {};
+
+	for (var i = 0; i < comp.triIndices.length; i++) {
+		var tri = megaSoup[comp.triIndices[i]];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var dk = ks[e] + "|" + ks[ne];
+			if (!directedCount[dk]) {
+				directedCount[dk] = 0;
+				directedVerts[dk] = { fromVert: vs[e], toVert: vs[ne] };
+			}
+			directedCount[dk]++;
+		}
 	}
 
-	if (boundaryVerts) {
-		// Open mesh: check which components touch the boundary
-		for (var ci = 0; ci < comps.length; ci++) {
-			var comp = comps[ci];
-			var touchesBoundary = false;
+	var halfEdges = [];
+	for (var dk2 in directedCount) {
+		var parts = dk2.split("|");
+		var fromK = parts[0];
+		var toK = parts[1];
+		var reverseK = toK + "|" + fromK;
+		var ek = edgeKey(fromK, toK);
 
-			for (var ti = 0; ti < comp.triIndices.length; ti++) {
-				var tri = megaSoup[comp.triIndices[ti]];
-				var vs = [vKey(tri.v0), vKey(tri.v1), vKey(tri.v2)];
-				for (var vi = 0; vi < 3; vi++) {
-					if (boundaryVerts[vs[vi]]) {
-						touchesBoundary = true;
-						break;
-					}
-				}
-				if (touchesBoundary) break;
+		var isBarrier = !!barrierEdges[ek];
+		var reverseExists = !!directedCount[reverseK];
+
+		if (!reverseExists || isBarrier) {
+			var verts = directedVerts[dk2];
+			halfEdges.push({
+				from: fromK, to: toK,
+				fromVert: verts.fromVert, toVert: verts.toVert,
+				type: isBarrier ? "intersection" : "walk"
+			});
+		}
+	}
+
+	if (halfEdges.length === 0) return [];
+
+	var outgoing = {};
+	for (var hi = 0; hi < halfEdges.length; hi++) {
+		var fk = halfEdges[hi].from;
+		if (!outgoing[fk]) outgoing[fk] = [];
+		outgoing[fk].push(hi);
+	}
+
+	var used = new Array(halfEdges.length);
+	for (var u = 0; u < used.length; u++) used[u] = false;
+
+	var allSegments = [];
+
+	for (var start = 0; start < halfEdges.length; start++) {
+		if (used[start]) continue;
+
+		var loopEdges = [];
+		var currIdx = start;
+		used[currIdx] = true;
+		loopEdges.push(currIdx);
+
+		var currVert = halfEdges[currIdx].to;
+		var maxIter = halfEdges.length + 1;
+		var iter = 0;
+
+		while (currVert !== halfEdges[start].from && iter < maxIter) {
+			iter++;
+			var candidates = outgoing[currVert];
+			if (!candidates || candidates.length === 0) break;
+
+			var bestIdx = -1;
+			for (var ci = 0; ci < candidates.length; ci++) {
+				if (!used[candidates[ci]]) { bestIdx = candidates[ci]; break; }
 			}
+			if (bestIdx === -1) break;
 
-			// Touches boundary → outside, doesn't → inside
-			var target = touchesBoundary ? outsideOut : insideOut;
+			used[bestIdx] = true;
+			loopEdges.push(bestIdx);
+			currVert = halfEdges[bestIdx].to;
+		}
+
+		if (loopEdges.length < 2) continue;
+
+		var segType = halfEdges[loopEdges[0]].type;
+		var segVerts = [halfEdges[loopEdges[0]].fromVert, halfEdges[loopEdges[0]].toVert];
+
+		for (var li = 1; li < loopEdges.length; li++) {
+			var he = halfEdges[loopEdges[li]];
+			if (he.type === segType) {
+				segVerts.push(he.toVert);
+			} else {
+				allSegments.push({ verts: segVerts, type: segType });
+				segType = he.type;
+				segVerts = [he.fromVert, he.toVert];
+			}
+		}
+		allSegments.push({ verts: segVerts, type: segType });
+	}
+
+	return allSegments;
+}
+
+// ── The Heffalump itself ──
+
+/**
+ * Barrier-only classification for meshes with defective topology.
+ *
+ * @param {Array} megaSoup - Split triangles with mesh tags
+ * @param {Array} segments - Intersection segments with pool vertex endpoints
+ * @param {Array} trisA - Original mesh A triangles (unused — heffalump doesn't need boundaries)
+ * @param {Array} trisB - Original mesh B triangles (unused — heffalump doesn't need boundaries)
+ * @returns {{
+ *   aInside: Array, aOutside: Array, bInside: Array, bOutside: Array,
+ *   componentWalks: Array
+ * }}
+ */
+function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
+	var n = megaSoup.length;
+
+	// ── Step 1: Build barrier edges from intersection segments ──
+	var barrierEdges = {};
+	for (var si = 0; si < segments.length; si++) {
+		var seg = segments[si];
+		if (seg.p0 === seg.p1) continue;
+		var k0 = vKey(seg.p0), k1 = vKey(seg.p1);
+		if (k0 === k1) continue;
+		barrierEdges[edgeKey(k0, k1)] = true;
+	}
+
+	// ── Step 2: Build edge adjacency ──
+	var edgeToTris = {};
+	for (var ei = 0; ei < n; ei++) {
+		var eTri = megaSoup[ei];
+		var eKs = [vKey(eTri.v0), vKey(eTri.v1), vKey(eTri.v2)];
+		for (var ee = 0; ee < 3; ee++) {
+			var ene = (ee + 1) % 3;
+			var eek = edgeKey(eKs[ee], eKs[ene]);
+			if (!edgeToTris[eek]) edgeToTris[eek] = [];
+			edgeToTris[eek].push(ei);
+		}
+	}
+
+	// ── Step 3: Build neighbors excluding barriers ──
+	var neighbors = new Array(n);
+	for (var ni = 0; ni < n; ni++) neighbors[ni] = [];
+	for (var ek3 in edgeToTris) {
+		if (barrierEdges[ek3]) continue;
+		var triList = edgeToTris[ek3];
+		for (var a = 0; a < triList.length; a++) {
+			for (var b = a + 1; b < triList.length; b++) {
+				neighbors[triList[a]].push(triList[b]);
+				neighbors[triList[b]].push(triList[a]);
+			}
+		}
+	}
+
+	// ── Step 4: Flood fill components ──
+	var componentId = new Int32Array(n);
+	for (var ci = 0; ci < n; ci++) componentId[ci] = -1;
+
+	var components = [];
+	var nextCompId = 0;
+
+	for (var seed = 0; seed < n; seed++) {
+		if (componentId[seed] >= 0) continue;
+		var meshTag = megaSoup[seed].mesh;
+
+		var compId = nextCompId++;
+		var triIndices = [];
+		var queue = [seed];
+		componentId[seed] = compId;
+		var head = 0;
+
+		while (head < queue.length) {
+			var curr = queue[head++];
+			triIndices.push(curr);
+			var nbrs = neighbors[curr];
+			for (var nbi = 0; nbi < nbrs.length; nbi++) {
+				var nb = nbrs[nbi];
+				if (componentId[nb] >= 0) continue;
+				if (megaSoup[nb].mesh !== meshTag) continue;
+				componentId[nb] = compId;
+				queue.push(nb);
+			}
+		}
+
+		components.push({ id: compId, mesh: meshTag, triIndices: triIndices, triCount: triIndices.length });
+	}
+
+	// ── Step 5: Detect open/closed per mesh ──
+	// Use a practical "closed enough" threshold — meshes with a few
+	// defect edges are still functionally closed for ray casting.
+	var statsA = countOpenEdges(trisA);
+	var statsB = countOpenEdges(trisB);
+	var isClosedA = statsA.openEdges < Math.max(10, statsA.total * 0.02);
+	var isClosedB = statsB.openEdges < Math.max(10, statsB.total * 0.02);
+
+	// ── Step 6: The Heffalump's question — one bite at a time ──
+	//
+	// When the other mesh is CLOSED, classify each triangle individually
+	// by ray casting. This is the radial neighbourhood taken to its
+	// logical conclusion: every triangle gets its own answer.
+	// No flood fill, no barriers, no components — just geometry.
+	//
+	// When the other mesh is OPEN, fall back to barrier flood fill +
+	// barrier-normal for components that touch the intersection.
+
+	var aInside = [], aOutside = [];
+	var bInside = [], bOutside = [];
+	var componentWalks = [];
+
+	for (var gi = 0; gi < components.length; gi++) {
+		var comp = components[gi];
+		if (comp.triCount === 0) continue;
+
+		var otherIsClosed = comp.mesh === "A" ? isClosedB : isClosedA;
+		var otherTris = comp.mesh === "A" ? trisB : trisA;
+		var insideArr = comp.mesh === "A" ? aInside : bInside;
+		var outsideArr = comp.mesh === "A" ? aOutside : bOutside;
+
+		if (otherIsClosed) {
+			// ── The Heffalump's trunk: per-triangle ray casting ──
+			// Other mesh is closed → ray cast EACH triangle's centroid
+			// through the closed mesh. One bite at a time.
+			for (var ri = 0; ri < comp.triIndices.length; ri++) {
+				var rt = megaSoup[comp.triIndices[ri]];
+				var px = (rt.v0.x + rt.v1.x + rt.v2.x) / 3;
+				var py = (rt.v0.y + rt.v1.y + rt.v2.y) / 3;
+				var pz = (rt.v0.z + rt.v1.z + rt.v2.z) / 3;
+				if (isPointInsideClosedMesh(px, py, pz, otherTris)) {
+					insideArr.push({ v0: rt.v0, v1: rt.v1, v2: rt.v2 });
+				} else {
+					outsideArr.push({ v0: rt.v0, v1: rt.v1, v2: rt.v2 });
+				}
+			}
+			// Component walk — still useful for visualization
+			var walkSegs1 = extractBoundaryWalk(comp, megaSoup, barrierEdges);
+			componentWalks.push({
+				mesh: comp.mesh, side: "mixed", triCount: comp.triCount,
+				segments: walkSegs1
+			});
+		} else {
+			// ── The Heffalump's tail: per-triangle nearest-surface test ──
+			// Other mesh is open → find nearest surface triangle for each
+			// of our triangles and check which side we're on.
+			// One bite at a time, same as the closed-mesh path.
 			for (var oi = 0; oi < comp.triIndices.length; oi++) {
 				var ot = megaSoup[comp.triIndices[oi]];
-				target.push({ v0: ot.v0, v1: ot.v1, v2: ot.v2 });
+				var opx = (ot.v0.x + ot.v1.x + ot.v2.x) / 3;
+				var opy = (ot.v0.y + ot.v1.y + ot.v2.y) / 3;
+				var opz = (ot.v0.z + ot.v1.z + ot.v2.z) / 3;
+				if (isPointInsideOpenSurface(opx, opy, opz, otherTris)) {
+					insideArr.push({ v0: ot.v0, v1: ot.v1, v2: ot.v2 });
+				} else {
+					outsideArr.push({ v0: ot.v0, v1: ot.v1, v2: ot.v2 });
+				}
 			}
-		}
-	} else {
-		// Closed mesh: largest component = outside, rest = inside
-		var maxIdx = 0;
-		for (var mi = 1; mi < comps.length; mi++) {
-			if (comps[mi].triCount > comps[maxIdx].triCount) maxIdx = mi;
-		}
 
-		for (var ci2 = 0; ci2 < comps.length; ci2++) {
-			var target2 = (ci2 === maxIdx) ? outsideOut : insideOut;
-			var tris2 = comps[ci2].triIndices;
-			for (var ti2 = 0; ti2 < tris2.length; ti2++) {
-				var t2 = megaSoup[tris2[ti2]];
-				target2.push({ v0: t2.v0, v1: t2.v1, v2: t2.v2 });
+			var walkSegs2 = extractBoundaryWalk(comp, megaSoup, barrierEdges);
+			componentWalks.push({
+				mesh: comp.mesh, side: "mixed",
+				triCount: comp.triCount, segments: walkSegs2
+			});
+		}
+	}
+
+	console.log("[heffalump] Classification: A: " + aInside.length + " inside, " +
+		aOutside.length + " outside. B: " + bInside.length + " inside, " +
+		bOutside.length + " outside. Components: " + components.length + ".");
+
+	return {
+		aInside: aInside, aOutside: aOutside, bInside: bInside, bOutside: bOutside,
+		componentWalks: componentWalks
+	};
+}
+
+// ── The Heffalump's eraser: reclassify misplaced triangles ──
+
+/**
+ * Move triangles between inside/outside groups by index.
+ * Sometimes the heffalump gets a few wrong — this lets you fix them.
+ *
+ * @param {Object} groups - { aInside, aOutside, bInside, bOutside }
+ * @param {string} mesh - "A" or "B"
+ * @param {string} fromSide - "inside" or "outside"
+ * @param {Array<number>} triIndices - Indices within the source array to move
+ * @returns {Object} Updated groups (mutated in place)
+ */
+function reclassifyTriangles(groups, mesh, fromSide, triIndices) {
+	var srcKey = mesh.toLowerCase() + (fromSide === "inside" ? "Inside" : "Outside");
+	var dstKey = mesh.toLowerCase() + (fromSide === "inside" ? "Outside" : "Inside");
+	var src = groups[srcKey];
+	var dst = groups[dstKey];
+	if (!src || !dst) return groups;
+
+	// Sort descending so splicing doesn't shift later indices
+	var sorted = triIndices.slice().sort(function(a, b) { return b - a; });
+	for (var i = 0; i < sorted.length; i++) {
+		var idx = sorted[i];
+		if (idx >= 0 && idx < src.length) {
+			dst.push(src[idx]);
+			src.splice(idx, 1);
+		}
+	}
+	return groups;
+}
+
+/**
+ * Reclassify a single triangle identified by its centroid coordinates.
+ * Useful for click-to-toggle in a 3D viewer.
+ *
+ * @param {Object} groups - { aInside, aOutside, bInside, bOutside }
+ * @param {number} cx - Centroid X
+ * @param {number} cy - Centroid Y
+ * @param {number} cz - Centroid Z
+ * @param {number} [tolerance=0.01] - Match tolerance
+ * @returns {{ moved: boolean, mesh: string, from: string, to: string }}
+ */
+function reclassifyAtPoint(groups, cx, cy, cz, tolerance) {
+	var tol2 = (tolerance || 0.01) * (tolerance || 0.01);
+	var keys = [
+		{ src: "aInside", dst: "aOutside", mesh: "A", from: "inside", to: "outside" },
+		{ src: "aOutside", dst: "aInside", mesh: "A", from: "outside", to: "inside" },
+		{ src: "bInside", dst: "bOutside", mesh: "B", from: "inside", to: "outside" },
+		{ src: "bOutside", dst: "bInside", mesh: "B", from: "outside", to: "inside" }
+	];
+	for (var ki = 0; ki < keys.length; ki++) {
+		var k = keys[ki];
+		var arr = groups[k.src];
+		if (!arr) continue;
+		for (var ti = 0; ti < arr.length; ti++) {
+			var tri = arr[ti];
+			var tx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3;
+			var ty = (tri.v0.y + tri.v1.y + tri.v2.y) / 3;
+			var tz = (tri.v0.z + tri.v1.z + tri.v2.z) / 3;
+			var dx = tx - cx, dy = ty - cy, dz = tz - cz;
+			if (dx * dx + dy * dy + dz * dz < tol2) {
+				groups[k.dst].push(arr.splice(ti, 1)[0]);
+				return { moved: true, mesh: k.mesh, from: k.from, to: k.to };
 			}
 		}
 	}
+	return { moved: false };
+}
+
+/**
+ * Reclassify a connected region — flood fill from a seed triangle
+ * to move all connected same-side triangles together.
+ *
+ * @param {Object} groups - { aInside, aOutside, bInside, bOutside }
+ * @param {string} mesh - "A" or "B"
+ * @param {string} fromSide - "inside" or "outside"
+ * @param {number} seedIdx - Index of the seed triangle in the source array
+ * @returns {number} Count of triangles moved
+ */
+function reclassifyRegion(groups, mesh, fromSide, seedIdx) {
+	var srcKey = mesh.toLowerCase() + (fromSide === "inside" ? "Inside" : "Outside");
+	var dstKey = mesh.toLowerCase() + (fromSide === "inside" ? "Outside" : "Inside");
+	var src = groups[srcKey];
+	var dst = groups[dstKey];
+	if (!src || !dst || seedIdx < 0 || seedIdx >= src.length) return 0;
+
+	// Build edge adjacency within the source array
+	var PREC = 6;
+	function vk(v) { return v.x.toFixed(PREC) + "," + v.y.toFixed(PREC) + "," + v.z.toFixed(PREC); }
+	function ek(a, b) { return a < b ? a + "|" + b : b + "|" + a; }
+
+	var edgeToIdx = {};
+	for (var i = 0; i < src.length; i++) {
+		var tri = src[i];
+		var ks = [vk(tri.v0), vk(tri.v1), vk(tri.v2)];
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var key = ek(ks[e], ks[ne]);
+			if (!edgeToIdx[key]) edgeToIdx[key] = [];
+			edgeToIdx[key].push(i);
+		}
+	}
+
+	// Flood fill from seed
+	var visited = {};
+	visited[seedIdx] = true;
+	var queue = [seedIdx];
+	var head = 0;
+	while (head < queue.length) {
+		var curr = queue[head++];
+		var ct = src[curr];
+		var cks = [vk(ct.v0), vk(ct.v1), vk(ct.v2)];
+		for (var ce = 0; ce < 3; ce++) {
+			var cne = (ce + 1) % 3;
+			var cek = ek(cks[ce], cks[cne]);
+			var nbrs = edgeToIdx[cek];
+			if (!nbrs) continue;
+			for (var ni = 0; ni < nbrs.length; ni++) {
+				if (!visited[nbrs[ni]]) {
+					visited[nbrs[ni]] = true;
+					queue.push(nbrs[ni]);
+				}
+			}
+		}
+	}
+
+	// Move all visited triangles (descending order for safe splicing)
+	var toMove = Object.keys(visited).map(Number).sort(function(a, b) { return b - a; });
+	for (var mi = 0; mi < toMove.length; mi++) {
+		dst.push(src.splice(toMove[mi], 1)[0]);
+	}
+	return toMove.length;
+}
+
+// ── Decision tree: should we send the heffalump? ──
+
+/**
+ * Detect whether a mesh pair needs the heffalump classifier.
+ * Non-manifold edges = defective boundary = heffalump territory.
+ *
+ * @param {Array} trisA
+ * @param {Array} trisB
+ * @returns {boolean}
+ */
+function shouldUseHeffalump(trisA, trisB) {
+	var statsA = countOpenEdges(trisA);
+	var statsB = countOpenEdges(trisB);
+	return statsA.overShared > 0 || statsB.overShared > 0;
 }
 
 /**
@@ -8986,7 +10573,7 @@ function classifyMeshComponents(comps, megaSoup, boundaryVerts, insideOut, outsi
  *   2. bmsSplit      — CDT with pool vertices → mega soup
  *   3. bmsChain      — identity-based segment chaining
  *   4. bmsClose      — close polylines along boundary edges
- *   5. bmsClassify   — barrier flood-fill, right=inside left=outside
+ *   5. bmsClassify   — per-region boundary walk, winding = inside/outside
  */
 
 
@@ -9032,6 +10619,12 @@ function bmsBooleanOp(soupA, soupB, operation, options) {
 
 	var opts = options || {};
 
+	// Step 0) Translate to origin for floating-point precision (UTM, mine coords)
+	var centroid = soupCentroid(soupA, soupB);
+	var cx = centroid.x, cy = centroid.y, cz = centroid.z;
+	soupA = translateSoup(soupA, -cx, -cy, -cz);
+	soupB = translateSoup(soupB, -cx, -cy, -cz);
+
 	// Step 1) Optional pre-repair
 	if (opts.preRepair) {
 		var tolA = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupA) * 0.01;
@@ -9046,13 +10639,13 @@ function bmsBooleanOp(soupA, soupB, operation, options) {
 	var isect = bmsIntersect(soupA, soupB, { tolerance: opts.tolerance });
 
 	if (isect.segments.length === 0) {
-		// No intersection — everything is outside
+		// No intersection — everything is outside, translate back
 		return {
 			groups: {
 				aInside: [],
-				aOutside: soupA.slice(),
+				aOutside: translateSoup(soupA, cx, cy, cz),
 				bInside: [],
-				bOutside: soupB.slice()
+				bOutside: translateSoup(soupB, cx, cy, cz)
 			},
 			segments: [],
 			polylines: [],
@@ -9067,19 +10660,93 @@ function bmsBooleanOp(soupA, soupB, operation, options) {
 	// Step 4) Chain intersection segments
 	var polylines = bmsChain(isect.segments);
 
-	// Step 5) Close open polylines along boundary edges + build mesh edge polys
-	var closeResult = bmsClosePolylines(polylines, soupA, soupB, megaSoup, isect.segments);
-	var closedPolylines = closeResult.closedPolylines;
-	var meshEdgePolys = closeResult.meshEdgePolys;
+	// Step 5) Choose classification path.
+	// Clean meshes → ige walk (boundary topology + barrier-normal hybrid)
+	// Defective meshes → heffalump (barrier-only, no boundary needed)
+	var useHeffalump = opts.forceHeffalump || shouldUseHeffalump(soupA, soupB);
 
-	// Step 6) Classify via barrier flood fill
-	var groups = bmsClassify(megaSoup, closedPolylines, isect.segments, soupA, soupB);
+	var closedPolylines, meshEdgePolys, classifyResult;
 
-	// Step 7) Deduplicate seam vertices in each group
-	if (groups.aInside.length > 0) groups.aInside = deduplicateSeamVertices(groups.aInside, 1e-4);
-	if (groups.aOutside.length > 0) groups.aOutside = deduplicateSeamVertices(groups.aOutside, 1e-4);
-	if (groups.bInside.length > 0) groups.bInside = deduplicateSeamVertices(groups.bInside, 1e-4);
-	if (groups.bOutside.length > 0) groups.bOutside = deduplicateSeamVertices(groups.bOutside, 1e-4);
+	if (useHeffalump) {
+		// The heffalump doesn't need boundary walks for classification,
+		// but we still build meshEdgePolys from raw chains for visualization
+		// (so Intersect/Walks toggles work in all views).
+		var hefEpA = { segments: [], closed: false };
+		var hefEpB = { segments: [], closed: false };
+		for (var hpi = 0; hpi < polylines.length; hpi++) {
+			hefEpA.segments.push({ verts: polylines[hpi].slice(), type: "intersection" });
+			hefEpB.segments.push({ verts: polylines[hpi].slice(), type: "intersection" });
+		}
+		closedPolylines = polylines;
+		meshEdgePolys = { A: hefEpA, B: hefEpB };
+		classifyResult = heffalumpClassify(megaSoup, isect.segments, soupA, soupB);
+	} else {
+		// Clean mesh path — close polylines along boundary + ige walk classification
+		var closeResult = bmsClosePolylines(polylines, soupA, soupB, megaSoup, isect.segments);
+		closedPolylines = closeResult.closedPolylines;
+		meshEdgePolys = closeResult.meshEdgePolys;
+		classifyResult = bmsClassify(megaSoup, closedPolylines, isect.segments, soupA, soupB, meshEdgePolys);
+	}
+
+	var groups = {
+		aInside: classifyResult.aInside,
+		aOutside: classifyResult.aOutside,
+		bInside: classifyResult.bInside,
+		bOutside: classifyResult.bOutside
+	};
+
+	// Step 7) Deduplicate seam vertices, then translate back to original coordinates
+	if (groups.aInside.length > 0) groups.aInside = translateSoup(deduplicateSeamVertices(groups.aInside, 1e-4), cx, cy, cz);
+	if (groups.aOutside.length > 0) groups.aOutside = translateSoup(deduplicateSeamVertices(groups.aOutside, 1e-4), cx, cy, cz);
+	if (groups.bInside.length > 0) groups.bInside = translateSoup(deduplicateSeamVertices(groups.bInside, 1e-4), cx, cy, cz);
+	if (groups.bOutside.length > 0) groups.bOutside = translateSoup(deduplicateSeamVertices(groups.bOutside, 1e-4), cx, cy, cz);
+
+	// Translate meshEdgePolys and componentWalks verts back to original coordinates
+	function translatePolyVerts(meshEps) {
+		if (!meshEps) return;
+		var keys = ["A", "B"];
+		for (var ki = 0; ki < keys.length; ki++) {
+			var ep = meshEps[keys[ki]];
+			if (!ep || !ep.segments) continue;
+			for (var si2 = 0; si2 < ep.segments.length; si2++) {
+				var vs = ep.segments[si2].verts;
+				if (!vs) continue;
+				for (var vi = 0; vi < vs.length; vi++) {
+					vs[vi] = { x: vs[vi].x + cx, y: vs[vi].y + cy, z: vs[vi].z + cz };
+				}
+			}
+		}
+	}
+	translatePolyVerts(meshEdgePolys);
+
+	// Translate componentWalk verts back
+	if (classifyResult.componentWalks) {
+		for (var cwi = 0; cwi < classifyResult.componentWalks.length; cwi++) {
+			var segs = classifyResult.componentWalks[cwi].segments;
+			for (var csi = 0; csi < segs.length; csi++) {
+				var cvs = segs[csi].verts;
+				if (!cvs) continue;
+				for (var cvi = 0; cvi < cvs.length; cvi++) {
+					cvs[cvi] = { x: cvs[cvi].x + cx, y: cvs[cvi].y + cy, z: cvs[cvi].z + cz };
+				}
+			}
+		}
+	}
+
+	// Translate intersection segments and polylines back to original coordinates
+	for (var tsi = 0; tsi < isect.segments.length; tsi++) {
+		var tseg = isect.segments[tsi];
+		tseg.p0 = { x: tseg.p0.x + cx, y: tseg.p0.y + cy, z: tseg.p0.z + cz, id: tseg.p0.id };
+		tseg.p1 = { x: tseg.p1.x + cx, y: tseg.p1.y + cy, z: tseg.p1.z + cz, id: tseg.p1.id };
+	}
+	if (polylines) {
+		for (var tpi = 0; tpi < polylines.length; tpi++) {
+			var tpl = polylines[tpi];
+			for (var tpj = 0; tpj < tpl.length; tpj++) {
+				tpl[tpj] = { x: tpl[tpj].x + cx, y: tpl[tpj].y + cy, z: tpl[tpj].z + cz, id: tpl[tpj].id };
+			}
+		}
+	}
 
 	var result = {
 		groups: groups,
@@ -9087,6 +10754,7 @@ function bmsBooleanOp(soupA, soupB, operation, options) {
 		polylines: closedPolylines,
 		rawPolylines: polylines,
 		meshEdgePolys: meshEdgePolys,
+		componentWalks: classifyResult.componentWalks,
 		megaSoup: megaSoup,
 		pool: isect.pool
 	};
@@ -9118,5 +10786,5 @@ function bmsBooleanOp(soupA, soupB, operation, options) {
 	return result;
 }
 
-export { bboxOverlap, bmsBooleanOp, bmsChain, bmsClassify, bmsClosePolylines, bmsIntersect, bmsSplit, boolean, buildCurtainAndCap, buildSpatialGrid, buildSpatialGridOnAxes, capBoundaryLoops, capBoundaryLoopsSequential, chainSegments, classifyByFloodFill, classifyNormalDirection, classifyPointMultiAxis, cleanCrossingTriangles, compute3DSurfaceArea, computeBBox, computeBounds, computeProjectedArea, computeSignedVolume, countOpenEdges, createVertexPool, cross, deduplicateSeamVertices, dist3, distSq3, edgeKey, ensureZUpNormals, estimateAvgEdge, extractBoundaryLoops, fanTriangulate, fillOpenEdgeLoops, findConnectedComponents, flipAllNormals, forceCloseIndexedMesh, generateClosingTriangles, weldedToSoup as indexedToSoup, intersectMeshPair, intersectMeshPairTagged, lerpVert, mergeComponents, mergeSmallComponents, mergeSplitGroups, queryGrid, queryGridOnAxes, removeDegenerateTriangles, removeOverlappingTriangles, repairMesh, resolveTJunctions, retriangulateWithSteinerPoints, selectSplits, simplifyPolyline, weldVertices as soupToIndexed, splitMeshPair, splitToComponents, stitchByProximity, triBBox, triNormal, triTriIntersection, triTriIntersectionDetailed, triangleArea3D, triangulateLoop, vKey, weldBoundaryVertices, weldVertices, weldedToSoup };
+export { bboxOverlap, bmsBooleanOp, bmsChain, bmsClassify, bmsClosePolylines, bmsIntersect, bmsSplit, boolean, buildCurtainAndCap, buildSpatialGrid, buildSpatialGridOnAxes, capBoundaryLoops, capBoundaryLoopsSequential, chainSegments, chainedOpenEdge, classifyByFloodFill, classifyNormalDirection, classifyPointMultiAxis, cleanCrossingTriangles, compute3DSurfaceArea, computeBBox, computeBounds, computeProjectedArea, computeSignedVolume, countOpenEdges, createVertexPool, cross, deduplicateSeamVertices, dist3, distSq3, edgeKey, ensureZUpNormals, estimateAvgEdge, extractBoundaryLoops, fanTriangulate, fillOpenEdgeLoops, findConnectedComponents, flipAllNormals, forceCloseIndexedMesh, generateClosingTriangles, heffalumpClassify, weldedToSoup as indexedToSoup, intersectMeshPair, intersectMeshPairTagged, lerpVert, mergeComponents, mergeSmallComponents, mergeSplitGroups, queryGrid, queryGridOnAxes, reclassifyAtPoint, reclassifyRegion, reclassifyTriangles, removeDegenerateTriangles, removeOverlappingTriangles, repairMesh, resolveTJunctions, retriangulateWithSteinerPoints, selectSplits, shouldUseHeffalump, simplifyPolyline, weldVertices as soupToIndexed, splitMeshPair, splitToComponents, stitchByProximity, triBBox, triNormal, triTriIntersection, triTriIntersectionDetailed, triangleArea3D, triangulateLoop, vKey, weldBoundaryVertices, weldVertices, weldedToSoup };
 //# sourceMappingURL=trimesh-boolean.esm.js.map

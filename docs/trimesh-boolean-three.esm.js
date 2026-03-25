@@ -1,613 +1,10 @@
 import * as THREE from 'three';
 
-/**
- * @module util/math
- *
- * Core math utilities for triangle mesh operations.
- */
-
-/**
- * 3D Euclidean distance between two points.
- * @param {{ x: number, y: number, z: number }} a
- * @param {{ x: number, y: number, z: number }} b
- * @returns {number}
- */
-function dist3(a, b) {
-	var dx = a.x - b.x;
-	var dy = a.y - b.y;
-	var dz = a.z - b.z;
-	return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-/**
- * Squared 3D distance (avoids sqrt for comparisons).
- * @param {{ x: number, y: number, z: number }} a
- * @param {{ x: number, y: number, z: number }} b
- * @returns {number}
- */
-function distSq3(a, b) {
-	var dx = a.x - b.x;
-	var dy = a.y - b.y;
-	var dz = a.z - b.z;
-	return dx * dx + dy * dy + dz * dz;
-}
-
-/**
- * Compute the area of a triangle in 3D using the cross-product method.
- * @param {{ v0: Object, v1: Object, v2: Object }} tri
- * @returns {number} Area in square units
- */
-function triangleArea3D(tri) {
-	var ux = tri.v1.x - tri.v0.x;
-	var uy = tri.v1.y - tri.v0.y;
-	var uz = tri.v1.z - tri.v0.z;
-	var vx = tri.v2.x - tri.v0.x;
-	var vy = tri.v2.y - tri.v0.y;
-	var vz = tri.v2.z - tri.v0.z;
-	var cx = uy * vz - uz * vy;
-	var cy = uz * vx - ux * vz;
-	var cz = ux * vy - uy * vx;
-	return 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
-}
-
-/**
- * Cross product of two 3D vectors.
- * @param {{ x: number, y: number, z: number }} a
- * @param {{ x: number, y: number, z: number }} b
- * @returns {{ x: number, y: number, z: number }}
- */
-function cross(a, b) {
-	return {
-		x: a.y * b.z - a.z * b.y,
-		y: a.z * b.x - a.x * b.z,
-		z: a.x * b.y - a.y * b.x
-	};
-}
-
-/**
- * Standard vertex key for spatial hashing (6 decimal places).
- * @param {{ x: number, y: number, z: number }} v
- * @returns {string}
- */
-function vKey(v) {
-	return v.x.toFixed(6) + "," + v.y.toFixed(6) + "," + v.z.toFixed(6);
-}
-
-/**
- * Canonical edge key (order-independent).
- * @param {string} ka - Vertex key A
- * @param {string} kb - Vertex key B
- * @returns {string}
- */
-function edgeKey(ka, kb) {
-	return ka < kb ? ka + "|" + kb : kb + "|" + ka;
-}
-
-/**
- * Count open (boundary) and non-manifold (over-shared) edges in a triangle soup.
- * @param {Array} tris - Array of {v0, v1, v2}
- * @returns {{ openEdges: number, overShared: number, total: number }}
- */
-function countOpenEdges(tris) {
-	var edgeMap = {};
-
-	for (var i = 0; i < tris.length; i++) {
-		var tri = tris[i];
-		var verts = [tri.v0, tri.v1, tri.v2];
-		var keys = [vKey(verts[0]), vKey(verts[1]), vKey(verts[2])];
-
-		for (var e = 0; e < 3; e++) {
-			var ne = (e + 1) % 3;
-			var ek = edgeKey(keys[e], keys[ne]);
-			if (!edgeMap[ek]) {
-				edgeMap[ek] = 0;
-			}
-			edgeMap[ek]++;
-		}
-	}
-
-	var openEdges = 0;
-	var overShared = 0;
-	var total = 0;
-
-	for (var ek2 in edgeMap) {
-		total++;
-		if (edgeMap[ek2] === 1) {
-			openEdges++;
-		} else if (edgeMap[ek2] > 2) {
-			overShared++;
-		}
-	}
-
-	return { openEdges: openEdges, overShared: overShared, total: total };
-}
-
-/**
- * @module normals/triNormal
- *
- * Compute the unit normal of a triangle from its three vertices.
- */
-
-
-/**
- * Compute the unit face normal of a triangle.
- *
- * Uses the cross product of edges (v0->v1) x (v0->v2) and normalises
- * to unit length.  Returns the Z-up fallback {0,0,1} for degenerate
- * (zero-area) triangles.
- *
- * @param {{ v0: {x:number,y:number,z:number}, v1: {x:number,y:number,z:number}, v2: {x:number,y:number,z:number} }} tri
- * @returns {{ x: number, y: number, z: number }} Unit normal vector
- */
-function triNormal(tri) {
-    var e1 = { x: tri.v1.x - tri.v0.x, y: tri.v1.y - tri.v0.y, z: tri.v1.z - tri.v0.z };
-    var e2 = { x: tri.v2.x - tri.v0.x, y: tri.v2.y - tri.v0.y, z: tri.v2.z - tri.v0.z };
-    var n = cross(e1, e2);
-    var len = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
-    if (len < 1e-15) return { x: 0, y: 0, z: 1 };
-    return { x: n.x / len, y: n.y / len, z: n.z / len };
-}
-
-/**
- * @module intersect/triTriIntersection
- *
- * Moller triangle-triangle intersection test.
- *
- * Determines whether two triangles intersect and, if so, computes the
- * line segment that lies on both triangles.  Based on the Moller (1997)
- * separating-axis / interval-overlap method.
- *
- * Exports:
- *  - triTriIntersection(triA, triB)          -- segment or null
- *  - triTriIntersectionDetailed(triA, triB)  -- signed distances + segLen
- *  - computeTriInterval(tri, lineDir, linePoint, d0, d1, d2)
- *  - findLinePoint(nA, dA, nB, dB, lineDir)
- */
-
-
-/**
- * Moller triangle-triangle intersection.
- *
- * Projects each triangle onto the plane of the other, computes the
- * parametric overlap of their crossing intervals on the plane-plane
- * intersection line, and returns the resulting 3-D segment.
- *
- * @param {{ v0: Object, v1: Object, v2: Object }} triA
- * @param {{ v0: Object, v1: Object, v2: Object }} triB
- * @returns {{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number} } | null}
- *          Intersection segment, or null when no intersection exists.
- */
-function triTriIntersection(triA, triB) {
-    // Plane of triangle B
-    var nB = triNormal(triB);
-    var dB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
-
-    // Signed distances of triA vertices to plane B
-    var dA0 = nB.x * triA.v0.x + nB.y * triA.v0.y + nB.z * triA.v0.z + dB;
-    var dA1 = nB.x * triA.v1.x + nB.y * triA.v1.y + nB.z * triA.v1.z + dB;
-    var dA2 = nB.x * triA.v2.x + nB.y * triA.v2.y + nB.z * triA.v2.z + dB;
-
-    // All on same side -> no intersection
-    if (dA0 > 0 && dA1 > 0 && dA2 > 0) return null;
-    if (dA0 < 0 && dA1 < 0 && dA2 < 0) return null;
-
-    // Plane of triangle A
-    var nA = triNormal(triA);
-    var dA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
-
-    // Signed distances of triB vertices to plane A
-    var dB0 = nA.x * triB.v0.x + nA.y * triB.v0.y + nA.z * triB.v0.z + dA;
-    var dB1 = nA.x * triB.v1.x + nA.y * triB.v1.y + nA.z * triB.v1.z + dA;
-    var dB2 = nA.x * triB.v2.x + nA.y * triB.v2.y + nA.z * triB.v2.z + dA;
-
-    // All on same side -> no intersection
-    if (dB0 > 0 && dB1 > 0 && dB2 > 0) return null;
-    if (dB0 < 0 && dB1 < 0 && dB2 < 0) return null;
-
-    // Near-parallel planes
-    var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
-    if (Math.abs(dotN) > 0.9999) return null;
-
-    // Intersection line direction
-    var lineDir = cross(nA, nB);
-    var lineDirLen = Math.sqrt(lineDir.x * lineDir.x + lineDir.y * lineDir.y + lineDir.z * lineDir.z);
-    if (lineDirLen < 1e-12) return null;
-    lineDir.x /= lineDirLen;
-    lineDir.y /= lineDirLen;
-    lineDir.z /= lineDirLen;
-
-    // A point on the intersection line (needed for relative projection)
-    var linePoint = findLinePoint(nA, dA, nB, dB, lineDir);
-    if (!linePoint) return null;
-
-    // Project each triangle's crossing edges onto the line
-    var intervalA = computeTriInterval(triA, lineDir, linePoint, dA0, dA1, dA2);
-    if (!intervalA) return null;
-
-    var intervalB = computeTriInterval(triB, lineDir, linePoint, dB0, dB1, dB2);
-    if (!intervalB) return null;
-
-    // Overlap of intervals
-    var overlapMin = Math.max(intervalA.min, intervalB.min);
-    var overlapMax = Math.min(intervalA.max, intervalB.max);
-
-    if (overlapMin >= overlapMax - 1e-10) return null;
-
-    // Convert parametric overlap back to 3-D
-    var p0 = {
-        x: linePoint.x + lineDir.x * overlapMin,
-        y: linePoint.y + lineDir.y * overlapMin,
-        z: linePoint.z + lineDir.z * overlapMin
-    };
-    var p1 = {
-        x: linePoint.x + lineDir.x * overlapMax,
-        y: linePoint.y + lineDir.y * overlapMax,
-        z: linePoint.z + lineDir.z * overlapMax
-    };
-
-    // Skip degenerate segments
-    var dx = p0.x - p1.x, dy = p0.y - p1.y, dz = p0.z - p1.z;
-    if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 1e-8) return null;
-
-    return { p0: p0, p1: p1 };
-}
-
-/**
- * Compute the parametric interval where a triangle crosses the
- * plane-plane intersection line.
- *
- * For each triangle edge that straddles the opposing plane (sign change
- * in the signed distances d0, d1, d2) the crossing point is projected
- * onto `lineDir` relative to `linePoint`.  Vertices exactly on the plane
- * are also projected.
- *
- * @param {{ v0: Object, v1: Object, v2: Object }} tri
- * @param {{ x: number, y: number, z: number }} lineDir  - Unit direction of intersection line
- * @param {{ x: number, y: number, z: number }} linePoint - Reference point on the line
- * @param {number} d0 - Signed distance of tri.v0 to the opposing plane
- * @param {number} d1 - Signed distance of tri.v1 to the opposing plane
- * @param {number} d2 - Signed distance of tri.v2 to the opposing plane
- * @returns {{ min: number, max: number } | null} Parametric interval, or null if fewer than 2 crossings
- */
-function computeTriInterval(tri, lineDir, linePoint, d0, d1, d2) {
-    var verts = [tri.v0, tri.v1, tri.v2];
-    var dists = [d0, d1, d2];
-    var params = [];
-
-    // Find edges that cross the plane (sign change in distances)
-    for (var i = 0; i < 3; i++) {
-        var j = (i + 1) % 3;
-        var di = dists[i];
-        var dj = dists[j];
-
-        if ((di > 0 && dj < 0) || (di < 0 && dj > 0)) {
-            // Edge crosses the plane
-            var t = di / (di - dj);
-            var pt = {
-                x: verts[i].x + t * (verts[j].x - verts[i].x),
-                y: verts[i].y + t * (verts[j].y - verts[i].y),
-                z: verts[i].z + t * (verts[j].z - verts[i].z)
-            };
-            // Relative projection onto line (relative to linePoint for UTM precision)
-            var param = (pt.x - linePoint.x) * lineDir.x + (pt.y - linePoint.y) * lineDir.y + (pt.z - linePoint.z) * lineDir.z;
-            params.push(param);
-        } else if (Math.abs(di) < 1e-10) {
-            // Vertex on the plane -- relative projection
-            var param2 = (verts[i].x - linePoint.x) * lineDir.x + (verts[i].y - linePoint.y) * lineDir.y + (verts[i].z - linePoint.z) * lineDir.z;
-            params.push(param2);
-        }
-    }
-
-    if (params.length < 2) return null;
-
-    // Deduplicate very close values
-    params.sort(function (a, b) { return a - b; });
-
-    return { min: params[0], max: params[params.length - 1] };
-}
-
-/**
- * Find a point on the intersection line of two planes.
- *
- * Sets the dominant component of `lineDir` to zero and solves the
- * resulting 2x2 system via Cramer's rule.
- *
- * @param {{ x: number, y: number, z: number }} nA - Normal of plane A
- * @param {number} dA - Plane constant for A  (nA . p + dA = 0)
- * @param {{ x: number, y: number, z: number }} nB - Normal of plane B
- * @param {number} dB - Plane constant for B
- * @param {{ x: number, y: number, z: number }} lineDir - Direction of the intersection line
- * @returns {{ x: number, y: number, z: number } | null}
- */
-function findLinePoint(nA, dA, nB, dB, lineDir) {
-    // Find the dominant axis of lineDir to set it to 0
-    var ax = Math.abs(lineDir.x);
-    var ay = Math.abs(lineDir.y);
-    var az = Math.abs(lineDir.z);
-
-    var px, py, pz;
-
-    if (az >= ax && az >= ay) {
-        // Set z = 0, solve for x, y via Cramer's rule
-        var det = nA.x * nB.y - nA.y * nB.x;
-        if (Math.abs(det) < 1e-12) return null;
-        px = (-dA * nB.y + dB * nA.y) / det;
-        py = (nA.x * (-dB) - nB.x * (-dA)) / det;
-        pz = 0;
-    } else if (ay >= ax) {
-        // Set y = 0, solve for x, z via Cramer's rule
-        var det2 = nA.x * nB.z - nA.z * nB.x;
-        if (Math.abs(det2) < 1e-12) return null;
-        px = (-dA * nB.z + dB * nA.z) / det2;
-        py = 0;
-        pz = (nA.x * (-dB) - nB.x * (-dA)) / det2;
-    } else {
-        // Set x = 0, solve for y, z via Cramer's rule
-        var det3 = nA.y * nB.z - nA.z * nB.y;
-        if (Math.abs(det3) < 1e-12) return null;
-        px = 0;
-        py = (-dA * nB.z + dB * nA.z) / det3;
-        pz = (nA.y * (-dB) - nB.y * (-dA)) / det3;
-    }
-
-    return { x: px, y: py, z: pz };
-}
-
-/**
- * @module intersect/spatialGrid
- *
- * Uniform spatial grid for accelerating triangle-pair intersection tests.
- *
- * Triangles are binned into 2-D (XY) grid cells based on their axis-aligned
- * bounding boxes.  Querying the grid with a bounding box returns candidate
- * triangle indices that share at least one cell, dramatically reducing the
- * number of exact Moller tests required.
- *
- * Exports:
- *  - buildSpatialGrid(tris, cellSize)
- *  - queryGrid(grid, bb, cellSize)
- *  - computeBBox(tris)
- *  - triBBox(tri)
- *  - bboxOverlap(a, b)
- *  - estimateAvgEdge(tris)
- */
-
-
-/**
- * Build a 2-D spatial hash grid on arbitrary axes.
- *
- * Unlike {@link buildSpatialGrid} which always hashes on XY,
- * this function accepts accessor functions to extract the two
- * bucketing coordinates.  For example, pass `v => v.y, v => v.z`
- * to build a YZ grid suitable for X-direction ray casting.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
- * @param {number} cellSize - Width/height of each grid cell (world units)
- * @param {function(Object): number} getA - Extracts first axis value from vertex
- * @param {function(Object): number} getB - Extracts second axis value from vertex
- * @returns {Object.<string, number[]>} Grid mapping cell keys to triangle index arrays
- */
-function buildSpatialGridOnAxes(tris, cellSize, getA, getB) {
-	var grid = {};
-
-	for (var i = 0; i < tris.length; i++) {
-		var t = tris[i];
-		var verts = [t.v0, t.v1, t.v2];
-
-		var minA = Infinity, maxA = -Infinity;
-		var minB = Infinity, maxB = -Infinity;
-		for (var j = 0; j < 3; j++) {
-			var a = getA(verts[j]), b = getB(verts[j]);
-			if (a < minA) minA = a;
-			if (a > maxA) maxA = a;
-			if (b < minB) minB = b;
-			if (b > maxB) maxB = b;
-		}
-
-		var a0 = Math.floor(minA / cellSize);
-		var b0 = Math.floor(minB / cellSize);
-		var a1 = Math.floor(maxA / cellSize);
-		var b1 = Math.floor(maxB / cellSize);
-
-		for (var ga = a0; ga <= a1; ga++) {
-			for (var gb = b0; gb <= b1; gb++) {
-				var key = ga + "," + gb;
-				if (!grid[key]) grid[key] = [];
-				grid[key].push(i);
-			}
-		}
-	}
-
-	return grid;
-}
-
-/**
- * Query a grid built by {@link buildSpatialGridOnAxes} for a single point.
- *
- * Returns the triangle indices stored in the cell containing the
- * given (a, b) coordinates.  No deduplication is needed because
- * point queries always hit exactly one cell.
- *
- * @param {Object.<string, number[]>} grid - Grid built by buildSpatialGridOnAxes
- * @param {number} a - First axis coordinate of the query point
- * @param {number} b - Second axis coordinate of the query point
- * @param {number} cellSize - Same cell size used when building the grid
- * @returns {number[]} Triangle indices (empty array if cell is empty)
- */
-function queryGridOnAxes(grid, a, b, cellSize) {
-	var ga = Math.floor(a / cellSize);
-	var gb = Math.floor(b / cellSize);
-	var key = ga + "," + gb;
-	var cell = grid[key];
-	return cell ? cell : [];
-}
-
-/**
- * Build a 2-D spatial hash grid from an array of triangles.
- *
- * Each triangle is inserted into every XY cell that its axis-aligned
- * bounding box overlaps.  The grid is keyed by "cellX,cellY" strings
- * and each bucket holds an array of triangle indices.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
- * @param {number} cellSize - Width/height of each grid cell (world units)
- * @returns {Object.<string, number[]>} Grid mapping cell keys to triangle index arrays
- */
-function buildSpatialGrid(tris, cellSize) {
-    var grid = {};
-
-    for (var i = 0; i < tris.length; i++) {
-        var bb = triBBox(tris[i]);
-        var x0 = Math.floor(bb.minX / cellSize);
-        var y0 = Math.floor(bb.minY / cellSize);
-        var x1 = Math.floor(bb.maxX / cellSize);
-        var y1 = Math.floor(bb.maxY / cellSize);
-
-        for (var gx = x0; gx <= x1; gx++) {
-            for (var gy = y0; gy <= y1; gy++) {
-                var key = gx + "," + gy;
-                if (!grid[key]) grid[key] = [];
-                grid[key].push(i);
-            }
-        }
-    }
-
-    return grid;
-}
-
-/**
- * Query the spatial grid for triangle indices whose cells overlap a
- * given bounding box.
- *
- * Returned indices are de-duplicated (a triangle spanning multiple cells
- * appears only once).
- *
- * @param {Object.<string, number[]>} grid - Grid built by {@link buildSpatialGrid}
- * @param {{ minX: number, minY: number, maxX: number, maxY: number }} bb - Query bounding box
- * @param {number} cellSize - Same cell size used when building the grid
- * @returns {number[]} Unique triangle indices
- */
-function queryGrid(grid, bb, cellSize) {
-    var x0 = Math.floor(bb.minX / cellSize);
-    var y0 = Math.floor(bb.minY / cellSize);
-    var x1 = Math.floor(bb.maxX / cellSize);
-    var y1 = Math.floor(bb.maxY / cellSize);
-
-    var seen = {};
-    var result = [];
-
-    for (var gx = x0; gx <= x1; gx++) {
-        for (var gy = y0; gy <= y1; gy++) {
-            var key = gx + "," + gy;
-            var cell = grid[key];
-            if (!cell) continue;
-            for (var c = 0; c < cell.length; c++) {
-                var idx = cell[c];
-                if (!seen[idx]) {
-                    seen[idx] = true;
-                    result.push(idx);
-                }
-            }
-        }
-    }
-
-    return result;
-}
-
-/**
- * Compute the axis-aligned bounding box of a single triangle.
- *
- * @param {{ v0: Object, v1: Object, v2: Object }} tri
- * @returns {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }}
- */
-function triBBox(tri) {
-    return {
-        minX: Math.min(tri.v0.x, tri.v1.x, tri.v2.x),
-        minY: Math.min(tri.v0.y, tri.v1.y, tri.v2.y),
-        minZ: Math.min(tri.v0.z, tri.v1.z, tri.v2.z),
-        maxX: Math.max(tri.v0.x, tri.v1.x, tri.v2.x),
-        maxY: Math.max(tri.v0.y, tri.v1.y, tri.v2.y),
-        maxZ: Math.max(tri.v0.z, tri.v1.z, tri.v2.z)
-    };
-}
-
-/**
- * Estimate the average edge length of a triangle array by sampling
- * up to the first 100 triangles.
- *
- * Useful for choosing a spatial grid cell size proportional to the
- * mesh resolution.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
- * @returns {number} Average edge length (defaults to 1.0 for empty input)
- */
-function estimateAvgEdge(tris) {
-    if (tris.length === 0) return 1.0;
-    var total = 0;
-    var count = Math.min(tris.length, 100);
-    for (var i = 0; i < count; i++) {
-        var t = tris[i];
-        total += dist3(t.v0, t.v1);
-        total += dist3(t.v1, t.v2);
-        total += dist3(t.v2, t.v0);
-    }
-    return total / (count * 3);
-}
-
-/**
- * @module intersect/intersectMeshPair
- *
- * Compute all triangle-triangle intersection segments between two
- * triangle meshes, accelerated by a uniform spatial grid.
- *
- * Exports:
- *  - intersectMeshPair(trisA, trisB)        -- array of {p0, p1} segments
- *  - intersectMeshPairTagged(trisA, trisB)  -- segments with source triangle indices
- */
-
-
-/**
- * Like {@link intersectMeshPair} but each returned segment carries the
- * source triangle indices from mesh A and mesh B.
- *
- * Useful for boolean operations and classification that need to know
- * which triangles produced each intersection segment.
- *
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisA - First mesh triangles
- * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB - Second mesh triangles
- * @returns {Array<{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number}, idxA: number, idxB: number }>}
- *          Tagged intersection segments (may be empty)
- */
-function intersectMeshPairTagged(trisA, trisB) {
-    var segments = [];
-
-    var avgEdge = estimateAvgEdge(trisB);
-    var cellSize = Math.max(avgEdge * 2, 0.1);
-    var gridB = buildSpatialGrid(trisB, cellSize);
-
-    for (var i = 0; i < trisA.length; i++) {
-        var triA = trisA[i];
-        var bbA = triBBox(triA);
-        var candidates = queryGrid(gridB, bbA, cellSize);
-
-        for (var c = 0; c < candidates.length; c++) {
-            var j = candidates[c];
-            var triB = trisB[j];
-            var seg = triTriIntersection(triA, triB);
-            if (seg) {
-                segments.push({ p0: seg.p0, p1: seg.p1, idxA: i, idxB: j });
-            }
-        }
-    }
-
-    return segments;
-}
-
 const epsilon = 1.1102230246251565e-16;
 const splitter = 134217729;
 const resulterrbound = (3 + 8 * epsilon) * epsilon;
 
-// fast_expansion_sum_zeroelim routine from oritinal code
+// fast_expansion_sum_zeroelim routine from original code
 function sum(elen, e, flen, f, h) {
     let Q, Qnew, hh, bvirt;
     let enow = e[0];
@@ -745,7 +142,7 @@ const B = vec(4);
 const C1 = vec(8);
 const C2 = vec(12);
 const D = vec(16);
-const u$1 = vec(4);
+const u$2 = vec(4);
 
 function orient2dadapt(ax, ay, bx, by, cx, cy, detsum) {
     let acxtail, acytail, bcxtail, bcytail;
@@ -827,18 +224,18 @@ function orient2dadapt(ax, ay, bx, by, cx, cy, detsum) {
     t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
     _i = s0 - t0;
     bvirt = s0 - _i;
-    u$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    u$2[0] = s0 - (_i + bvirt) + (bvirt - t0);
     _j = s1 + _i;
     bvirt = _j - s1;
     _0 = s1 - (_j - bvirt) + (_i - bvirt);
     _i = _0 - t1;
     bvirt = _0 - _i;
-    u$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u$2[1] = _0 - (_i + bvirt) + (bvirt - t1);
     u3 = _j + _i;
     bvirt = u3 - _j;
-    u$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
-    u$1[3] = u3;
-    const C1len = sum(4, B, 4, u$1, C1);
+    u$2[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    u$2[3] = u3;
+    const C1len = sum(4, B, 4, u$2, C1);
 
     s1 = acx * bcytail;
     c = splitter * acx;
@@ -858,18 +255,18 @@ function orient2dadapt(ax, ay, bx, by, cx, cy, detsum) {
     t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
     _i = s0 - t0;
     bvirt = s0 - _i;
-    u$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    u$2[0] = s0 - (_i + bvirt) + (bvirt - t0);
     _j = s1 + _i;
     bvirt = _j - s1;
     _0 = s1 - (_j - bvirt) + (_i - bvirt);
     _i = _0 - t1;
     bvirt = _0 - _i;
-    u$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u$2[1] = _0 - (_i + bvirt) + (bvirt - t1);
     u3 = _j + _i;
     bvirt = u3 - _j;
-    u$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
-    u$1[3] = u3;
-    const C2len = sum(C1len, C1, 4, u$1, C2);
+    u$2[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    u$2[3] = u3;
+    const C2len = sum(C1len, C1, 4, u$2, C2);
 
     s1 = acxtail * bcytail;
     c = splitter * acxtail;
@@ -889,18 +286,18 @@ function orient2dadapt(ax, ay, bx, by, cx, cy, detsum) {
     t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
     _i = s0 - t0;
     bvirt = s0 - _i;
-    u$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    u$2[0] = s0 - (_i + bvirt) + (bvirt - t0);
     _j = s1 + _i;
     bvirt = _j - s1;
     _0 = s1 - (_j - bvirt) + (_i - bvirt);
     _i = _0 - t1;
     bvirt = _0 - _i;
-    u$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u$2[1] = _0 - (_i + bvirt) + (bvirt - t1);
     u3 = _j + _i;
     bvirt = u3 - _j;
-    u$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
-    u$1[3] = u3;
-    const Dlen = sum(C2len, C2, 4, u$1, D);
+    u$2[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    u$2[3] = u3;
+    const Dlen = sum(C2len, C2, 4, u$2, D);
 
     return D[Dlen - 1];
 }
@@ -914,6 +311,448 @@ function orient2d(ax, ay, bx, by, cx, cy) {
     if (Math.abs(det) >= ccwerrboundA * detsum) return det;
 
     return -orient2dadapt(ax, ay, bx, by, cx, cy, detsum);
+}
+
+const o3derrboundA = (7 + 56 * epsilon) * epsilon;
+const o3derrboundB = (3 + 28 * epsilon) * epsilon;
+const o3derrboundC = (26 + 288 * epsilon) * epsilon * epsilon;
+
+const bc$1 = vec(4);
+const ca$1 = vec(4);
+const ab$1 = vec(4);
+const at_b = vec(4);
+const at_c = vec(4);
+const bt_c = vec(4);
+const bt_a = vec(4);
+const ct_a = vec(4);
+const ct_b = vec(4);
+const bct$1 = vec(8);
+const cat$1 = vec(8);
+const abt$1 = vec(8);
+const u$1 = vec(4);
+
+const _8$1 = vec(8);
+const _8b = vec(8);
+const _16$1 = vec(16);
+const _12 = vec(12);
+
+let fin$1 = vec(192);
+let fin2$1 = vec(192);
+
+function finadd$1(finlen, alen, a) {
+    finlen = sum(finlen, fin$1, alen, a, fin2$1);
+    const tmp = fin$1; fin$1 = fin2$1; fin2$1 = tmp;
+    return finlen;
+}
+
+function tailinit(xtail, ytail, ax, ay, bx, by, a, b) {
+    let bvirt, c, ahi, alo, bhi, blo, _i, _j, _0, s1, s0, t1, t0, u3, negate;
+    if (xtail === 0) {
+        if (ytail === 0) {
+            a[0] = 0;
+            b[0] = 0;
+            return 1;
+        }
+        negate = -ytail;
+        s1 = negate * ax;
+        c = splitter * negate;
+        ahi = c - (c - negate);
+        alo = negate - ahi;
+        c = splitter * ax;
+        bhi = c - (c - ax);
+        blo = ax - bhi;
+        a[0] = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+        a[1] = s1;
+        s1 = ytail * bx;
+        c = splitter * ytail;
+        ahi = c - (c - ytail);
+        alo = ytail - ahi;
+        c = splitter * bx;
+        bhi = c - (c - bx);
+        blo = bx - bhi;
+        b[0] = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+        b[1] = s1;
+        return 2;
+    }
+    if (ytail === 0) {
+        s1 = xtail * ay;
+        c = splitter * xtail;
+        ahi = c - (c - xtail);
+        alo = xtail - ahi;
+        c = splitter * ay;
+        bhi = c - (c - ay);
+        blo = ay - bhi;
+        a[0] = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+        a[1] = s1;
+        negate = -xtail;
+        s1 = negate * by;
+        c = splitter * negate;
+        ahi = c - (c - negate);
+        alo = negate - ahi;
+        c = splitter * by;
+        bhi = c - (c - by);
+        blo = by - bhi;
+        b[0] = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+        b[1] = s1;
+        return 2;
+    }
+    s1 = xtail * ay;
+    c = splitter * xtail;
+    ahi = c - (c - xtail);
+    alo = xtail - ahi;
+    c = splitter * ay;
+    bhi = c - (c - ay);
+    blo = ay - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = ytail * ax;
+    c = splitter * ytail;
+    ahi = c - (c - ytail);
+    alo = ytail - ahi;
+    c = splitter * ax;
+    bhi = c - (c - ax);
+    blo = ax - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    a[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    a[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    a[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    a[3] = u3;
+    s1 = ytail * bx;
+    c = splitter * ytail;
+    ahi = c - (c - ytail);
+    alo = ytail - ahi;
+    c = splitter * bx;
+    bhi = c - (c - bx);
+    blo = bx - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = xtail * by;
+    c = splitter * xtail;
+    ahi = c - (c - xtail);
+    alo = xtail - ahi;
+    c = splitter * by;
+    bhi = c - (c - by);
+    blo = by - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    b[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    b[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    b[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    b[3] = u3;
+    return 4;
+}
+
+function tailadd(finlen, a, b, k, z) {
+    let bvirt, c, ahi, alo, bhi, blo, _i, _j, _k, _0, s1, s0, u3;
+    s1 = a * b;
+    c = splitter * a;
+    ahi = c - (c - a);
+    alo = a - ahi;
+    c = splitter * b;
+    bhi = c - (c - b);
+    blo = b - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    c = splitter * k;
+    bhi = c - (c - k);
+    blo = k - bhi;
+    _i = s0 * k;
+    c = splitter * s0;
+    ahi = c - (c - s0);
+    alo = s0 - ahi;
+    u$1[0] = alo * blo - (_i - ahi * bhi - alo * bhi - ahi * blo);
+    _j = s1 * k;
+    c = splitter * s1;
+    ahi = c - (c - s1);
+    alo = s1 - ahi;
+    _0 = alo * blo - (_j - ahi * bhi - alo * bhi - ahi * blo);
+    _k = _i + _0;
+    bvirt = _k - _i;
+    u$1[1] = _i - (_k - bvirt) + (_0 - bvirt);
+    u3 = _j + _k;
+    u$1[2] = _k - (u3 - _j);
+    u$1[3] = u3;
+    finlen = finadd$1(finlen, 4, u$1);
+    if (z !== 0) {
+        c = splitter * z;
+        bhi = c - (c - z);
+        blo = z - bhi;
+        _i = s0 * z;
+        c = splitter * s0;
+        ahi = c - (c - s0);
+        alo = s0 - ahi;
+        u$1[0] = alo * blo - (_i - ahi * bhi - alo * bhi - ahi * blo);
+        _j = s1 * z;
+        c = splitter * s1;
+        ahi = c - (c - s1);
+        alo = s1 - ahi;
+        _0 = alo * blo - (_j - ahi * bhi - alo * bhi - ahi * blo);
+        _k = _i + _0;
+        bvirt = _k - _i;
+        u$1[1] = _i - (_k - bvirt) + (_0 - bvirt);
+        u3 = _j + _k;
+        u$1[2] = _k - (u3 - _j);
+        u$1[3] = u3;
+        finlen = finadd$1(finlen, 4, u$1);
+    }
+    return finlen;
+}
+
+function orient3dadapt(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, permanent) {
+    let finlen;
+    let adxtail, bdxtail, cdxtail;
+    let adytail, bdytail, cdytail;
+    let adztail, bdztail, cdztail;
+    let bvirt, c, ahi, alo, bhi, blo, _i, _j, _0, s1, s0, t1, t0, u3;
+
+    const adx = ax - dx;
+    const bdx = bx - dx;
+    const cdx = cx - dx;
+    const ady = ay - dy;
+    const bdy = by - dy;
+    const cdy = cy - dy;
+    const adz = az - dz;
+    const bdz = bz - dz;
+    const cdz = cz - dz;
+
+    s1 = bdx * cdy;
+    c = splitter * bdx;
+    ahi = c - (c - bdx);
+    alo = bdx - ahi;
+    c = splitter * cdy;
+    bhi = c - (c - cdy);
+    blo = cdy - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = cdx * bdy;
+    c = splitter * cdx;
+    ahi = c - (c - cdx);
+    alo = cdx - ahi;
+    c = splitter * bdy;
+    bhi = c - (c - bdy);
+    blo = bdy - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    bc$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    bc$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    bc$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    bc$1[3] = u3;
+    s1 = cdx * ady;
+    c = splitter * cdx;
+    ahi = c - (c - cdx);
+    alo = cdx - ahi;
+    c = splitter * ady;
+    bhi = c - (c - ady);
+    blo = ady - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = adx * cdy;
+    c = splitter * adx;
+    ahi = c - (c - adx);
+    alo = adx - ahi;
+    c = splitter * cdy;
+    bhi = c - (c - cdy);
+    blo = cdy - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    ca$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    ca$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    ca$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    ca$1[3] = u3;
+    s1 = adx * bdy;
+    c = splitter * adx;
+    ahi = c - (c - adx);
+    alo = adx - ahi;
+    c = splitter * bdy;
+    bhi = c - (c - bdy);
+    blo = bdy - bhi;
+    s0 = alo * blo - (s1 - ahi * bhi - alo * bhi - ahi * blo);
+    t1 = bdx * ady;
+    c = splitter * bdx;
+    ahi = c - (c - bdx);
+    alo = bdx - ahi;
+    c = splitter * ady;
+    bhi = c - (c - ady);
+    blo = ady - bhi;
+    t0 = alo * blo - (t1 - ahi * bhi - alo * bhi - ahi * blo);
+    _i = s0 - t0;
+    bvirt = s0 - _i;
+    ab$1[0] = s0 - (_i + bvirt) + (bvirt - t0);
+    _j = s1 + _i;
+    bvirt = _j - s1;
+    _0 = s1 - (_j - bvirt) + (_i - bvirt);
+    _i = _0 - t1;
+    bvirt = _0 - _i;
+    ab$1[1] = _0 - (_i + bvirt) + (bvirt - t1);
+    u3 = _j + _i;
+    bvirt = u3 - _j;
+    ab$1[2] = _j - (u3 - bvirt) + (_i - bvirt);
+    ab$1[3] = u3;
+
+    finlen = sum(
+        sum(
+            scale(4, bc$1, adz, _8$1), _8$1,
+            scale(4, ca$1, bdz, _8b), _8b, _16$1), _16$1,
+        scale(4, ab$1, cdz, _8$1), _8$1, fin$1);
+
+    let det = estimate(finlen, fin$1);
+    let errbound = o3derrboundB * permanent;
+    if (det >= errbound || -det >= errbound) {
+        return det;
+    }
+
+    bvirt = ax - adx;
+    adxtail = ax - (adx + bvirt) + (bvirt - dx);
+    bvirt = bx - bdx;
+    bdxtail = bx - (bdx + bvirt) + (bvirt - dx);
+    bvirt = cx - cdx;
+    cdxtail = cx - (cdx + bvirt) + (bvirt - dx);
+    bvirt = ay - ady;
+    adytail = ay - (ady + bvirt) + (bvirt - dy);
+    bvirt = by - bdy;
+    bdytail = by - (bdy + bvirt) + (bvirt - dy);
+    bvirt = cy - cdy;
+    cdytail = cy - (cdy + bvirt) + (bvirt - dy);
+    bvirt = az - adz;
+    adztail = az - (adz + bvirt) + (bvirt - dz);
+    bvirt = bz - bdz;
+    bdztail = bz - (bdz + bvirt) + (bvirt - dz);
+    bvirt = cz - cdz;
+    cdztail = cz - (cdz + bvirt) + (bvirt - dz);
+
+    if (adxtail === 0 && bdxtail === 0 && cdxtail === 0 &&
+        adytail === 0 && bdytail === 0 && cdytail === 0 &&
+        adztail === 0 && bdztail === 0 && cdztail === 0) {
+        return det;
+    }
+
+    errbound = o3derrboundC * permanent + resulterrbound * Math.abs(det);
+    det +=
+        adz * (bdx * cdytail + cdy * bdxtail - (bdy * cdxtail + cdx * bdytail)) + adztail * (bdx * cdy - bdy * cdx) +
+        bdz * (cdx * adytail + ady * cdxtail - (cdy * adxtail + adx * cdytail)) + bdztail * (cdx * ady - cdy * adx) +
+        cdz * (adx * bdytail + bdy * adxtail - (ady * bdxtail + bdx * adytail)) + cdztail * (adx * bdy - ady * bdx);
+    if (det >= errbound || -det >= errbound) {
+        return det;
+    }
+
+    const at_len = tailinit(adxtail, adytail, bdx, bdy, cdx, cdy, at_b, at_c);
+    const bt_len = tailinit(bdxtail, bdytail, cdx, cdy, adx, ady, bt_c, bt_a);
+    const ct_len = tailinit(cdxtail, cdytail, adx, ady, bdx, bdy, ct_a, ct_b);
+
+    const bctlen = sum(bt_len, bt_c, ct_len, ct_b, bct$1);
+    finlen = finadd$1(finlen, scale(bctlen, bct$1, adz, _16$1), _16$1);
+
+    const catlen = sum(ct_len, ct_a, at_len, at_c, cat$1);
+    finlen = finadd$1(finlen, scale(catlen, cat$1, bdz, _16$1), _16$1);
+
+    const abtlen = sum(at_len, at_b, bt_len, bt_a, abt$1);
+    finlen = finadd$1(finlen, scale(abtlen, abt$1, cdz, _16$1), _16$1);
+
+    if (adztail !== 0) {
+        finlen = finadd$1(finlen, scale(4, bc$1, adztail, _12), _12);
+        finlen = finadd$1(finlen, scale(bctlen, bct$1, adztail, _16$1), _16$1);
+    }
+    if (bdztail !== 0) {
+        finlen = finadd$1(finlen, scale(4, ca$1, bdztail, _12), _12);
+        finlen = finadd$1(finlen, scale(catlen, cat$1, bdztail, _16$1), _16$1);
+    }
+    if (cdztail !== 0) {
+        finlen = finadd$1(finlen, scale(4, ab$1, cdztail, _12), _12);
+        finlen = finadd$1(finlen, scale(abtlen, abt$1, cdztail, _16$1), _16$1);
+    }
+
+    if (adxtail !== 0) {
+        if (bdytail !== 0) {
+            finlen = tailadd(finlen, adxtail, bdytail, cdz, cdztail);
+        }
+        if (cdytail !== 0) {
+            finlen = tailadd(finlen, -adxtail, cdytail, bdz, bdztail);
+        }
+    }
+    if (bdxtail !== 0) {
+        if (cdytail !== 0) {
+            finlen = tailadd(finlen, bdxtail, cdytail, adz, adztail);
+        }
+        if (adytail !== 0) {
+            finlen = tailadd(finlen, -bdxtail, adytail, cdz, cdztail);
+        }
+    }
+    if (cdxtail !== 0) {
+        if (adytail !== 0) {
+            finlen = tailadd(finlen, cdxtail, adytail, bdz, bdztail);
+        }
+        if (bdytail !== 0) {
+            finlen = tailadd(finlen, -cdxtail, bdytail, adz, adztail);
+        }
+    }
+
+    return fin$1[finlen - 1];
+}
+
+function orient3d(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz) {
+    const adx = ax - dx;
+    const bdx = bx - dx;
+    const cdx = cx - dx;
+    const ady = ay - dy;
+    const bdy = by - dy;
+    const cdy = cy - dy;
+    const adz = az - dz;
+    const bdz = bz - dz;
+    const cdz = cz - dz;
+
+    const bdxcdy = bdx * cdy;
+    const cdxbdy = cdx * bdy;
+
+    const cdxady = cdx * ady;
+    const adxcdy = adx * cdy;
+
+    const adxbdy = adx * bdy;
+    const bdxady = bdx * ady;
+
+    const det =
+        adz * (bdxcdy - cdxbdy) +
+        bdz * (cdxady - adxcdy) +
+        cdz * (adxbdy - bdxady);
+
+    const permanent =
+        (Math.abs(bdxcdy) + Math.abs(cdxbdy)) * Math.abs(adz) +
+        (Math.abs(cdxady) + Math.abs(adxcdy)) * Math.abs(bdz) +
+        (Math.abs(adxbdy) + Math.abs(bdxady)) * Math.abs(cdz);
+
+    const errbound = o3derrboundA * permanent;
+    if (det > errbound || -det > errbound) {
+        return det;
+    }
+
+    return orient3dadapt(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, permanent);
 }
 
 const iccerrboundA = (10 + 96 * epsilon) * epsilon;
@@ -1660,6 +1499,672 @@ function incircle(ax, ay, bx, by, cx, cy, dx, dy) {
         return det;
     }
     return incircleadapt(ax, ay, bx, by, cx, cy, dx, dy, permanent);
+}
+
+/**
+ * @module util/math
+ *
+ * Core math utilities for triangle mesh operations.
+ */
+
+/**
+ * 3D Euclidean distance between two points.
+ * @param {{ x: number, y: number, z: number }} a
+ * @param {{ x: number, y: number, z: number }} b
+ * @returns {number}
+ */
+function dist3(a, b) {
+	var dx = a.x - b.x;
+	var dy = a.y - b.y;
+	var dz = a.z - b.z;
+	return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/**
+ * Squared 3D distance (avoids sqrt for comparisons).
+ * @param {{ x: number, y: number, z: number }} a
+ * @param {{ x: number, y: number, z: number }} b
+ * @returns {number}
+ */
+function distSq3(a, b) {
+	var dx = a.x - b.x;
+	var dy = a.y - b.y;
+	var dz = a.z - b.z;
+	return dx * dx + dy * dy + dz * dz;
+}
+
+/**
+ * Compute the area of a triangle in 3D using the cross-product method.
+ * @param {{ v0: Object, v1: Object, v2: Object }} tri
+ * @returns {number} Area in square units
+ */
+function triangleArea3D(tri) {
+	var ux = tri.v1.x - tri.v0.x;
+	var uy = tri.v1.y - tri.v0.y;
+	var uz = tri.v1.z - tri.v0.z;
+	var vx = tri.v2.x - tri.v0.x;
+	var vy = tri.v2.y - tri.v0.y;
+	var vz = tri.v2.z - tri.v0.z;
+	var cx = uy * vz - uz * vy;
+	var cy = uz * vx - ux * vz;
+	var cz = ux * vy - uy * vx;
+	return 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+}
+
+/**
+ * Cross product of two 3D vectors.
+ * @param {{ x: number, y: number, z: number }} a
+ * @param {{ x: number, y: number, z: number }} b
+ * @returns {{ x: number, y: number, z: number }}
+ */
+function cross(a, b) {
+	return {
+		x: a.y * b.z - a.z * b.y,
+		y: a.z * b.x - a.x * b.z,
+		z: a.x * b.y - a.y * b.x
+	};
+}
+
+/**
+ * Standard vertex key for spatial hashing (6 decimal places).
+ * @param {{ x: number, y: number, z: number }} v
+ * @returns {string}
+ */
+function vKey(v) {
+	return v.x.toFixed(6) + "," + v.y.toFixed(6) + "," + v.z.toFixed(6);
+}
+
+/**
+ * Canonical edge key (order-independent).
+ * @param {string} ka - Vertex key A
+ * @param {string} kb - Vertex key B
+ * @returns {string}
+ */
+function edgeKey(ka, kb) {
+	return ka < kb ? ka + "|" + kb : kb + "|" + ka;
+}
+
+/**
+ * Compute shared centroid of two triangle soups.
+ */
+function soupCentroid(soupA, soupB) {
+	var sx = 0, sy = 0, sz = 0, n = 0;
+	for (var i = 0; i < soupA.length; i++) {
+		var t = soupA[i];
+		sx += t.v0.x + t.v1.x + t.v2.x;
+		sy += t.v0.y + t.v1.y + t.v2.y;
+		sz += t.v0.z + t.v1.z + t.v2.z;
+		n += 3;
+	}
+	for (var j = 0; j < soupB.length; j++) {
+		var t2 = soupB[j];
+		sx += t2.v0.x + t2.v1.x + t2.v2.x;
+		sy += t2.v0.y + t2.v1.y + t2.v2.y;
+		sz += t2.v0.z + t2.v1.z + t2.v2.z;
+		n += 3;
+	}
+	return { x: sx / n, y: sy / n, z: sz / n };
+}
+
+/**
+ * Translate a triangle soup by an offset.
+ */
+function translateSoup(soup, dx, dy, dz) {
+	var out = new Array(soup.length);
+	for (var i = 0; i < soup.length; i++) {
+		var t = soup[i];
+		out[i] = {
+			v0: { x: t.v0.x + dx, y: t.v0.y + dy, z: t.v0.z + dz },
+			v1: { x: t.v1.x + dx, y: t.v1.y + dy, z: t.v1.z + dz },
+			v2: { x: t.v2.x + dx, y: t.v2.y + dy, z: t.v2.z + dz }
+		};
+	}
+	return out;
+}
+
+/**
+ * Count open (boundary) and non-manifold (over-shared) edges in a triangle soup.
+ * @param {Array} tris - Array of {v0, v1, v2}
+ * @returns {{ openEdges: number, overShared: number, total: number }}
+ */
+function countOpenEdges(tris) {
+	var edgeMap = {};
+
+	for (var i = 0; i < tris.length; i++) {
+		var tri = tris[i];
+		var verts = [tri.v0, tri.v1, tri.v2];
+		var keys = [vKey(verts[0]), vKey(verts[1]), vKey(verts[2])];
+
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var ek = edgeKey(keys[e], keys[ne]);
+			if (!edgeMap[ek]) {
+				edgeMap[ek] = 0;
+			}
+			edgeMap[ek]++;
+		}
+	}
+
+	var openEdges = 0;
+	var overShared = 0;
+	var total = 0;
+
+	for (var ek2 in edgeMap) {
+		total++;
+		if (edgeMap[ek2] === 1) {
+			openEdges++;
+		} else if (edgeMap[ek2] > 2) {
+			overShared++;
+		}
+	}
+
+	return { openEdges: openEdges, overShared: overShared, total: total };
+}
+
+/**
+ * @module normals/triNormal
+ *
+ * Compute the unit normal of a triangle from its three vertices.
+ */
+
+
+/**
+ * Compute the unit face normal of a triangle.
+ *
+ * Uses the cross product of edges (v0->v1) x (v0->v2) and normalises
+ * to unit length.  Returns the Z-up fallback {0,0,1} for degenerate
+ * (zero-area) triangles.
+ *
+ * @param {{ v0: {x:number,y:number,z:number}, v1: {x:number,y:number,z:number}, v2: {x:number,y:number,z:number} }} tri
+ * @returns {{ x: number, y: number, z: number }} Unit normal vector
+ */
+function triNormal(tri) {
+    var e1 = { x: tri.v1.x - tri.v0.x, y: tri.v1.y - tri.v0.y, z: tri.v1.z - tri.v0.z };
+    var e2 = { x: tri.v2.x - tri.v0.x, y: tri.v2.y - tri.v0.y, z: tri.v2.z - tri.v0.z };
+    var n = cross(e1, e2);
+    var len = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    if (len < 1e-15) return { x: 0, y: 0, z: 1 };
+    return { x: n.x / len, y: n.y / len, z: n.z / len };
+}
+
+/**
+ * @module intersect/triTriIntersection
+ *
+ * Moller triangle-triangle intersection test.
+ *
+ * Determines whether two triangles intersect and, if so, computes the
+ * line segment that lies on both triangles.  Based on the Moller (1997)
+ * separating-axis / interval-overlap method.
+ *
+ * Exports:
+ *  - triTriIntersection(triA, triB)          -- segment or null
+ *  - triTriIntersectionDetailed(triA, triB)  -- signed distances + segLen
+ *  - computeTriInterval(tri, lineDir, linePoint, d0, d1, d2)
+ *  - findLinePoint(nA, dA, nB, dB, lineDir)
+ */
+
+
+/**
+ * Moller triangle-triangle intersection.
+ *
+ * Projects each triangle onto the plane of the other, computes the
+ * parametric overlap of their crossing intervals on the plane-plane
+ * intersection line, and returns the resulting 3-D segment.
+ *
+ * @param {{ v0: Object, v1: Object, v2: Object }} triA
+ * @param {{ v0: Object, v1: Object, v2: Object }} triB
+ * @returns {{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number} } | null}
+ *          Intersection segment, or null when no intersection exists.
+ */
+function triTriIntersection(triA, triB) {
+    // Robust orientation: signed distances of triA vertices to plane(triB)
+    // orient3d returns a value proportional to 6× signed tetrahedron volume;
+    // its sign is guaranteed correct even for near-degenerate configurations.
+    var dA0 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v0.x, triA.v0.y, triA.v0.z);
+    var dA1 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v1.x, triA.v1.y, triA.v1.z);
+    var dA2 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v2.x, triA.v2.y, triA.v2.z);
+
+    // All on same side -> no intersection
+    if (dA0 > 0 && dA1 > 0 && dA2 > 0) return null;
+    if (dA0 < 0 && dA1 < 0 && dA2 < 0) return null;
+
+    // Robust orientation: signed distances of triB vertices to plane(triA)
+    var dB0 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v0.x, triB.v0.y, triB.v0.z);
+    var dB1 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v1.x, triB.v1.y, triB.v1.z);
+    var dB2 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v2.x, triB.v2.y, triB.v2.z);
+
+    // All on same side -> no intersection
+    if (dB0 > 0 && dB1 > 0 && dB2 > 0) return null;
+    if (dB0 < 0 && dB1 < 0 && dB2 < 0) return null;
+
+    // Float normals for geometric computation (line direction, projections)
+    var nA = triNormal(triA);
+    var nB = triNormal(triB);
+
+    // Near-parallel planes
+    var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
+    if (Math.abs(dotN) > 0.9999) return null;
+
+    // Intersection line direction
+    var lineDir = cross(nA, nB);
+    var lineDirLen = Math.sqrt(lineDir.x * lineDir.x + lineDir.y * lineDir.y + lineDir.z * lineDir.z);
+    if (lineDirLen < 1e-12) return null;
+    lineDir.x /= lineDirLen;
+    lineDir.y /= lineDirLen;
+    lineDir.z /= lineDirLen;
+
+    // Plane constants for line-point computation
+    var planeDA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
+    var planeDB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
+
+    // A point on the intersection line (needed for relative projection)
+    var linePoint = findLinePoint(nA, planeDA, nB, planeDB, lineDir);
+    if (!linePoint) return null;
+
+    // Project each triangle's crossing edges onto the line
+    var intervalA = computeTriInterval(triA, lineDir, linePoint, dA0, dA1, dA2);
+    if (!intervalA) return null;
+
+    var intervalB = computeTriInterval(triB, lineDir, linePoint, dB0, dB1, dB2);
+    if (!intervalB) return null;
+
+    // Overlap of intervals
+    var overlapMin = Math.max(intervalA.min, intervalB.min);
+    var overlapMax = Math.min(intervalA.max, intervalB.max);
+
+    if (overlapMin >= overlapMax - 1e-10) return null;
+
+    // Convert parametric overlap back to 3-D
+    var p0 = {
+        x: linePoint.x + lineDir.x * overlapMin,
+        y: linePoint.y + lineDir.y * overlapMin,
+        z: linePoint.z + lineDir.z * overlapMin
+    };
+    var p1 = {
+        x: linePoint.x + lineDir.x * overlapMax,
+        y: linePoint.y + lineDir.y * overlapMax,
+        z: linePoint.z + lineDir.z * overlapMax
+    };
+
+    // Reproject onto both triangle planes to eliminate floating-point drift.
+    // Solves for the minimal correction in the span of both normals so the
+    // point lies exactly on both planes: P' = P - alpha*nA - beta*nB
+    var denom = 1 - dotN * dotN;
+    if (Math.abs(denom) > 1e-15) {
+        var invD = 1 / denom;
+        var rA0 = nA.x * p0.x + nA.y * p0.y + nA.z * p0.z + planeDA;
+        var rB0 = nB.x * p0.x + nB.y * p0.y + nB.z * p0.z + planeDB;
+        var a0 = (rA0 - dotN * rB0) * invD;
+        var b0 = (rB0 - dotN * rA0) * invD;
+        p0.x -= a0 * nA.x + b0 * nB.x;
+        p0.y -= a0 * nA.y + b0 * nB.y;
+        p0.z -= a0 * nA.z + b0 * nB.z;
+
+        var rA1 = nA.x * p1.x + nA.y * p1.y + nA.z * p1.z + planeDA;
+        var rB1 = nB.x * p1.x + nB.y * p1.y + nB.z * p1.z + planeDB;
+        var a1 = (rA1 - dotN * rB1) * invD;
+        var b1 = (rB1 - dotN * rA1) * invD;
+        p1.x -= a1 * nA.x + b1 * nB.x;
+        p1.y -= a1 * nA.y + b1 * nB.y;
+        p1.z -= a1 * nA.z + b1 * nB.z;
+    }
+
+    // Skip degenerate segments
+    var dx = p0.x - p1.x, dy = p0.y - p1.y, dz = p0.z - p1.z;
+    if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 1e-8) return null;
+
+    return { p0: p0, p1: p1 };
+}
+
+/**
+ * Compute the parametric interval where a triangle crosses the
+ * plane-plane intersection line.
+ *
+ * For each triangle edge that straddles the opposing plane (sign change
+ * in the signed distances d0, d1, d2) the crossing point is projected
+ * onto `lineDir` relative to `linePoint`.  Vertices exactly on the plane
+ * are also projected.
+ *
+ * @param {{ v0: Object, v1: Object, v2: Object }} tri
+ * @param {{ x: number, y: number, z: number }} lineDir  - Unit direction of intersection line
+ * @param {{ x: number, y: number, z: number }} linePoint - Reference point on the line
+ * @param {number} d0 - Signed distance of tri.v0 to the opposing plane
+ * @param {number} d1 - Signed distance of tri.v1 to the opposing plane
+ * @param {number} d2 - Signed distance of tri.v2 to the opposing plane
+ * @returns {{ min: number, max: number } | null} Parametric interval, or null if fewer than 2 crossings
+ */
+function computeTriInterval(tri, lineDir, linePoint, d0, d1, d2) {
+    var verts = [tri.v0, tri.v1, tri.v2];
+    var dists = [d0, d1, d2];
+    var params = [];
+
+    // Find edges that cross the plane (sign change in distances)
+    for (var i = 0; i < 3; i++) {
+        var j = (i + 1) % 3;
+        var di = dists[i];
+        var dj = dists[j];
+
+        if ((di > 0 && dj < 0) || (di < 0 && dj > 0)) {
+            // Edge crosses the plane
+            var t = di / (di - dj);
+            var pt = {
+                x: verts[i].x + t * (verts[j].x - verts[i].x),
+                y: verts[i].y + t * (verts[j].y - verts[i].y),
+                z: verts[i].z + t * (verts[j].z - verts[i].z)
+            };
+            // Relative projection onto line (relative to linePoint for UTM precision)
+            var param = (pt.x - linePoint.x) * lineDir.x + (pt.y - linePoint.y) * lineDir.y + (pt.z - linePoint.z) * lineDir.z;
+            params.push(param);
+        } else if (di === 0) {
+            // Vertex on the plane -- relative projection
+            var param2 = (verts[i].x - linePoint.x) * lineDir.x + (verts[i].y - linePoint.y) * lineDir.y + (verts[i].z - linePoint.z) * lineDir.z;
+            params.push(param2);
+        }
+    }
+
+    if (params.length < 2) return null;
+
+    // Deduplicate very close values
+    params.sort(function (a, b) { return a - b; });
+
+    return { min: params[0], max: params[params.length - 1] };
+}
+
+/**
+ * Find a point on the intersection line of two planes.
+ *
+ * Sets the dominant component of `lineDir` to zero and solves the
+ * resulting 2x2 system via Cramer's rule.
+ *
+ * @param {{ x: number, y: number, z: number }} nA - Normal of plane A
+ * @param {number} dA - Plane constant for A  (nA . p + dA = 0)
+ * @param {{ x: number, y: number, z: number }} nB - Normal of plane B
+ * @param {number} dB - Plane constant for B
+ * @param {{ x: number, y: number, z: number }} lineDir - Direction of the intersection line
+ * @returns {{ x: number, y: number, z: number } | null}
+ */
+function findLinePoint(nA, dA, nB, dB, lineDir) {
+    // Find the dominant axis of lineDir to set it to 0
+    var ax = Math.abs(lineDir.x);
+    var ay = Math.abs(lineDir.y);
+    var az = Math.abs(lineDir.z);
+
+    var px, py, pz;
+
+    if (az >= ax && az >= ay) {
+        // Set z = 0, solve for x, y via Cramer's rule
+        var det = nA.x * nB.y - nA.y * nB.x;
+        if (Math.abs(det) < 1e-12) return null;
+        px = (-dA * nB.y + dB * nA.y) / det;
+        py = (nA.x * (-dB) - nB.x * (-dA)) / det;
+        pz = 0;
+    } else if (ay >= ax) {
+        // Set y = 0, solve for x, z via Cramer's rule
+        var det2 = nA.x * nB.z - nA.z * nB.x;
+        if (Math.abs(det2) < 1e-12) return null;
+        px = (-dA * nB.z + dB * nA.z) / det2;
+        py = 0;
+        pz = (nA.x * (-dB) - nB.x * (-dA)) / det2;
+    } else {
+        // Set x = 0, solve for y, z via Cramer's rule
+        var det3 = nA.y * nB.z - nA.z * nB.y;
+        if (Math.abs(det3) < 1e-12) return null;
+        px = 0;
+        py = (-dA * nB.z + dB * nA.z) / det3;
+        pz = (nA.y * (-dB) - nB.y * (-dA)) / det3;
+    }
+
+    return { x: px, y: py, z: pz };
+}
+
+/**
+ * @module intersect/spatialGrid
+ *
+ * Uniform spatial grid for accelerating triangle-pair intersection tests.
+ *
+ * Triangles are binned into 2-D (XY) grid cells based on their axis-aligned
+ * bounding boxes.  Querying the grid with a bounding box returns candidate
+ * triangle indices that share at least one cell, dramatically reducing the
+ * number of exact Moller tests required.
+ *
+ * Exports:
+ *  - buildSpatialGrid(tris, cellSize)
+ *  - queryGrid(grid, bb, cellSize)
+ *  - computeBBox(tris)
+ *  - triBBox(tri)
+ *  - bboxOverlap(a, b)
+ *  - estimateAvgEdge(tris)
+ */
+
+
+/**
+ * Build a 2-D spatial hash grid on arbitrary axes.
+ *
+ * Unlike {@link buildSpatialGrid} which always hashes on XY,
+ * this function accepts accessor functions to extract the two
+ * bucketing coordinates.  For example, pass `v => v.y, v => v.z`
+ * to build a YZ grid suitable for X-direction ray casting.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
+ * @param {number} cellSize - Width/height of each grid cell (world units)
+ * @param {function(Object): number} getA - Extracts first axis value from vertex
+ * @param {function(Object): number} getB - Extracts second axis value from vertex
+ * @returns {Object.<string, number[]>} Grid mapping cell keys to triangle index arrays
+ */
+function buildSpatialGridOnAxes(tris, cellSize, getA, getB) {
+	var grid = {};
+
+	for (var i = 0; i < tris.length; i++) {
+		var t = tris[i];
+		var verts = [t.v0, t.v1, t.v2];
+
+		var minA = Infinity, maxA = -Infinity;
+		var minB = Infinity, maxB = -Infinity;
+		for (var j = 0; j < 3; j++) {
+			var a = getA(verts[j]), b = getB(verts[j]);
+			if (a < minA) minA = a;
+			if (a > maxA) maxA = a;
+			if (b < minB) minB = b;
+			if (b > maxB) maxB = b;
+		}
+
+		var a0 = Math.floor(minA / cellSize);
+		var b0 = Math.floor(minB / cellSize);
+		var a1 = Math.floor(maxA / cellSize);
+		var b1 = Math.floor(maxB / cellSize);
+
+		for (var ga = a0; ga <= a1; ga++) {
+			for (var gb = b0; gb <= b1; gb++) {
+				var key = ga + "," + gb;
+				if (!grid[key]) grid[key] = [];
+				grid[key].push(i);
+			}
+		}
+	}
+
+	return grid;
+}
+
+/**
+ * Query a grid built by {@link buildSpatialGridOnAxes} for a single point.
+ *
+ * Returns the triangle indices stored in the cell containing the
+ * given (a, b) coordinates.  No deduplication is needed because
+ * point queries always hit exactly one cell.
+ *
+ * @param {Object.<string, number[]>} grid - Grid built by buildSpatialGridOnAxes
+ * @param {number} a - First axis coordinate of the query point
+ * @param {number} b - Second axis coordinate of the query point
+ * @param {number} cellSize - Same cell size used when building the grid
+ * @returns {number[]} Triangle indices (empty array if cell is empty)
+ */
+function queryGridOnAxes(grid, a, b, cellSize) {
+	var ga = Math.floor(a / cellSize);
+	var gb = Math.floor(b / cellSize);
+	var key = ga + "," + gb;
+	var cell = grid[key];
+	return cell ? cell : [];
+}
+
+/**
+ * Build a 2-D spatial hash grid from an array of triangles.
+ *
+ * Each triangle is inserted into every XY cell that its axis-aligned
+ * bounding box overlaps.  The grid is keyed by "cellX,cellY" strings
+ * and each bucket holds an array of triangle indices.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
+ * @param {number} cellSize - Width/height of each grid cell (world units)
+ * @returns {Object.<string, number[]>} Grid mapping cell keys to triangle index arrays
+ */
+function buildSpatialGrid(tris, cellSize) {
+    var grid = {};
+
+    for (var i = 0; i < tris.length; i++) {
+        var bb = triBBox(tris[i]);
+        var x0 = Math.floor(bb.minX / cellSize);
+        var y0 = Math.floor(bb.minY / cellSize);
+        var x1 = Math.floor(bb.maxX / cellSize);
+        var y1 = Math.floor(bb.maxY / cellSize);
+
+        for (var gx = x0; gx <= x1; gx++) {
+            for (var gy = y0; gy <= y1; gy++) {
+                var key = gx + "," + gy;
+                if (!grid[key]) grid[key] = [];
+                grid[key].push(i);
+            }
+        }
+    }
+
+    return grid;
+}
+
+/**
+ * Query the spatial grid for triangle indices whose cells overlap a
+ * given bounding box.
+ *
+ * Returned indices are de-duplicated (a triangle spanning multiple cells
+ * appears only once).
+ *
+ * @param {Object.<string, number[]>} grid - Grid built by {@link buildSpatialGrid}
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }} bb - Query bounding box
+ * @param {number} cellSize - Same cell size used when building the grid
+ * @returns {number[]} Unique triangle indices
+ */
+function queryGrid(grid, bb, cellSize) {
+    var x0 = Math.floor(bb.minX / cellSize);
+    var y0 = Math.floor(bb.minY / cellSize);
+    var x1 = Math.floor(bb.maxX / cellSize);
+    var y1 = Math.floor(bb.maxY / cellSize);
+
+    var seen = {};
+    var result = [];
+
+    for (var gx = x0; gx <= x1; gx++) {
+        for (var gy = y0; gy <= y1; gy++) {
+            var key = gx + "," + gy;
+            var cell = grid[key];
+            if (!cell) continue;
+            for (var c = 0; c < cell.length; c++) {
+                var idx = cell[c];
+                if (!seen[idx]) {
+                    seen[idx] = true;
+                    result.push(idx);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * Compute the axis-aligned bounding box of a single triangle.
+ *
+ * @param {{ v0: Object, v1: Object, v2: Object }} tri
+ * @returns {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }}
+ */
+function triBBox(tri) {
+    return {
+        minX: Math.min(tri.v0.x, tri.v1.x, tri.v2.x),
+        minY: Math.min(tri.v0.y, tri.v1.y, tri.v2.y),
+        minZ: Math.min(tri.v0.z, tri.v1.z, tri.v2.z),
+        maxX: Math.max(tri.v0.x, tri.v1.x, tri.v2.x),
+        maxY: Math.max(tri.v0.y, tri.v1.y, tri.v2.y),
+        maxZ: Math.max(tri.v0.z, tri.v1.z, tri.v2.z)
+    };
+}
+
+/**
+ * Estimate the average edge length of a triangle array by sampling
+ * up to the first 100 triangles.
+ *
+ * Useful for choosing a spatial grid cell size proportional to the
+ * mesh resolution.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} tris
+ * @returns {number} Average edge length (defaults to 1.0 for empty input)
+ */
+function estimateAvgEdge(tris) {
+    if (tris.length === 0) return 1.0;
+    var total = 0;
+    var count = Math.min(tris.length, 100);
+    for (var i = 0; i < count; i++) {
+        var t = tris[i];
+        total += dist3(t.v0, t.v1);
+        total += dist3(t.v1, t.v2);
+        total += dist3(t.v2, t.v0);
+    }
+    return total / (count * 3);
+}
+
+/**
+ * @module intersect/intersectMeshPair
+ *
+ * Compute all triangle-triangle intersection segments between two
+ * triangle meshes, accelerated by a uniform spatial grid.
+ *
+ * Exports:
+ *  - intersectMeshPair(trisA, trisB)        -- array of {p0, p1} segments
+ *  - intersectMeshPairTagged(trisA, trisB)  -- segments with source triangle indices
+ */
+
+
+/**
+ * Like {@link intersectMeshPair} but each returned segment carries the
+ * source triangle indices from mesh A and mesh B.
+ *
+ * Useful for boolean operations and classification that need to know
+ * which triangles produced each intersection segment.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisA - First mesh triangles
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB - Second mesh triangles
+ * @returns {Array<{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number}, idxA: number, idxB: number }>}
+ *          Tagged intersection segments (may be empty)
+ */
+function intersectMeshPairTagged(trisA, trisB) {
+    var segments = [];
+
+    var avgEdge = estimateAvgEdge(trisB);
+    var cellSize = Math.max(avgEdge * 2, 0.1);
+    var gridB = buildSpatialGrid(trisB, cellSize);
+
+    for (var i = 0; i < trisA.length; i++) {
+        var triA = trisA[i];
+        var bbA = triBBox(triA);
+        var candidates = queryGrid(gridB, bbA, cellSize);
+
+        for (var c = 0; c < candidates.length; c++) {
+            var j = candidates[c];
+            var triB = trisB[j];
+            var seg = triTriIntersection(triA, triB);
+            if (seg) {
+                segments.push({ p0: seg.p0, p1: seg.p1, idxA: i, idxB: j });
+            }
+        }
+    }
+
+    return segments;
 }
 
 const EPSILON = Math.pow(2, -52);
@@ -5205,6 +5710,12 @@ function splitMeshPair(soupA, soupB) {
 		return null;
 	}
 
+	// Step 0) Translate to origin for floating-point precision
+	var centroid = soupCentroid(soupA, soupB);
+	var cx = centroid.x, cy = centroid.y, cz = centroid.z;
+	soupA = translateSoup(soupA, -cx, -cy, -cz);
+	soupB = translateSoup(soupB, -cx, -cy, -cz);
+
 	// Step 1) Get tagged intersection segments
 	var taggedSegments = intersectMeshPairTagged(soupA, soupB);
 
@@ -5212,9 +5723,9 @@ function splitMeshPair(soupA, soupB) {
 		return {
 			groups: {
 				aInside: [],
-				aOutside: soupA.slice(),
+				aOutside: translateSoup(soupA, cx, cy, cz),
 				bInside: [],
-				bOutside: soupB.slice()
+				bOutside: translateSoup(soupB, cx, cy, cz)
 			},
 			segments: []
 		};
@@ -5276,12 +5787,13 @@ function splitMeshPair(soupA, soupB) {
 	if (groupsB.inside.length > 0) groupsB.inside = propagateNormals(groupsB.inside);
 	if (groupsB.outside.length > 0) groupsB.outside = propagateNormals(groupsB.outside);
 
+	// Translate results back to original coordinates
 	return {
 		groups: {
-			aInside: groupsA.inside,
-			aOutside: groupsA.outside,
-			bInside: groupsB.inside,
-			bOutside: groupsB.outside
+			aInside: translateSoup(groupsA.inside, cx, cy, cz),
+			aOutside: translateSoup(groupsA.outside, cx, cy, cz),
+			bInside: translateSoup(groupsB.inside, cx, cy, cz),
+			bOutside: translateSoup(groupsB.outside, cx, cy, cz)
 		},
 		segments: taggedSegments
 	};
