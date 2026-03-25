@@ -64,7 +64,7 @@ export { createVertexPool } from "./bms/bmsVertexPool.js";
 export { bmsIntersect } from "./bms/bmsIntersect.js";
 export { bmsSplit } from "./bms/bmsSplit.js";
 export { bmsChain } from "./bms/bmsChain.js";
-export { bmsClosePolylines } from "./bms/bmsClose.js";
+export { bmsClosePolylines, chainedOpenEdge } from "./bms/bmsClose.js";
 export { bmsClassify } from "./bms/bmsClassify.js";
 export { bmsBooleanOp } from "./bms/bmsBooleanOp.js";
 

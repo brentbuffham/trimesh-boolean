@@ -15,7 +15,7 @@ import {
 	triNormal,
 	dist3
 } from "../src/index.js";
-import { createCube, createFlatPatch, createSingleTriangle } from "./fixtures/meshes.js";
+import { createCube, createFlatPatch, createSingleTriangle, createPresplitA, createShell } from "./fixtures/meshes.js";
 
 describe("triNormal", function () {
 	it("returns Z-up for horizontal triangle", function () {
@@ -195,6 +195,30 @@ describe("chainSegments", function () {
 		];
 		var polylines = chainSegments(segments, 0.01);
 		expect(polylines.length).toBe(2);
+	});
+});
+
+describe("KAP: PRESPLIT-A vs SHELL", function () {
+	it("finds intersections between presplit block and shell", function () {
+		var meshA = createShell();
+		var meshB = createPresplitA();
+		expect(meshA.length).toBe(8565);
+		expect(meshB.length).toBe(56);
+		var segments = intersectMeshPair(meshA, meshB);
+		console.log("PRESPLIT-A vs SHELL intersection segments:", segments.length);
+		expect(segments.length).toBeGreaterThan(0);
+	});
+
+	it("returns tagged segments with source indices", function () {
+		var meshA = createShell();
+		var meshB = createPresplitA();
+		var segments = intersectMeshPairTagged(meshA, meshB);
+		console.log("PRESPLIT-A vs SHELL tagged segments:", segments.length);
+		expect(segments.length).toBeGreaterThan(0);
+		for (var i = 0; i < segments.length; i++) {
+			expect(typeof segments[i].idxA).toBe("number");
+			expect(typeof segments[i].idxB).toBe("number");
+		}
 	});
 });
 

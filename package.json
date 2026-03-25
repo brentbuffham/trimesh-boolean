@@ -1,6 +1,6 @@
 {
   "name": "trimesh-boolean",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Triangle mesh boolean operations — supports open surfaces, terrain intersection, and mesh repair",
   "type": "module",
   "main": "build/trimesh-boolean.umd.cjs",
@@ -50,7 +50,9 @@
   },
   "dependencies": {
     "@kninnug/constrainautor": "^4.0.1",
-    "delaunator": "^5.0.1"
+    "delaunator": "^5.0.1",
+    "robust-predicates": "^3.0.3",
+    "tiny-exact-math": "^0.0.1"
   },
   "peerDependencies": {
     "three": ">=0.150.0"
@@ -62,7 +64,7 @@
   },
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^16.0.0",
-    "@rollup/plugin-terser": "^0.4.4",
+    "@rollup/plugin-terser": "^1.0.0",
     "jszip": "^3.10.1",
     "rollup": "^4.0.0",
     "three": "^0.183.0",

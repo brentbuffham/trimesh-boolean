@@ -14,6 +14,7 @@
  *  - findLinePoint(nA, dA, nB, dB, lineDir)
  */
 
+import { orient3d } from "robust-predicates";
 import { triNormal } from "../normals/triNormal.js";
 import { cross } from "../util/math.js";
 
@@ -30,31 +31,29 @@ import { cross } from "../util/math.js";
  *          Intersection segment, or null when no intersection exists.
  */
 export function triTriIntersection(triA, triB) {
-    // Plane of triangle B
-    var nB = triNormal(triB);
-    var dB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
-
-    // Signed distances of triA vertices to plane B
-    var dA0 = nB.x * triA.v0.x + nB.y * triA.v0.y + nB.z * triA.v0.z + dB;
-    var dA1 = nB.x * triA.v1.x + nB.y * triA.v1.y + nB.z * triA.v1.z + dB;
-    var dA2 = nB.x * triA.v2.x + nB.y * triA.v2.y + nB.z * triA.v2.z + dB;
+    // Robust orientation: signed distances of triA vertices to plane(triB)
+    // orient3d returns a value proportional to 6× signed tetrahedron volume;
+    // its sign is guaranteed correct even for near-degenerate configurations.
+    var dA0 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v0.x, triA.v0.y, triA.v0.z);
+    var dA1 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v1.x, triA.v1.y, triA.v1.z);
+    var dA2 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v2.x, triA.v2.y, triA.v2.z);
 
     // All on same side -> no intersection
     if (dA0 > 0 && dA1 > 0 && dA2 > 0) return null;
     if (dA0 < 0 && dA1 < 0 && dA2 < 0) return null;
 
-    // Plane of triangle A
-    var nA = triNormal(triA);
-    var dA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
-
-    // Signed distances of triB vertices to plane A
-    var dB0 = nA.x * triB.v0.x + nA.y * triB.v0.y + nA.z * triB.v0.z + dA;
-    var dB1 = nA.x * triB.v1.x + nA.y * triB.v1.y + nA.z * triB.v1.z + dA;
-    var dB2 = nA.x * triB.v2.x + nA.y * triB.v2.y + nA.z * triB.v2.z + dA;
+    // Robust orientation: signed distances of triB vertices to plane(triA)
+    var dB0 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v0.x, triB.v0.y, triB.v0.z);
+    var dB1 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v1.x, triB.v1.y, triB.v1.z);
+    var dB2 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v2.x, triB.v2.y, triB.v2.z);
 
     // All on same side -> no intersection
     if (dB0 > 0 && dB1 > 0 && dB2 > 0) return null;
     if (dB0 < 0 && dB1 < 0 && dB2 < 0) return null;
+
+    // Float normals for geometric computation (line direction, projections)
+    var nA = triNormal(triA);
+    var nB = triNormal(triB);
 
     // Near-parallel planes
     var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
@@ -68,8 +67,12 @@ export function triTriIntersection(triA, triB) {
     lineDir.y /= lineDirLen;
     lineDir.z /= lineDirLen;
 
+    // Plane constants for line-point computation
+    var planeDA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
+    var planeDB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
+
     // A point on the intersection line (needed for relative projection)
-    var linePoint = findLinePoint(nA, dA, nB, dB, lineDir);
+    var linePoint = findLinePoint(nA, planeDA, nB, planeDB, lineDir);
     if (!linePoint) return null;
 
     // Project each triangle's crossing edges onto the line
@@ -97,6 +100,29 @@ export function triTriIntersection(triA, triB) {
         z: linePoint.z + lineDir.z * overlapMax
     };
 
+    // Reproject onto both triangle planes to eliminate floating-point drift.
+    // Solves for the minimal correction in the span of both normals so the
+    // point lies exactly on both planes: P' = P - alpha*nA - beta*nB
+    var denom = 1 - dotN * dotN;
+    if (Math.abs(denom) > 1e-15) {
+        var invD = 1 / denom;
+        var rA0 = nA.x * p0.x + nA.y * p0.y + nA.z * p0.z + planeDA;
+        var rB0 = nB.x * p0.x + nB.y * p0.y + nB.z * p0.z + planeDB;
+        var a0 = (rA0 - dotN * rB0) * invD;
+        var b0 = (rB0 - dotN * rA0) * invD;
+        p0.x -= a0 * nA.x + b0 * nB.x;
+        p0.y -= a0 * nA.y + b0 * nB.y;
+        p0.z -= a0 * nA.z + b0 * nB.z;
+
+        var rA1 = nA.x * p1.x + nA.y * p1.y + nA.z * p1.z + planeDA;
+        var rB1 = nB.x * p1.x + nB.y * p1.y + nB.z * p1.z + planeDB;
+        var a1 = (rA1 - dotN * rB1) * invD;
+        var b1 = (rB1 - dotN * rA1) * invD;
+        p1.x -= a1 * nA.x + b1 * nB.x;
+        p1.y -= a1 * nA.y + b1 * nB.y;
+        p1.z -= a1 * nA.z + b1 * nB.z;
+    }
+
     // Skip degenerate segments
     var dx = p0.x - p1.x, dy = p0.y - p1.y, dz = p0.z - p1.z;
     if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 1e-8) return null;
@@ -120,25 +146,24 @@ export function triTriIntersection(triA, triB) {
  *          segLen = parametric length of the intersection segment.
  */
 export function triTriIntersectionDetailed(triA, triB) {
-    var nB = triNormal(triB);
-    var dB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
-
-    var dA0 = nB.x * triA.v0.x + nB.y * triA.v0.y + nB.z * triA.v0.z + dB;
-    var dA1 = nB.x * triA.v1.x + nB.y * triA.v1.y + nB.z * triA.v1.z + dB;
-    var dA2 = nB.x * triA.v2.x + nB.y * triA.v2.y + nB.z * triA.v2.z + dB;
+    // Robust orientation: signed distances of triA vertices to plane(triB)
+    var dA0 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v0.x, triA.v0.y, triA.v0.z);
+    var dA1 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v1.x, triA.v1.y, triA.v1.z);
+    var dA2 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v2.x, triA.v2.y, triA.v2.z);
 
     if (dA0 > 0 && dA1 > 0 && dA2 > 0) return null;
     if (dA0 < 0 && dA1 < 0 && dA2 < 0) return null;
 
-    var nA = triNormal(triA);
-    var dA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
-
-    var dB0 = nA.x * triB.v0.x + nA.y * triB.v0.y + nA.z * triB.v0.z + dA;
-    var dB1 = nA.x * triB.v1.x + nA.y * triB.v1.y + nA.z * triB.v1.z + dA;
-    var dB2 = nA.x * triB.v2.x + nA.y * triB.v2.y + nA.z * triB.v2.z + dA;
+    // Robust orientation: signed distances of triB vertices to plane(triA)
+    var dB0 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v0.x, triB.v0.y, triB.v0.z);
+    var dB1 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v1.x, triB.v1.y, triB.v1.z);
+    var dB2 = orient3d(triA.v0.x, triA.v0.y, triA.v0.z, triA.v1.x, triA.v1.y, triA.v1.z, triA.v2.x, triA.v2.y, triA.v2.z, triB.v2.x, triB.v2.y, triB.v2.z);
 
     if (dB0 > 0 && dB1 > 0 && dB2 > 0) return null;
     if (dB0 < 0 && dB1 < 0 && dB2 < 0) return null;
+
+    var nA = triNormal(triA);
+    var nB = triNormal(triB);
 
     var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
     if (Math.abs(dotN) > 0.9999) return null;
@@ -148,7 +173,10 @@ export function triTriIntersectionDetailed(triA, triB) {
     if (lineDirLen < 1e-12) return null;
     lineDir.x /= lineDirLen; lineDir.y /= lineDirLen; lineDir.z /= lineDirLen;
 
-    var linePoint = findLinePoint(nA, dA, nB, dB, lineDir);
+    var planeDA = -(nA.x * triA.v0.x + nA.y * triA.v0.y + nA.z * triA.v0.z);
+    var planeDB = -(nB.x * triB.v0.x + nB.y * triB.v0.y + nB.z * triB.v0.z);
+
+    var linePoint = findLinePoint(nA, planeDA, nB, planeDB, lineDir);
     if (!linePoint) return null;
 
     var intervalA = computeTriInterval(triA, lineDir, linePoint, dA0, dA1, dA2);
@@ -210,7 +238,7 @@ export function computeTriInterval(tri, lineDir, linePoint, d0, d1, d2) {
             // Relative projection onto line (relative to linePoint for UTM precision)
             var param = (pt.x - linePoint.x) * lineDir.x + (pt.y - linePoint.y) * lineDir.y + (pt.z - linePoint.z) * lineDir.z;
             params.push(param);
-        } else if (Math.abs(di) < 1e-10) {
+        } else if (di === 0) {
             // Vertex on the plane -- relative projection
             var param2 = (verts[i].x - linePoint.x) * lineDir.x + (verts[i].y - linePoint.y) * lineDir.y + (verts[i].z - linePoint.z) * lineDir.z;
             params.push(param2);

@@ -75,10 +75,12 @@
 		<label>Mesh A:</label>
 		<select id="meshA">
 			<optgroup label="Kirra Surfaces">
-				<option value="kirra-terrain" selected>Kirra Terrain (11200 tris)</option>
+				<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
 				<option value="kirra-cup">Kirra Cup (16 tris)</option>
 				<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
 				<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
+				<option value="kirra-shell" selected>Shell (8565 tris)</option>
+				<option value="kirra-presplit-a">Presplit-A (56 tris)</option>
 			</optgroup>
 			<optgroup label="Procedural">
 				<option value="cube">Cube</option>
@@ -92,10 +94,12 @@
 		<label>Mesh B:</label>
 		<select id="meshB">
 			<optgroup label="Kirra Surfaces">
-				<option value="kirra-convoluted" selected>Kirra Convoluted (32 tris)</option>
+				<option value="kirra-convoluted">Kirra Convoluted (32 tris)</option>
 				<option value="kirra-cylinder">Kirra Cylinder (60 tris)</option>
 				<option value="kirra-terrain">Kirra Terrain (11200 tris)</option>
 				<option value="kirra-cup">Kirra Cup (16 tris)</option>
+				<option value="kirra-shell">Shell (8565 tris)</option>
+				<option value="kirra-presplit-a" selected>Presplit-A (56 tris)</option>
 			</optgroup>
 			<optgroup label="Procedural">
 				<option value="cube-offset">Cube (offset)</option>
@@ -347,6 +351,12 @@ if (kirraSurfaces.cup) {
 }
 if (kirraSurfaces.convoluted) {
 	meshCatalogue['kirra-convoluted'] = function() { return { soup: kirraSurfaces.convoluted.soup, label: "convoluted (32 tris, from Kirra)", closed: false }; };
+}
+if (kirraSurfaces.shell) {
+	meshCatalogue['kirra-shell'] = function() { return { soup: kirraSurfaces.shell.soup, label: kirraSurfaces.shell.label, closed: kirraSurfaces.shell.closed }; };
+}
+if (kirraSurfaces['presplit-a']) {
+	meshCatalogue['kirra-presplit-a'] = function() { return { soup: kirraSurfaces['presplit-a'].soup, label: kirraSurfaces['presplit-a'].label, closed: kirraSurfaces['presplit-a'].closed }; };
 }
 
 // ── KAP user import: keys "kap-user-0", "kap-user-1", ... ──
@@ -1167,6 +1177,7 @@ window.runOp = function(op) {
 				if (!bmsR) { statResult.innerHTML = 'No BMS result'; return; }
 				split = { groups: bmsR.groups, segments: bmsR.segments };
 				bmsCloseData = bmsR.meshEdgePolys;
+				window._meshEdgePolys = bmsCloseData;
 				window._componentWalks = bmsR.componentWalks || null;
 			} else {
 				split = splitMeshPair(dataA.soup, dataB.soup);
@@ -1277,6 +1288,16 @@ window.runOp = function(op) {
 				cEdge.material.opacity = 0.5;
 				resultGroup.add(cEdge);
 			}
+
+			if (showOpenEdges) {
+				var cOpen = soupToOpenEdgeLines(comps[ri].soup, 0xff0000, container);
+				if (cOpen) resultGroup.add(cOpen);
+			}
+
+			if (showNonManifold) {
+				var cNm = findNonManifoldTriangles(comps[ri].soup);
+				if (cNm) resultGroup.add(cNm);
+			}
 		}
 
 		// Step C6) Attach click handlers for eye toggles
@@ -1309,8 +1330,9 @@ window.runOp = function(op) {
 		var cIsectColors = [0xffdd00, 0xff8800, 0x88ff00, 0x00ff88, 0x0088ff, 0x8800ff, 0xff0088, 0xffffff];
 		var cWalkColors = [0xff00ff, 0x00ffff, 0xff6600, 0x00ff66, 0xff0066, 0x6600ff, 0x66ff00, 0x0066ff];
 
-		// Step C7) Global mesh edge poly overlay (yellow=intersection, magenta=walk)
-		// Controlled by master Intersect/Walks checkboxes
+		// Step C7) Mesh edge poly overlay (yellow=intersection, magenta=walk)
+		// Only shown when at least one component of that mesh is visible.
+		// Controlled by master Intersect/Walks checkboxes + component visibility.
 		try {
 			var meshEpData = bmsCloseData;
 			if (!meshEpData) {
@@ -1323,34 +1345,40 @@ window.runOp = function(op) {
 				}
 			}
 			if (meshEpData) {
-				var cIsectIdx = 0, cWalkIdx = 0;
+				// Check which meshes have at least one visible component
+				var meshHasVisible = { A: false, B: false };
+				for (var mvi = 0; mvi < comps.length; mvi++) {
+					if (comps[mvi].visible) {
+						meshHasVisible[comps[mvi].mesh] = true;
+					}
+				}
+
+				// The mesh edge poly is ONE continuous walk — all segments render
+				// together. "Walks" toggles the entire walk. "Intersect" toggles
+				// whether intersection portions use a different color or same as walk.
+				var meshIsectColors = [0xffdd00, 0x00ff88]; // A=yellow, B=green
+				var meshWalkColors = [0xff00ff, 0x00ffff];  // A=magenta, B=cyan
 				var cEpNames = ["A", "B"];
 				for (var cepi = 0; cepi < cEpNames.length; cepi++) {
+					if (!meshHasVisible[cEpNames[cepi]]) continue;
+
 					var cEpData = meshEpData[cEpNames[cepi]];
 					if (!cEpData || !cEpData.segments) continue;
+					if (!showWalks) continue; // entire walk toggled off
+
+					var meshIsectColor = meshIsectColors[cepi];
+					var meshWalkColor = meshWalkColors[cepi];
 					for (var cesi = 0; cesi < cEpData.segments.length; cesi++) {
 						var cepSeg = cEpData.segments[cesi];
-						if (cepSeg.type === "intersection") {
-							if (showIsect) {
-								var ciMat = new LineMaterial({
-									color: cIsectColors[cIsectIdx % cIsectColors.length], linewidth: 5,
-									worldUnits: false, dashed: false, depthTest: false, transparent: true,
-									resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
-								});
-								renderCPolyVerts(cepSeg.verts, ciMat);
-							}
-							cIsectIdx++;
-						} else {
-							if (showWalks) {
-								var cwMat = new LineMaterial({
-									color: cWalkColors[cWalkIdx % cWalkColors.length], linewidth: 4,
-									worldUnits: false, dashed: false, depthTest: false, transparent: true,
-									resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
-								});
-								renderCPolyVerts(cepSeg.verts, cwMat);
-							}
-							cWalkIdx++;
-						}
+						// Intersection segments: yellow/green if Intersect on, else same as walk color
+						var segColor = (cepSeg.type === "intersection" && showIsect) ? meshIsectColor : meshWalkColor;
+						var segWidth = (cepSeg.type === "intersection" && showIsect) ? 5 : 4;
+						var segMat = new LineMaterial({
+							color: segColor, linewidth: segWidth,
+							worldUnits: false, dashed: false, depthTest: false, transparent: true,
+							resolution: new THREE.Vector2(container.clientWidth, container.clientHeight)
+						});
+						renderCPolyVerts(cepSeg.verts, segMat);
 					}
 				}
 			}

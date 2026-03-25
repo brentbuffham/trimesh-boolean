@@ -10,6 +10,7 @@ import Delaunator from "delaunator";
 import Constrainautor from "@kninnug/constrainautor";
 import { vKey, distSq3 } from "../util/math.js";
 import { bmsChain } from "./bmsChain.js";
+import { determinant } from "tiny-exact-math";
 
 /**
  * Re-triangulate a crossed triangle using pool vertices as Steiner points.
@@ -75,7 +76,6 @@ function bmsRetriangulate(tri, segments) {
 	var seenIds = {};
 	var v0Key = vKey(tri.v0), v1Key = vKey(tri.v1), v2Key = vKey(tri.v2);
 
-	var BARY_TOL = -1e-4;
 	var validSteiner = []; // pool vertex objects
 
 	// pts array: indices 0,1,2 = original vertices, 3+ = pool vertices
@@ -89,6 +89,39 @@ function bmsRetriangulate(tri, segments) {
 	keyToIndex[v0Key] = 0;
 	keyToIndex[v1Key] = 1;
 	keyToIndex[v2Key] = 2;
+
+	// Exact point-in-triangle test using rational arithmetic.
+	// Projects ORIGINAL 3D coordinates to the best-fit 2D plane (XY, XZ, or YZ)
+	// to avoid float errors from the toLocal projection.
+	var anx = Math.abs(lnx), any = Math.abs(lny), anz = Math.abs(lnz);
+	var projA, projB; // which axes to use for 2D projection
+	if (anx >= any && anx >= anz) {
+		// Normal dominated by X → project to YZ plane
+		projA = function(v) { return v.y; };
+		projB = function(v) { return v.z; };
+	} else if (any >= anz) {
+		// Normal dominated by Y → project to XZ plane
+		projA = function(v) { return v.x; };
+		projB = function(v) { return v.z; };
+	} else {
+		// Normal dominated by Z → project to XY plane
+		projA = function(v) { return v.x; };
+		projB = function(v) { return v.y; };
+	}
+	var tv0 = { x: projA(tri.v0), y: projB(tri.v0) };
+	var tv1 = { x: projA(tri.v1), y: projB(tri.v1) };
+	var tv2 = { x: projA(tri.v2), y: projB(tri.v2) };
+
+	function exactPointInTri3D(p) {
+		var pp = { x: projA(p), y: projB(p) };
+		var d0 = determinant(tv0, tv1, pp);
+		var d1 = determinant(tv1, tv2, pp);
+		var d2 = determinant(tv2, tv0, pp);
+		var hasNeg = (d0 < 0) || (d1 < 0) || (d2 < 0);
+		var hasPos = (d0 > 0) || (d1 > 0) || (d2 > 0);
+		return !(hasNeg && hasPos);
+	}
+	var BARY_TOL = -1e-4; // float fallback tolerance
 
 	for (var s = 0; s < segments.length; s++) {
 		var seg = segments[s];
@@ -108,11 +141,21 @@ function bmsRetriangulate(tri, segments) {
 			if (p.id !== undefined && seenIds[p.id]) continue;
 			if (p.id !== undefined) seenIds[p.id] = true;
 
-			// Validate: must be inside the triangle (barycentric check)
-			var lp = toLocal(p);
-			var bc = baryCoords(lp[0], lp[1]);
-			if (bc[0] < BARY_TOL || bc[1] < BARY_TOL || bc[2] < BARY_TOL) {
-				continue;
+			// Validate: must be inside the triangle.
+			// Primary: exact rational test on original 3D coords (projected to best plane)
+			// Fallback: float barycentric with tolerance (handles near-edge Steiner points
+			// whose computed position drifted slightly outside due to float intersection math)
+			if (!exactPointInTri3D(p)) {
+				var lp = toLocal(p);
+				var bc = baryCoords(lp[0], lp[1]);
+				if (bc[0] < BARY_TOL || bc[1] < BARY_TOL || bc[2] < BARY_TOL) {
+					// Last chance: accept if the point is very close to an edge
+					// (within 1% of triangle size) — intersection drift
+					var minBC = Math.min(bc[0], bc[1], bc[2]);
+					if (minBC < -0.01) {
+						continue;
+					}
+				}
 			}
 
 			// Add pool vertex object directly (same reference!)

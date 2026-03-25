@@ -52,6 +52,88 @@ function classifyByBoundaryTopology(comp, megaSoup, boundaryVerts) {
 	return true;
 }
 
+// ── Walk-direction classification (open meshes, interior components) ──
+
+/**
+ * Build a map of walk edge directions from meshEdgePolys segments.
+ * Returns { edgeKey → { dx, dy, dz, mx, my, mz } }
+ */
+function buildWalkEdgeDirMap(meshEp) {
+	if (!meshEp || !meshEp.segments) return {};
+	var dirMap = {};
+	var prevVert = null;
+	for (var si = 0; si < meshEp.segments.length; si++) {
+		var seg = meshEp.segments[si];
+		for (var vi = 0; vi < seg.verts.length; vi++) {
+			var v = seg.verts[vi];
+			if (prevVert) {
+				var k0 = vKey(prevVert), k1 = vKey(v);
+				if (k0 !== k1) {
+					var ek = edgeKey(k0, k1);
+					dirMap[ek] = {
+						dx: v.x - prevVert.x, dy: v.y - prevVert.y, dz: v.z - prevVert.z,
+						mx: (prevVert.x + v.x) * 0.5, my: (prevVert.y + v.y) * 0.5, mz: (prevVert.z + v.z) * 0.5
+					};
+				}
+			}
+			prevVert = v;
+		}
+	}
+	return dirMap;
+}
+
+/**
+ * Classify an interior component (no boundary vertices) by checking which
+ * side of the barrier edges its triangles fall on, using the walk direction.
+ *
+ * Cross product of (walk direction) × (edge midpoint → centroid) dotted
+ * with the triangle surface normal: positive = LEFT = inside.
+ *
+ * @returns {boolean} true if inside
+ */
+function classifyByWalkDirection(comp, megaSoup, barrierEdges, edgeToTris, walkDirMap) {
+	var leftVotes = 0, rightVotes = 0;
+
+	for (var ti = 0; ti < comp.triIndices.length; ti++) {
+		var triIdx = comp.triIndices[ti];
+		var tri = megaSoup[triIdx];
+		var ks = [vKey(tri.v0), vKey(tri.v1), vKey(tri.v2)];
+		var vs = [tri.v0, tri.v1, tri.v2];
+
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var ek = edgeKey(ks[e], ks[ne]);
+			if (!barrierEdges[ek]) continue;
+
+			var dir = walkDirMap[ek];
+			if (!dir) continue;
+
+			// Triangle centroid
+			var cx = (vs[0].x + vs[1].x + vs[2].x) / 3 - dir.mx;
+			var cy = (vs[0].y + vs[1].y + vs[2].y) / 3 - dir.my;
+			var cz = (vs[0].z + vs[1].z + vs[2].z) / 3 - dir.mz;
+
+			// Triangle normal
+			var e1x = vs[1].x - vs[0].x, e1y = vs[1].y - vs[0].y, e1z = vs[1].z - vs[0].z;
+			var e2x = vs[2].x - vs[0].x, e2y = vs[2].y - vs[0].y, e2z = vs[2].z - vs[0].z;
+			var nx = e1y * e2z - e1z * e2y;
+			var ny = e1z * e2x - e1x * e2z;
+			var nz = e1x * e2y - e1y * e2x;
+
+			// Cross: walkDir × toCentroid, dot with normal
+			var cross_dot = (dir.dy * cz - dir.dz * cy) * nx +
+				(dir.dz * cx - dir.dx * cz) * ny +
+				(dir.dx * cy - dir.dy * cx) * nz;
+
+			if (cross_dot > 0) leftVotes++;
+			else if (cross_dot < 0) rightVotes++;
+		}
+	}
+
+	// LEFT = inside (positive cross product)
+	return leftVotes > rightVotes;
+}
+
 // ── Barrier-normal classification (closed meshes) ──
 
 function classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris) {
@@ -330,6 +412,13 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB, m
 	var isOpenA = Object.keys(boundaryVertsA).length > 0;
 	var isOpenB = Object.keys(boundaryVertsB).length > 0;
 
+	// ── Build walk edge direction maps for open meshes ──
+	var walkDirA = null, walkDirB = null;
+	if (meshEdgePolys) {
+		if (isOpenA && meshEdgePolys.A) walkDirA = buildWalkEdgeDirMap(meshEdgePolys.A);
+		if (isOpenB && meshEdgePolys.B) walkDirB = buildWalkEdgeDirMap(meshEdgePolys.B);
+	}
+
 	// ── Classify each component + extract boundary walks ──
 	var aInside = [], aOutside = [];
 	var bInside = [], bOutside = [];
@@ -353,7 +442,16 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB, m
 			var bverts = comp.mesh === "A" ? boundaryVertsA : boundaryVertsB;
 
 			if (isOpen) {
-				isInside = classifyByBoundaryTopology(comp, megaSoup, bverts);
+				// Open mesh: boundary touch = outside
+				// Interior components: barrier-normal (other mesh's normal at barrier)
+				var touchesBoundary = !classifyByBoundaryTopology(comp, megaSoup, bverts);
+				if (touchesBoundary) {
+					isInside = false;
+				} else {
+					// Interior component — use barrier-normal (works for both meshes
+					// because it checks the OTHER mesh's normal direction)
+					isInside = classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris);
+				}
 			} else {
 				isInside = classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris);
 			}
@@ -380,10 +478,10 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB, m
 		});
 	}
 
-	console.log("[BMS] Classification (hybrid): A: " + aInside.length + " inside, " +
-		aOutside.length + " outside" + (isOpenA ? " (topo)" : " (dot)") +
+	console.log("[BMS] Classification (walk): A: " + aInside.length + " inside, " +
+		aOutside.length + " outside" + (isOpenA ? " (walk)" : " (dot)") +
 		". B: " + bInside.length + " inside, " +
-		bOutside.length + " outside" + (isOpenB ? " (topo)" : " (dot)") +
+		bOutside.length + " outside" + (isOpenB ? " (walk)" : " (dot)") +
 		". Components: " + components.length + ".");
 
 	return {
