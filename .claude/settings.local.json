@@ -4,7 +4,14 @@
       "WebFetch(domain:github.com)",
       "WebSearch",
       "WebFetch(domain:doc.cgal.org)",
-      "WebFetch(domain:deepwiki.com)"
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(npm run:*)",
+      "Bash(npm test:*)",
+      "Bash(npm version:*)",
+      "Bash(gh run:*)"
     ]
   }
 }
