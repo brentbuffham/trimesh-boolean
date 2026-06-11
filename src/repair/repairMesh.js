@@ -19,6 +19,7 @@ import { capBoundaryLoopsSequential, extractBoundaryLoops } from "./boundaryLoop
 import { cleanCrossingTriangles } from "./cleanCrossing.js";
 import { removeOverlappingTriangles } from "./removeOverlapping.js";
 import { forceCloseIndexedMesh } from "./forceClose.js";
+import { closeSolid } from "./closeSolid.js";
 
 /**
  * High-level mesh repair entry point. Runs a configurable pipeline
@@ -26,7 +27,12 @@ import { forceCloseIndexedMesh } from "./forceClose.js";
  *
  * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soup - Triangle soup
  * @param {Object} [config]
- * @param {string}  [config.closeMode="none"] - "none" | "weld" | "stitch"
+ * @param {string}  [config.closeMode="none"] - "none" | "weld" | "stitch" | "closeSolid"
+ *        "closeSolid" bypasses the entire pipeline and runs closeSolid():
+ *        weld + pinhole-loop capping only — no dedup, no T-junction splitting,
+ *        no proximity stitching, no force-close. Returns honest diagnostics.
+ * @param {number}  [config.maxCapLoopVerts=32] - closeSolid only: loops larger
+ *        than this are reported as structural openings, never capped
  * @param {number}  [config.snapTolerance=0] - Weld tolerance in metres
  * @param {number}  [config.stitchTolerance=1.0] - Stitch tolerance
  * @param {boolean} [config.removeDegenerate=true] - Remove degenerate/sliver triangles
@@ -55,6 +61,27 @@ export async function repairMesh(soup, config, onProgress) {
 	// Yield to event loop so UI can update
 	function yieldUI() {
 		return new Promise(function (r) { setTimeout(r, 0); });
+	}
+
+	// closeSolid mode: PURE path. The boolean output (especially BMS, whose
+	// shared vertex pool guarantees coincident seams) must not be "repaired" —
+	// dedup/T-junction/stitch/force-close can manufacture geometry. Weld, cap
+	// pinholes locally, report the truth.
+	if (closeMode === "closeSolid") {
+		progress("Closing solid (weld + pinhole caps)...");
+		await yieldUI();
+		var closed = closeSolid(soup, {
+			snapTolerance: snapTol,
+			maxCapLoopVerts: config.maxCapLoopVerts
+		});
+		progress(closed.diagnostics.closed
+			? "Closed: 0 open edges."
+			: "NOT closed: " + closed.diagnostics.openEdges + " open edges in " +
+			closed.diagnostics.openLoops + " loop(s)" +
+			(closed.diagnostics.skippedLargeLoops.length
+				? " — large structural opening(s): " + closed.diagnostics.skippedLargeLoops.join(", ") + " verts"
+				: ""));
+		return closed;
 	}
 
 	// Step 1: Deduplicate seam vertices

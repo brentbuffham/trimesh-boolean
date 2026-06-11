@@ -53,7 +53,7 @@ export interface BooleanResult {
 }
 
 export interface RepairConfig {
-	closeMode?: "none" | "weld" | "stitch";
+	closeMode?: "none" | "weld" | "stitch" | "closeSolid";
 	snapTolerance?: number;
 	stitchTolerance?: number;
 	removeDegenerate?: boolean;
@@ -61,12 +61,40 @@ export interface RepairConfig {
 	cleanCrossings?: boolean;
 	removeOverlapping?: boolean;
 	overlapTolerance?: number;
+	/** closeSolid only: loops larger than this are reported, never capped */
+	maxCapLoopVerts?: number;
 }
 
 export interface RepairResult {
 	soup: TriangleSoup;
 	points: Vertex[];
 	triangles: WeldedTriangle[];
+	/** Present when closeMode === "closeSolid" */
+	diagnostics?: CloseSolidDiagnostics;
+}
+
+export interface CloseSolidDiagnostics {
+	closed: boolean;
+	openEdges: number;
+	openLoops: number;
+	loopSizes: number[];
+	skippedLargeLoops: number[];
+	cappedLoops: number;
+	capTriangles: number;
+	nonManifoldEdges: number;
+}
+
+export interface CloseSolidOptions {
+	snapTolerance?: number;
+	maxCapLoopVerts?: number;
+	maxPasses?: number;
+}
+
+export interface CloseSolidResult {
+	soup: TriangleSoup;
+	points: Vertex[];
+	triangles: WeldedTriangle[];
+	diagnostics: CloseSolidDiagnostics;
 }
 
 export interface EdgeStats {
@@ -199,6 +227,25 @@ export function cleanCrossingTriangles(tris: TriangleSoup): TriangleSoup;
 export function removeOverlappingTriangles(tris: TriangleSoup, tolerance?: number): TriangleSoup;
 export function forceCloseIndexedMesh(points: Vertex[], triangles: WeldedTriangle[]): WeldedMesh;
 export function fillOpenEdgeLoops(soup: TriangleSoup, tolerance?: number): TriangleSoup;
+export function closeSolid(soup: TriangleSoup, options?: CloseSolidOptions): CloseSolidResult;
+
+export interface OrientSolidDiagnostics {
+	components: number;
+	flippedForCoherence: number;
+	componentsFlippedForDirection: number;
+	windingViolationsBefore: number;
+	windingViolationsAfter: number;
+	signedVolume: number;
+	closedComponents: number;
+	openComponents: number;
+}
+
+export interface OrientSolidResult {
+	soup: TriangleSoup;
+	diagnostics: OrientSolidDiagnostics;
+}
+
+export function orientSolid(soup: TriangleSoup, options?: { outward?: boolean }): OrientSolidResult;
 export function weldBoundaryVertices(tris: TriangleSoup, tolerance: number): TriangleSoup;
 
 // ── Mesh format conversion aliases ──

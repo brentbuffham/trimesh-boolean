@@ -42,11 +42,13 @@ export { cleanCrossingTriangles } from "./repair/cleanCrossing.js";
 export { removeOverlappingTriangles } from "./repair/removeOverlapping.js";
 export { forceCloseIndexedMesh } from "./repair/forceClose.js";
 export { fillOpenEdgeLoops } from "./repair/fillOpenLoops.js";
+export { closeSolid } from "./repair/closeSolid.js";
 export { weldBoundaryVertices } from "./repair/weldBoundary.js";
 
 // ── Normals ──
 export { triNormal } from "./normals/triNormal.js";
 export { ensureZUpNormals, flipAllNormals } from "./normals/alignNormals.js";
+export { orientSolid } from "./normals/orientSolid.js";
 export {
 	classifyNormalDirection,
 	computeSignedVolume,

@@ -21,7 +21,6 @@ import { cleanCrossingTriangles } from "./cleanCrossing.js";
  */
 export function extractBoundaryLoops(tris) {
 	var edgeMap = {};
-	var halfEdges = {};
 
 	for (var i = 0; i < tris.length; i++) {
 		var tri = tris[i];
@@ -35,7 +34,6 @@ export function extractBoundaryLoops(tris) {
 				edgeMap[ek] = { count: 0, v0: verts[e], v1: verts[ne], k0: keys[e], k1: keys[ne] };
 			}
 			edgeMap[ek].count++;
-			halfEdges[keys[e] + "|" + keys[ne]] = true;
 		}
 	}
 
@@ -53,61 +51,104 @@ export function extractBoundaryLoops(tris) {
 		return { loops: [], boundaryEdgeCount: 0, overSharedEdgeCount: overSharedCount };
 	}
 
-	var adj = {};
-
+	// Chain boundary edges into loops by consuming UNDIRECTED edges.
+	//
+	// Two hard-won lessons baked in here (2026-06-11, real mine data):
+	// 1. Don't mark VERTICES used — a pinch vertex where 2+ loops meet
+	//    (degree 4, 6, ...) gets consumed by the first loop and the other
+	//    petals can never close. Consume EDGES; a pinch vertex then resolves
+	//    into separate simple loops naturally.
+	// 2. Don't walk by triangle WINDING — merged boolean results can contain
+	//    regions of opposite winding (user-flipped normals, mixed Z+/Z-
+	//    regions), so directed half-edges dead-end. Chain undirected edges;
+	//    triangulateLoop() corrects cap orientation via the Newell normal.
+	var edges = [];
+	var incident = {}; // vertex key -> array of edge indices
 	for (var b = 0; b < boundaryEdges.length; b++) {
 		var be = boundaryEdges[b];
-		var fromKey, toKey, fromVert, toVert;
-		if (halfEdges[be.k0 + "|" + be.k1]) {
-			fromKey = be.k1; toKey = be.k0;
-			fromVert = be.v1; toVert = be.v0;
-		} else {
-			fromKey = be.k0; toKey = be.k1;
-			fromVert = be.v0; toVert = be.v1;
-		}
-		if (!adj[fromKey]) adj[fromKey] = [];
-		adj[fromKey].push({ key: toKey, vertex: toVert, fromVertex: fromVert });
+		edges.push({ k0: be.k0, k1: be.k1, v0: be.v0, v1: be.v1, used: false });
+		(incident[be.k0] = incident[be.k0] || []).push(b);
+		(incident[be.k1] = incident[be.k1] || []).push(b);
 	}
 
-	var used = {};
 	var loops = [];
 
-	for (var startKey in adj) {
-		if (used[startKey]) continue;
+	for (var startEi = 0; startEi < edges.length; startEi++) {
+		if (edges[startEi].used) continue;
 
-		var loop = [];
-		var currentKey = startKey;
-		var safety = boundaryEdges.length + 1;
+		var first = edges[startEi];
+		first.used = true;
+		var startKey = first.k0;
+		var loop = [first.v0];
+		var curKey = first.k1;
+		var curVert = first.v1;
+		var safety = edges.length + 1;
+		var closed = false;
 
 		while (safety-- > 0) {
-			if (used[currentKey]) break;
-			used[currentKey] = true;
+			if (curKey === startKey) { closed = true; break; }
+			loop.push(curVert);
 
-			var neighbors = adj[currentKey];
-			if (!neighbors || neighbors.length === 0) break;
-
+			var inc = incident[curKey];
 			var next = null;
-			for (var n = 0; n < neighbors.length; n++) {
-				if (!used[neighbors[n].key] || (neighbors[n].key === startKey && loop.length > 2)) {
-					next = neighbors[n];
-					break;
-				}
+			for (var ii = 0; ii < (inc ? inc.length : 0); ii++) {
+				var cand = edges[inc[ii]];
+				if (cand.used) continue;
+				next = cand;
+				break;
 			}
+			if (!next) break; // dead end — dangling chain, not closable
 
-			if (!next) break;
-
-			loop.push(next.fromVertex);
-			currentKey = next.key;
-
-			if (currentKey === startKey) break;
+			next.used = true;
+			if (next.k0 === curKey) { curKey = next.k1; curVert = next.v1; }
+			else { curKey = next.k0; curVert = next.v0; }
 		}
 
-		if (loop.length >= 3) {
-			loops.push(loop);
+		if (closed && loop.length >= 3) {
+			// A walk that routes THROUGH a pinch vertex merges two petals into one
+			// self-touching loop (repeated vertex). Downstream CDT (Constrainautor)
+			// infinite-loops on duplicate points, so split into simple loops here.
+			var simple = _splitSelfTouching(loop);
+			for (var si = 0; si < simple.length; si++) {
+				loops.push(simple[si]);
+			}
 		}
 	}
 
 	return { loops: loops, boundaryEdgeCount: boundaryEdges.length, overSharedEdgeCount: overSharedCount };
+}
+
+/**
+ * Split a closed (cyclic) vertex loop containing repeated vertices into
+ * simple sub-loops. Standard stack-based cycle extraction: when a vertex key
+ * repeats, the segment between its two occurrences is one simple loop.
+ * @private
+ * @param {Array<{x,y,z}>} loop
+ * @returns {Array<Array<{x,y,z}>>} Simple loops (each >= 3 verts, no repeats)
+ */
+function _splitSelfTouching(loop) {
+	var out = [];
+	var stack = [];
+	var indexOf = {};
+
+	for (var i = 0; i < loop.length; i++) {
+		var k = vKey(loop[i]);
+		if (indexOf[k] !== undefined) {
+			var at = indexOf[k];
+			var cycle = stack.splice(at);
+			for (var c = 0; c < cycle.length; c++) delete indexOf[cycle[c].k];
+			if (cycle.length >= 3) {
+				out.push(cycle.map(function (e) { return e.v; }));
+			}
+		}
+		indexOf[k] = stack.length;
+		stack.push({ k: k, v: loop[i] });
+	}
+
+	if (stack.length >= 3) {
+		out.push(stack.map(function (e) { return e.v; }));
+	}
+	return out;
 }
 
 /**
