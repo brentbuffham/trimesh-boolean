@@ -116,10 +116,105 @@ The `mergeSmallComponents(comps, threshold)` function merges components below a 
 ---
 
 ### 14. Fill Gaps Not Selectable
-**Status:** OPEN (planned for v0.3.1)
+**Status:** RESOLVED (v0.5.7) by `closeSolid()`
 **Severity:** Medium — `fillOpenEdgeLoops` fills ALL open loops, but for terrain surfaces some open edges are intentional boundaries
 
-The current `fillOpenEdgeLoops(soup)` finds and fills all closed loops of open edges. For user-picked custom surfaces (e.g., a terrain subset), some open edges are intentional and should not be filled. The library needs a two-step API: detect loops, then fill only selected ones.
+The original `fillOpenEdgeLoops(soup)` finds and fills all closed loops of open edges. For user-picked custom surfaces (e.g., a terrain subset), some open edges are intentional and should not be filled.
+
+**Resolution:** `closeSolid()` (v0.5.7) resolves this with a size threshold instead of a selection UI: pinhole loops (≤ `maxCapLoopVerts` vertices, default 32) are capped locally with triangles drawn on the loop itself; large structural openings are never capped and are reported in `diagnostics.skippedLargeLoops`. `repairMesh({ closeMode: "closeSolid" })` runs this as a pure path, bypassing dedup/T-junction/stitch/force-close entirely.
+
+**Affected files:** `src/repair/closeSolid.js` (new), `src/repair/repairMesh.js`
+
+---
+
+### 15. extractBoundaryLoops: Triangular Pinholes Undetectable
+**Status:** RESOLVED (v0.5.7)
+**Severity:** High — the most common small hole (a single missing triangle) was invisible to the loop detector
+
+An off-by-one (`loop.length > 2` where the closing vertex wasn't yet counted) made 3-vertex boundary loops undetectable. This is likely why the forceClose "safety net" existed at all: pinholes couldn't be capped properly, so the pipeline carpet-bombed instead.
+
+**Affected file:** `src/repair/boundaryLoops.js`
+
+---
+
+### 16. extractBoundaryLoops: Pinch-Vertex Petals Lost
+**Status:** RESOLVED (v0.5.7)
+**Severity:** Medium
+
+A pinch vertex where 2+ boundary loops meet (boundary degree 4, 6, ...) was consumed by the first loop walked, so the remaining petals could never close. Fixed by consuming **edges** instead of marking vertices used — a pinch vertex now resolves naturally into separate simple loops. Covered by the all-pairs pinch regression test.
+
+**Affected file:** `src/repair/boundaryLoops.js`
+
+---
+
+### 17. extractBoundaryLoops: Mixed-Winding Walks Dead-End
+**Status:** RESOLVED (v0.5.7)
+**Severity:** Medium
+
+Merged boolean results can contain regions of opposite winding (user-flipped normals, mixed Z+/Z− regions), so walking directed half-edges dead-ended mid-loop. Fixed by chaining **undirected** edges; `triangulateLoop()` corrects cap orientation afterwards via the Newell normal.
+
+**Affected file:** `src/repair/boundaryLoops.js`
+
+---
+
+### 18. Constrainautor Infinite Loop (Frozen Tabs)
+**Status:** RESOLVED (v0.5.7)
+**Severity:** High — froze the browser tab
+
+Degenerate loop input could send the Constrainautor CDT path into an infinite loop. Guarded in the `boundaryLoops` rewrite.
+
+**Affected file:** `src/repair/boundaryLoops.js`
+
+---
+
+### 19. Checkerboard Normals on Watertight Results
+**Status:** RESOLVED (v0.5.7) by `orientSolid()`
+**Severity:** High — every volume tool reported a different wrong number
+
+A boolean result built from inputs with no winding convention (e.g., survey DXF 3DFACE entities) was watertight but had 16k+ winding violations — a checkerboard of flipped patches. Per-triangle In/Out heuristics could not fix it.
+
+**Resolution:** `orientSolid()` (v0.5.7) fixes it topologically: (1) coherence flood-fill across shared manifold edges, flipping neighbours so adjacent triangles traverse their shared edge in opposite directions — no centroid rays, no Z-up guessing; (2) one signed-volume direction decision per connected component (closed components only; open sheets are left as-coherent). Propagation deliberately does not cross non-manifold edges.
+
+**Affected file:** `src/normals/orientSolid.js` (new)
+
+---
+
+### 20. Hybrid Classifier: Flood Fill Leaks Through Barrier Gaps (Silent Partition Failure)
+**Status:** OPEN — planned fix is the v0.5.8 auto-classifier
+**Severity:** High — the result looks plausible but a mesh silently never partitions
+
+**Observed (2026-06-11, real mine data):** a ~190k-triangle survey vs an extruded prism split correctly all session only with the heffalump classifier forced ON. With it off, the hybrid classifier's flood fill leaked through a gap in the intersection barrier and the survey never partitioned — 3 components instead of 4, with no error or warning.
+
+**Detection (cheap post-conditions the library does not yet check):**
+1. **Partition check** — if intersection segments exist, BOTH meshes must have non-empty inside AND outside groups. One line of counting catches this exact failure.
+2. **Chain-closure check** — every intersection polyline must close or end on a mesh boundary; a chain dying mid-mesh is a guaranteed flood leak.
+3. **Barrier constraint** — triangles sharing a segment edge must classify to opposite sides.
+
+**Planned resolution (v0.5.8 — `bmsBooleanOp({ classifier: "auto" })` as default):**
+1. **Census** inputs: closed / open-one-loop / messy (via `shouldUseHeffalump`-style checks; messy → heffalump + auto pre-repair)
+2. Run hybrid, then **verify the post-conditions above**
+3. On any failure, **re-run ONLY the classification stage with heffalump on the existing mega soup** — intersection/pool/split are classifier-independent, so this is milliseconds, not a re-split
+4. **Report which path ran per mesh** in the result, e.g. `classifier: { A: "hybrid", B: "heffalump (barrier gap)" }`
+
+End state: callers (e.g. Kirra's TrimeshBooleanDialog) can delete their Force Heffalump / pre-repair checkboxes — no user should ever have to know what a "heffalump" is.
+
+**Workaround:** force the heffalump classifier explicitly for messy real-world meshes, or check `shouldUseHeffalump(trisA, trisB)` before classifying.
+
+**Affected files:** `src/bms/bmsClassify.js`, `src/bms/bmsBooleanOp.js`
+
+---
+
+### 21. Fan-Sliver Re-Triangulation on Extreme Triangle/Chain Size Mismatch
+**Status:** OPEN
+**Severity:** Medium — results are correct but contain numerically nasty needle slivers that misclassify and survive as visible "spurs"
+
+**Observed (2026-06-11, real mine data):** splitting a giant triangle (e.g. a 50 m extruded-prism wall face) against a dense intersection chain (~3,954 segments vs a 190k-triangle survey) makes `fanTriangulate()` emit dozens of needle slivers per face — fans from the wall's far corners to every chain point. They tile the face *correctly* but per-triangle classification of needles is coin-flip (one real split shattered into 15 regions with 64/232-triangle fragments), and they survive into results as visually obvious spurs.
+
+**Planned fix:** in `src/boolean/splitTriangles.js`, when (chain points on face) / (face edge length) ratio exceeds a threshold, re-triangulate the split face with a proper CDT constrained by the chain — with Steiner points along the LONG edges to bound aspect ratio — instead of corner fans.
+
+**Workaround:** subdivide oversized faces at creation so they are comparable in size to the other mesh's triangles (e.g. subdivide extrusion walls), and clean up stray fragments with downstream reclassify tools.
+
+**Affected file:** `src/boolean/splitTriangles.js`
 
 ---
 
