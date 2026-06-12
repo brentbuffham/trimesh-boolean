@@ -116,11 +116,32 @@ export function verifyBmsClassification(megaSoup, triSides, segments, polylines,
 	}
 
 	// ── Check 2: chain closure ──
+	// An endpoint is fine if its chain closes on itself, it sits on a mesh
+	// open boundary, or ANOTHER chain's endpoint shares the same pool vertex
+	// (bmsChain splits sharp bends and junctions into separate polylines —
+	// the chain network continues there). Only a truly DANGLING endpoint
+	// (none of the above) indicates a barrier gap / missed intersection.
 	if (polylines && polylines.length > 0) {
 		var boundaryEdges = collectBoundaryEdges(trisA).concat(collectBoundaryEdges(trisB));
 		var avgEdge = Math.max(estimateAvgEdge(trisA), estimateAvgEdge(trisB));
 		var tol = Math.max(avgEdge * 0.01, 1e-9);
-		var openMidMesh = 0;
+
+		function endpointKey(p) {
+			return p.id !== undefined ? "id:" + p.id : vKey(p);
+		}
+
+		// Count how many chain endpoints land on each pool vertex
+		var endpointCount = {};
+		for (var ci2 = 0; ci2 < polylines.length; ci2++) {
+			var cpl = polylines[ci2];
+			if (!cpl || cpl.length < 2) continue;
+			var ka = endpointKey(cpl[0]);
+			var kb = endpointKey(cpl[cpl.length - 1]);
+			endpointCount[ka] = (endpointCount[ka] || 0) + 1;
+			endpointCount[kb] = (endpointCount[kb] || 0) + 1;
+		}
+
+		var dangling = 0;
 
 		for (var pi = 0; pi < polylines.length; pi++) {
 			var pl = polylines[pi];
@@ -133,17 +154,21 @@ export function verifyBmsClassification(megaSoup, triSides, segments, polylines,
 				dist3(first, last) <= tol * 0.1;
 			if (closed) continue;
 
-			var firstOk = nearAnyBoundaryEdge(first, boundaryEdges, tol);
-			var lastOk = nearAnyBoundaryEdge(last, boundaryEdges, tol);
-			if (!firstOk || !lastOk) openMidMesh++;
+			var ends = [first, last];
+			for (var ei2 = 0; ei2 < 2; ei2++) {
+				var ep = ends[ei2];
+				if (endpointCount[endpointKey(ep)] >= 2) continue; // joins another chain
+				if (nearAnyBoundaryEdge(ep, boundaryEdges, tol)) continue;
+				dangling++;
+			}
 		}
 
-		if (openMidMesh > 0) {
+		if (dangling > 0) {
 			failures.push({
 				check: "chainClosure",
 				mesh: "both",
-				detail: openMidMesh + " of " + polylines.length +
-					" intersection chain(s) end mid-mesh (not closed, not on a mesh boundary)"
+				detail: dangling + " dangling intersection chain endpoint(s) mid-mesh " +
+					"(not closed, not on a mesh boundary, not joining another chain)"
 			});
 		}
 	}

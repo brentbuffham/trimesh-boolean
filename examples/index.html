@@ -94,7 +94,7 @@
 <div id="app">
 	<div id="toolbar">
 		<div class="toolbar-row">
-			<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.6</span></h1>
+			<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.8</span></h1>
 			<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
 			<div class="sep"></div>
 			<button type="button" id="btn-kap-import" title="Load triangulated surfaces from a Kirra .kap file">Import KAP</button>
@@ -155,6 +155,11 @@
 			<button id="btn-custom" onclick="runOp('custom')">Custom</button>
 		</div>
 		<div class="toolbar-row">
+			<label>Classifier:</label>
+			<button id="btn-classifier-auto" onclick="setClassifier('auto')" title="Census inputs, run hybrid, verify partition / chain-closure / barrier post-conditions, fall back to heffalump on the existing mega soup on any failure (v0.5.8 default)">Auto</button>
+			<button id="btn-classifier-hybrid" onclick="setClassifier('hybrid')" title="Always hybrid (boundary topology + barrier-normal), no verification — legacy behaviour">Hybrid</button>
+			<button id="btn-classifier-heffalump" onclick="setClassifier('heffalump')" title="Always heffalump (per-triangle ray-cast / nearest-surface) — the old Force Heffalump checkbox">Heffalump</button>
+			<div class="sep"></div>
 			<label><input type="checkbox" id="chk-prerepair" checked> Fix T-Junctions</label>
 			<label><input type="checkbox" id="chk-fill-gaps"> Fill Gaps (Fan)</label>
 			<label><input type="checkbox" id="chk-force-close"> Force Close (Idx)</label>
@@ -765,6 +770,7 @@ var showWalks = true;
 
 // Pipeline architecture: cache the split result, operations reuse it
 var activePipeline = "bms";   // "orig" | "bms"
+var classifierMode = "auto";   // "auto" | "hybrid" | "heffalump" (v0.5.8)
 var cachedSplit = null;        // { groups, segments, meshEdgePolys, componentWalks, rawPolylines, pool }
 var cachedMeshKey = null;      // invalidation key: meshA + meshB + pipeline + fixes
 var useBmsPipe = false;        // legacy compat (mapped from activePipeline)
@@ -773,7 +779,7 @@ var useHeffalump = false;      // legacy compat
 function getCacheKey() {
 	var selA = document.getElementById('meshA').value;
 	var selB = document.getElementById('meshB').value;
-	return selA + '|' + selB + '|' + activePipeline + '|' + preRepair + '|' + forceCloseWithFan + '|' + forceCloseIndexed;
+	return selA + '|' + selB + '|' + activePipeline + '|' + classifierMode + '|' + preRepair + '|' + forceCloseWithFan + '|' + forceCloseIndexed;
 }
 
 function invalidateCache() { cachedSplit = null; cachedMeshKey = null; }
@@ -783,6 +789,38 @@ window.setPipeline = function(pipe) {
 	invalidateCache();
 	runOp(pipe === 'bms' ? 'bms-splits' : 'splits');
 };
+
+window.setClassifier = function(mode) {
+	classifierMode = mode;
+	invalidateCache();
+	// Re-run the current view with the new classification strategy
+	skipFit = true; runOp(currentOp || 'bms-splits'); skipFit = false;
+};
+
+/**
+ * HTML block for the v0.5.8 classifier report + verification verdict.
+ */
+function classifierReportHtml(bmsResult) {
+	if (!bmsResult || !bmsResult.classifier) return '';
+	var lines = [];
+	lines.push('Classifier A: <b>' + bmsResult.classifier.A + '</b>');
+	lines.push('Classifier B: <b>' + bmsResult.classifier.B + '</b>');
+	var v = bmsResult.verification;
+	if (v) {
+		if (v.ok) {
+			lines.push('<span style="color:#39B54A">Verified: partition &#10003; chain-closure &#10003; barrier &#10003;</span>');
+		} else {
+			lines.push('<span class="highlight">Verification FAILED &rarr; heffalump fallback</span>');
+			for (var fi = 0; fi < v.failures.length; fi++) {
+				var f = v.failures[fi];
+				lines.push('&nbsp;&nbsp;&bull; ' + f.check + ' [' + f.mesh + ']: ' + f.detail);
+			}
+		}
+	} else if (classifierMode === 'hybrid') {
+		lines.push('<span style="color:#888">No verification (legacy hybrid mode)</span>');
+	}
+	return lines.join('<br>');
+}
 
 var skipFit = false;
 window.runOp = function(op) {
@@ -797,6 +835,9 @@ window.runOp = function(op) {
 		// Pipeline button
 		if (activePipeline === 'bms') document.getElementById('btn-bms-splits').classList.add('active');
 		else if (activePipeline === 'orig') document.getElementById('btn-splits').classList.add('active');
+		// Classifier button
+		var _clBtn = document.getElementById('btn-classifier-' + classifierMode);
+		if (_clBtn) _clBtn.classList.add('active');
 		// Operation button
 		var _opBtn = document.getElementById('btn-' + currentOp);
 		if (_opBtn) _opBtn.classList.add('active');
@@ -1104,7 +1145,7 @@ window.runOp = function(op) {
 
 			var t0bms = performance.now();
 			try {
-				cachedSplit = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
+				cachedSplit = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair, classifier: classifierMode });
 				cachedMeshKey = cacheKey;
 			} catch(e) {
 				statResult.innerHTML = '<span class="highlight">BMS error: ' + e.message + '</span>';
@@ -1231,6 +1272,8 @@ window.runOp = function(op) {
 		bmsLines.push('Segments: <b>' + bmsResult.segments.length + '</b>');
 		bmsLines.push('Polylines: <b>' + (bmsResult.polylines ? bmsResult.polylines.length : 0) + '</b>');
 		if (bmsResult.pool) bmsLines.push('Pool vertices: <b>' + bmsResult.pool.size() + '</b>');
+		var clRep = classifierReportHtml(bmsResult);
+		if (clRep) { bmsLines.push(''); bmsLines.push(clRep); }
 		bmsLines.push('');
 		var blegendHtml = '';
 		for (var bli = 0; bli < bmsGroupEntries.length; bli++) {
@@ -1290,7 +1333,7 @@ window.runOp = function(op) {
 
 				try {
 					if (activePipeline === "bms") {
-						var bmsR = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
+						var bmsR = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair, classifier: classifierMode });
 						if (!bmsR) { statResult.innerHTML = 'No BMS result'; return; }
 						cachedSplit = bmsR;
 					} else {
@@ -1383,7 +1426,10 @@ window.runOp = function(op) {
 		// Step C3) Build the component list in the Result panel
 		var pipeLabel = activePipeline === 'bms' ? '<span style="color:#39B54A">BMS-Heffalump</span>' : 'Orig Pipe';
 		var compHtml = '<b>Custom splits</b> — ' + pipeLabel + ' (' + dtc + ' ms)<br>' +
-			comps.length + ' components from ' + (split.segments ? split.segments.length : 0) + ' segments<hr>';
+			comps.length + ' components from ' + (split.segments ? split.segments.length : 0) + ' segments';
+		var compClRep = activePipeline === 'bms' ? classifierReportHtml(cachedSplit) : '';
+		if (compClRep) compHtml += '<br>' + compClRep;
+		compHtml += '<hr>';
 		compHtml += '<ul class="comp-list" id="comp-list">';
 		for (var li = 0; li < comps.length; li++) {
 			var lc = comps[li];
@@ -1552,7 +1598,7 @@ window.runOp = function(op) {
 			// Use BMS pipeline — run or reuse cache
 			var cacheKey = getCacheKey();
 			if (!cachedSplit || cachedMeshKey !== cacheKey) {
-				var bmsR = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair });
+				var bmsR = bmsBooleanOp(dataA.soup, dataB.soup, null, { preRepair: preRepair, classifier: classifierMode });
 				if (bmsR) {
 					cachedSplit = bmsR;
 					cachedMeshKey = cacheKey;
@@ -1671,6 +1717,9 @@ window.runOp = function(op) {
 	}
 
 	statResult.innerHTML = resultStats(result, op, dt);
+	if (activePipeline === 'bms' && cachedSplit && cachedSplit.classifier) {
+		statResult.innerHTML += '<br>' + classifierReportHtml(cachedSplit);
+	}
 	if (postNotes.length > 0) {
 		statResult.innerHTML += '<br><span class="highlight">' + postNotes.join('<br>') + '</span>';
 	}

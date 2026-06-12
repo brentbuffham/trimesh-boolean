@@ -120,6 +120,19 @@ describe("verifyBmsClassification", function () {
 		expect(r.failures.some(function (f) { return f.check === "chainClosure"; })).toBe(true);
 	});
 
+	it("accepts open chains that join other chains end-to-end (bmsChain splits sharp bends)", function () {
+		var megaSoup = [triA, triA2, triB, triB2];
+		var sides = [1, -1, 1, -1];
+		// Two chains forming a loop together: each endpoint pairs with the
+		// other chain's endpoint — none are dangling (cube-vs-cube case)
+		var j1 = { x: 40, y: 40, z: 40, id: 10 };
+		var j2 = { x: 44, y: 40, z: 40, id: 13 };
+		var chainTop = [j1, { x: 42, y: 42, z: 40, id: 11 }, j2];
+		var chainBottom = [j2, { x: 42, y: 38, z: 40, id: 12 }, j1];
+		var r = verifyBmsClassification(megaSoup, sides, someSegment, [chainTop, chainBottom], inputA, inputB);
+		expect(r.ok).toBe(true);
+	});
+
 	it("accepts a closed intersection chain", function () {
 		var megaSoup = [triA, triA2, triB, triB2];
 		var sides = [1, -1, 1, -1];
