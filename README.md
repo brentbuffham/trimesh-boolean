@@ -200,9 +200,14 @@ The BMS (Brent's Mega Soup) pipeline is a boolean pipeline designed for open sur
 Run the full BMS pipeline. Both meshes are split into a unified mega soup where intersection points are shared by object reference (not string matching).
 
 - **operation**: `"subtract"` | `"union"` | `"intersect"` — omit to get groups only
-- **options.preRepair**: `boolean` — resolve T-junctions + weld before splitting
+- **options.classifier** (v0.5.8): `"auto"` (default) | `"hybrid"` | `"heffalump"`. Auto censuses the inputs (non-manifold → heffalump + pre-repair), runs the hybrid classifier, verifies partition / chain-closure / barrier post-conditions, and on any failure re-runs only the classification stage with the heffalump on the existing mega soup. No caller needs to know what a heffalump is anymore.
+- **options.preRepair**: `boolean` — resolve T-junctions + weld before splitting. Default: auto-enabled when the census finds non-manifold edges.
 - **options.tolerance**: `number` — vertex pool merge tolerance
-- **Returns**: `{ groups, segments, polylines, meshEdgePolys, componentWalks, megaSoup, pool }`
+- **Returns**: `{ groups, segments, polylines, meshEdgePolys, componentWalks, megaSoup, pool, classifier, verification }` — `classifier` reports the path per mesh (e.g. `{ A: "hybrid", B: "heffalump (partition)" }`); `verification` carries the post-condition check results
+
+### `verifyBmsClassification(megaSoup, triSides, segments, polylines, trisA, trisB)` (v0.5.8)
+
+The auto-classifier's post-condition checks, exported standalone: partition (both meshes must have non-empty inside AND outside groups when intersection segments exist), chain closure (every intersection polyline closes or ends on a mesh boundary), and barrier constraint (same-mesh triangles sharing a barrier edge classify to opposite sides). Returns `{ ok, failures, counts }`.
 
 ### `bmsIntersect(trisA, trisB, options?)`
 
@@ -211,6 +216,8 @@ Compute intersections with a shared vertex pool. Every segment endpoint goes thr
 ### `bmsSplit(trisA, trisB, intersectResult)`
 
 Re-triangulate crossed triangles using fan triangulation with pool vertex references. Produces a tagged mega soup: `[{v0, v1, v2, mesh: "A"|"B", origIdx}]`.
+
+Since v0.5.8 a **fan-sliver guard** detects extreme triangle/chain size mismatches (a giant face crossed by a dense intersection chain) and switches that face from corner fans to a chain-constrained CDT seeded with graded interior Steiner points — bounded aspect ratio, no needle "spurs", and no T-junctions (the added points are strictly interior).
 
 ### `bmsChain(segments)`
 

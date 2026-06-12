@@ -68,6 +68,7 @@ export { bmsSplit } from "./bms/bmsSplit.js";
 export { bmsChain } from "./bms/bmsChain.js";
 export { bmsClosePolylines, chainedOpenEdge } from "./bms/bmsClose.js";
 export { bmsClassify } from "./bms/bmsClassify.js";
+export { verifyBmsClassification } from "./bms/bmsVerify.js";
 export { heffalumpClassify, shouldUseHeffalump, reclassifyTriangles, reclassifyAtPoint, reclassifyRegion } from "./bms/heffalumpClassify.js";
 export { bmsBooleanOp } from "./bms/bmsBooleanOp.js";
 

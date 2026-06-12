@@ -11,6 +11,7 @@ import Constrainautor from "@kninnug/constrainautor";
 import { vKey, distSq3 } from "../util/math.js";
 import { bmsChain } from "./bmsChain.js";
 import { determinant } from "tiny-exact-math";
+import { needsSliverGuard, interiorLatticePoints } from "../boolean/sliverGuard.js";
 
 /**
  * Re-triangulate a crossed triangle using pool vertices as Steiner points.
@@ -18,9 +19,11 @@ import { determinant } from "tiny-exact-math";
  *
  * @param {{ v0: Object, v1: Object, v2: Object }} tri - Parent triangle
  * @param {Array<{ p0: PoolVertex, p1: PoolVertex }>} segments - Intersection segments with pool vertices
+ * @param {Array<{x,y,z}>} [extraPoints] - Additional interior Steiner points
+ *        (sliver guard lattice) — plain vertices, not pool vertices
  * @returns {Array<{ v0: Object, v1: Object, v2: Object }>} Sub-triangles
  */
-function bmsRetriangulate(tri, segments) {
+function bmsRetriangulate(tri, segments, extraPoints) {
 	if (!segments || segments.length === 0) return [tri];
 
 	// -- Step 1: Build local 2D coordinate frame on triangle plane --
@@ -167,7 +170,14 @@ function bmsRetriangulate(tri, segments) {
 		}
 	}
 
-	if (validSteiner.length === 0) return [tri];
+	if (validSteiner.length === 0 && (!extraPoints || extraPoints.length === 0)) return [tri];
+
+	// Sliver guard lattice points: strictly interior, no pool identity needed
+	if (extraPoints) {
+		for (var xp = 0; xp < extraPoints.length; xp++) {
+			pts.push(extraPoints[xp]);
+		}
+	}
 
 	// -- Step 3: Project all to local 2D, run Delaunator --
 	var n = pts.length;
@@ -275,6 +285,17 @@ function bmsFanTriangulate(tri, segments) {
 		return bmsRetriangulate(tri, segments);
 	}
 	var chain = chains[0];
+
+	// Sliver guard (KNOWN_ISSUES #21): a giant triangle against a dense chain
+	// would fan into needle slivers from the far corners to every chain point.
+	// Re-triangulate with chain-constrained CDT + interior Steiner lattice
+	// instead — bounded aspect ratio, no T-junctions (lattice is interior-only).
+	if (needsSliverGuard(tri, chain)) {
+		var lattice = interiorLatticePoints(tri, chain);
+		if (lattice.length > 0) {
+			return bmsRetriangulate(tri, segments, lattice);
+		}
+	}
 
 	// Step 2: Build local 2D frame for barycentric classification
 	var verts = [tri.v0, tri.v1, tri.v2];

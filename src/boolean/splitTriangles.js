@@ -11,6 +11,7 @@ import Delaunator from "delaunator";
 import Constrainautor from "@kninnug/constrainautor";
 import { chainSegments } from "../intersect/chainSegments.js";
 import { distSq3 } from "../util/math.js";
+import { needsSliverGuard, interiorLatticePoints } from "./sliverGuard.js";
 
 /**
  * Re-triangulate a crossed triangle by inserting all intersection segment
@@ -28,9 +29,10 @@ import { distSq3 } from "../util/math.js";
  *
  * @param {{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }} tri - Parent triangle
  * @param {Array<{ p0: {x,y,z}, p1: {x,y,z} }>} segments - Intersection segments crossing this triangle
+ * @param {Array<{x,y,z}>} [extraPoints] - Additional interior Steiner points (sliver guard lattice)
  * @returns {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} Sub-triangles, or [tri] on failure
  */
-export function retriangulateWithSteinerPoints(tri, segments) {
+export function retriangulateWithSteinerPoints(tri, segments, extraPoints) {
 	if (!segments || segments.length === 0) return [tri];
 
 	// -- Step 1: Build local 2D coordinate frame on triangle plane --
@@ -136,7 +138,7 @@ export function retriangulateWithSteinerPoints(tri, segments) {
 		}
 	}
 
-	if (validSteiner.length === 0) return [tri];
+	if (validSteiner.length === 0 && (!extraPoints || extraPoints.length === 0)) return [tri];
 
 	// Build pts array: indices 0,1,2 = original vertices, 3+ = Steiner
 	var pts = [
@@ -147,6 +149,13 @@ export function retriangulateWithSteinerPoints(tri, segments) {
 	for (var vi = 0; vi < validSteiner.length; vi++) {
 		keyToIndex[validSteiner[vi].key] = pts.length;
 		pts.push(validSteiner[vi]);
+	}
+
+	// Sliver guard lattice points: strictly interior, never constrained
+	if (extraPoints) {
+		for (var xp = 0; xp < extraPoints.length; xp++) {
+			pts.push(extraPoints[xp]);
+		}
 	}
 
 	// -- Step 3: Project all to local 2D, run Delaunator --
@@ -262,6 +271,17 @@ export function fanTriangulate(tri, segments) {
 		return retriangulateWithSteinerPoints(tri, segments);
 	}
 	var chain = chains[0];
+
+	// Sliver guard (KNOWN_ISSUES #21): a giant triangle against a dense chain
+	// would fan into needle slivers from the far corners to every chain point.
+	// Re-triangulate with chain-constrained CDT + interior Steiner lattice
+	// instead — bounded aspect ratio, no T-junctions (lattice is interior-only).
+	if (needsSliverGuard(tri, chain)) {
+		var latticePts = interiorLatticePoints(tri, chain);
+		if (latticePts.length > 0) {
+			return retriangulateWithSteinerPoints(tri, segments, latticePts);
+		}
+	}
 
 	// Step 3) Build local 2D frame for barycentric classification
 	var verts = [tri.v0, tri.v1, tri.v2];

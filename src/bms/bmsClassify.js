@@ -423,6 +423,7 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB, m
 	var aInside = [], aOutside = [];
 	var bInside = [], bOutside = [];
 	var componentWalks = [];
+	var triSides = new Int8Array(n); // 1 = inside, -1 = outside (per megaSoup index)
 
 	for (var gi = 0; gi < components.length; gi++) {
 		var comp = components[gi];
@@ -465,6 +466,7 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB, m
 
 		for (var oi = 0; oi < comp.triIndices.length; oi++) {
 			var ot = megaSoup[comp.triIndices[oi]];
+			triSides[comp.triIndices[oi]] = isInside ? 1 : -1;
 			target.push({ v0: ot.v0, v1: ot.v1, v2: ot.v2 });
 		}
 
@@ -486,6 +488,7 @@ export function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB, m
 
 	return {
 		aInside: aInside, aOutside: aOutside, bInside: bInside, bOutside: bOutside,
-		componentWalks: componentWalks
+		componentWalks: componentWalks,
+		triSides: triSides
 	};
 }

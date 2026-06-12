@@ -180,7 +180,7 @@ A boolean result built from inputs with no winding convention (e.g., survey DXF 
 ---
 
 ### 20. Hybrid Classifier: Flood Fill Leaks Through Barrier Gaps (Silent Partition Failure)
-**Status:** OPEN — planned fix is the v0.5.8 auto-classifier
+**Status:** RESOLVED (v0.5.8) by the auto-classifier
 **Severity:** High — the result looks plausible but a mesh silently never partitions
 
 **Observed (2026-06-11, real mine data):** a ~190k-triangle survey vs an extruded prism split correctly all session only with the heffalump classifier forced ON. With it off, the hybrid classifier's flood fill leaked through a gap in the intersection barrier and the survey never partitioned — 3 components instead of 4, with no error or warning.
@@ -190,31 +190,33 @@ A boolean result built from inputs with no winding convention (e.g., survey DXF 
 2. **Chain-closure check** — every intersection polyline must close or end on a mesh boundary; a chain dying mid-mesh is a guaranteed flood leak.
 3. **Barrier constraint** — triangles sharing a segment edge must classify to opposite sides.
 
-**Planned resolution (v0.5.8 — `bmsBooleanOp({ classifier: "auto" })` as default):**
-1. **Census** inputs: closed / open-one-loop / messy (via `shouldUseHeffalump`-style checks; messy → heffalump + auto pre-repair)
-2. Run hybrid, then **verify the post-conditions above**
-3. On any failure, **re-run ONLY the classification stage with heffalump on the existing mega soup** — intersection/pool/split are classifier-independent, so this is milliseconds, not a re-split
-4. **Report which path ran per mesh** in the result, e.g. `classifier: { A: "hybrid", B: "heffalump (barrier gap)" }`
+**Resolution (v0.5.8 — `classifier: "auto"` is the default):**
+1. **Census** inputs: non-manifold (messy) inputs route straight to the heffalump with auto pre-repair (unless the caller set `preRepair` explicitly)
+2. Hybrid runs, then **the post-conditions above are verified** by the new `verifyBmsClassification()` (`src/bms/bmsVerify.js`, exported); `bmsClassify` now also returns per-triangle `triSides` for the barrier check
+3. On any failure, **ONLY the classification stage re-runs with the heffalump on the existing mega soup** — intersection/pool/split are classifier-independent, so this is milliseconds, not a re-split. Fallback is per-mesh: a mesh whose checks passed keeps its hybrid groups
+4. **The result reports which path ran per mesh**: `result.classifier` (e.g. `{ A: "hybrid", B: "heffalump (partition)" }`) and `result.verification` carries the check details. `classifier: "hybrid"` preserves legacy behaviour (no verification); `classifier: "heffalump"` / the deprecated `forceHeffalump` flag force the heffalump
 
 End state: callers (e.g. Kirra's TrimeshBooleanDialog) can delete their Force Heffalump / pre-repair checkboxes — no user should ever have to know what a "heffalump" is.
 
-**Workaround:** force the heffalump classifier explicitly for messy real-world meshes, or check `shouldUseHeffalump(trisA, trisB)` before classifying.
-
-**Affected files:** `src/bms/bmsClassify.js`, `src/bms/bmsBooleanOp.js`
+**Affected files:** `src/bms/bmsVerify.js` (new), `src/bms/bmsBooleanOp.js`, `src/bms/bmsClassify.js`
 
 ---
 
 ### 21. Fan-Sliver Re-Triangulation on Extreme Triangle/Chain Size Mismatch
-**Status:** OPEN
+**Status:** RESOLVED (v0.5.8) by the fan-sliver guard
 **Severity:** Medium — results are correct but contain numerically nasty needle slivers that misclassify and survive as visible "spurs"
 
 **Observed (2026-06-11, real mine data):** splitting a giant triangle (e.g. a 50 m extruded-prism wall face) against a dense intersection chain (~3,954 segments vs a 190k-triangle survey) makes `fanTriangulate()` emit dozens of needle slivers per face — fans from the wall's far corners to every chain point. They tile the face *correctly* but per-triangle classification of needles is coin-flip (one real split shattered into 15 regions with 64/232-triangle fragments), and they survive into results as visually obvious spurs.
 
-**Planned fix:** in `src/boolean/splitTriangles.js`, when (chain points on face) / (face edge length) ratio exceeds a threshold, re-triangulate the split face with a proper CDT constrained by the chain — with Steiner points along the LONG edges to bound aspect ratio — instead of corner fans.
+**Resolution (v0.5.8):** new `src/boolean/sliverGuard.js`, wired into BOTH fan triangulators (`bmsSplit.js` `bmsFanTriangulate` and `splitTriangles.js` `fanTriangulate`). When the parent triangle's max edge ≥ 32× the chain point spacing (and the chain has ≥ 16 points), the face skips corner fans and re-triangulates with the chain-constrained CDT seeded with interior Steiner points:
+- **Graded offset rows along the chain** at doubling distances (1.5×, 3×, 6×... chain spacing, subsampled to stay isotropic) — these fill the corridor beside the chain and the thin wedges where the chain crosses a parent edge, which a fixed lattice cannot reach
+- **A hexagonal interior lattice** (spacing ≈ 4× chain spacing, capped at 1024 points) covering the rest of the face
 
-**Workaround:** subdivide oversized faces at creation so they are comparable in size to the other mesh's triangles (e.g. subdivide extrusion walls), and clean up stray fragments with downstream reclassify tools.
+All added points are **strictly interior** (clearance from parent edges), so edge conformity with neighbouring uncrossed triangles is preserved — no T-junctions. On the 100 m floor vs 0.5 m fence regression: needle count (normalised aspect > 100) went from ~160 to **0**, and >95% of intersection segments survive as constraint edges in the output.
 
-**Affected file:** `src/boolean/splitTriangles.js`
+**Workaround (no longer needed):** subdivide oversized faces at creation so they are comparable in size to the other mesh's triangles.
+
+**Affected files:** `src/boolean/sliverGuard.js` (new), `src/bms/bmsSplit.js`, `src/boolean/splitTriangles.js`
 
 ---
 

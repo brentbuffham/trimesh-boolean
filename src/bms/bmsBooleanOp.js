@@ -16,6 +16,7 @@ import { bmsSplit } from "./bmsSplit.js";
 import { bmsChain } from "./bmsChain.js";
 import { bmsClosePolylines } from "./bmsClose.js";
 import { bmsClassify } from "./bmsClassify.js";
+import { verifyBmsClassification } from "./bmsVerify.js";
 import { heffalumpClassify, shouldUseHeffalump } from "./heffalumpClassify.js";
 import { estimateAvgEdge } from "../intersect/spatialGrid.js";
 import { soupCentroid, translateSoup } from "../util/math.js";
@@ -49,14 +50,26 @@ function flipSoup(tris) {
  * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soupB
  * @param {"subtract"|"union"|"intersect"} [operation] - If omitted, returns split groups only
  * @param {Object} [options]
- * @param {boolean} [options.preRepair] - Resolve T-junctions + weld boundary before splitting
+ * @param {"auto"|"hybrid"|"heffalump"} [options.classifier="auto"] - Classification strategy.
+ *        "auto" (default): census the inputs (messy → heffalump + auto pre-repair),
+ *        run the hybrid classifier, verify partition / chain-closure / barrier
+ *        post-conditions, and on any failure re-run ONLY the classification stage
+ *        with the heffalump on the existing mega soup (milliseconds, no re-split).
+ *        "hybrid": always hybrid, no verification (legacy behaviour).
+ *        "heffalump": always heffalump.
+ * @param {boolean} [options.forceHeffalump] - Deprecated alias for classifier: "heffalump"
+ * @param {boolean} [options.preRepair] - Resolve T-junctions + weld boundary before
+ *        splitting. Default: auto-enabled when classifier is "auto" and the census
+ *        finds non-manifold edges.
  * @param {number} [options.tolerance] - Vertex pool tolerance
  * @returns {{
  *   groups: { aInside: Array, aOutside: Array, bInside: Array, bOutside: Array },
  *   segments: Array,
  *   polylines: Array,
  *   megaSoup: Array,
- *   pool: Object
+ *   pool: Object,
+ *   classifier: { A: string, B: string },
+ *   verification: { ok: boolean, failures: Array }|null
  * }|null}
  */
 export function bmsBooleanOp(soupA, soupB, operation, options) {
@@ -65,6 +78,7 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	}
 
 	var opts = options || {};
+	var classifierMode = opts.classifier || (opts.forceHeffalump ? "heffalump" : "auto");
 
 	// Step 0) Translate to origin for floating-point precision (UTM, mine coords)
 	var centroid = soupCentroid(soupA, soupB);
@@ -72,8 +86,15 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	soupA = translateSoup(soupA, -cx, -cy, -cz);
 	soupB = translateSoup(soupB, -cx, -cy, -cz);
 
-	// Step 1) Optional pre-repair
-	if (opts.preRepair) {
+	// Census: messy inputs (non-manifold edges) go straight to the heffalump,
+	// and in auto mode they also get pre-repair unless the caller said otherwise.
+	var censusMessy = classifierMode !== "hybrid" && shouldUseHeffalump(soupA, soupB);
+	var doPreRepair = opts.preRepair !== undefined
+		? !!opts.preRepair
+		: (classifierMode === "auto" && censusMessy);
+
+	// Step 1) Pre-repair (explicit, or auto-enabled by the census)
+	if (doPreRepair) {
 		var tolA = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupA) * 0.01;
 		var tolB = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupB) * 0.01;
 		soupA = resolveTJunctions(soupA, tolA, 3);
@@ -97,7 +118,9 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 			segments: [],
 			polylines: [],
 			megaSoup: null,
-			pool: isect.pool
+			pool: isect.pool,
+			classifier: { A: "none (no intersection)", B: "none (no intersection)" },
+			verification: null
 		};
 	}
 
@@ -110,22 +133,36 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	// Step 5) Choose classification path.
 	// Clean meshes → ige walk (boundary topology + barrier-normal hybrid)
 	// Defective meshes → heffalump (barrier-only, no boundary needed)
-	var useHeffalump = opts.forceHeffalump || shouldUseHeffalump(soupA, soupB);
+	// Auto mode runs hybrid, verifies post-conditions, and falls back to the
+	// heffalump on the EXISTING mega soup if any check fails — intersection,
+	// pool, and split are classifier-independent, so this is cheap.
+	var useHeffalump = classifierMode === "heffalump" ||
+		(classifierMode === "auto" && censusMessy);
 
+	var classifierReport = { A: "hybrid", B: "hybrid" };
+	var verification = null;
 	var closedPolylines, meshEdgePolys, classifyResult;
 
-	if (useHeffalump) {
-		// The heffalump doesn't need boundary walks for classification,
-		// but we still build meshEdgePolys from raw chains for visualization
-		// (so Intersect/Walks toggles work in all views).
+	// meshEdgePolys built from raw chains — used by the heffalump path (it
+	// doesn't need boundary walks, but visualization toggles still work).
+	function buildHeffalumpEdgePolys() {
 		var hefEpA = { segments: [], closed: false };
 		var hefEpB = { segments: [], closed: false };
 		for (var hpi = 0; hpi < polylines.length; hpi++) {
 			hefEpA.segments.push({ verts: polylines[hpi].slice(), type: "intersection" });
 			hefEpB.segments.push({ verts: polylines[hpi].slice(), type: "intersection" });
 		}
+		return { A: hefEpA, B: hefEpB };
+	}
+
+	if (useHeffalump) {
+		var hefReason = classifierMode === "heffalump"
+			? "heffalump (forced)"
+			: "heffalump (census: non-manifold edges)";
+		classifierReport.A = hefReason;
+		classifierReport.B = hefReason;
 		closedPolylines = polylines;
-		meshEdgePolys = { A: hefEpA, B: hefEpB };
+		meshEdgePolys = buildHeffalumpEdgePolys();
 		classifyResult = heffalumpClassify(megaSoup, isect.segments, soupA, soupB);
 	} else {
 		// Clean mesh path — close polylines along boundary + ige walk classification
@@ -133,6 +170,49 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 		closedPolylines = closeResult.closedPolylines;
 		meshEdgePolys = closeResult.meshEdgePolys;
 		classifyResult = bmsClassify(megaSoup, closedPolylines, isect.segments, soupA, soupB, meshEdgePolys);
+
+		// Auto mode: verify the hybrid's post-conditions
+		if (classifierMode === "auto") {
+			verification = verifyBmsClassification(
+				megaSoup, classifyResult.triSides, isect.segments, polylines, soupA, soupB);
+
+			if (!verification.ok) {
+				// Decide which meshes need the fallback
+				var fallbackA = false, fallbackB = false;
+				var reasonsA = [], reasonsB = [];
+				for (var fi = 0; fi < verification.failures.length; fi++) {
+					var f = verification.failures[fi];
+					if (f.mesh === "A" || f.mesh === "both") { fallbackA = true; reasonsA.push(f.check); }
+					if (f.mesh === "B" || f.mesh === "both") { fallbackB = true; reasonsB.push(f.check); }
+				}
+
+				// Re-run ONLY the classification stage on the existing mega soup
+				var hefResult = heffalumpClassify(megaSoup, isect.segments, soupA, soupB);
+
+				var mergedWalks = [];
+				var cwi2;
+				if (fallbackA) {
+					classifyResult.aInside = hefResult.aInside;
+					classifyResult.aOutside = hefResult.aOutside;
+					classifierReport.A = "heffalump (" + reasonsA.join(", ") + ")";
+				}
+				if (fallbackB) {
+					classifyResult.bInside = hefResult.bInside;
+					classifyResult.bOutside = hefResult.bOutside;
+					classifierReport.B = "heffalump (" + reasonsB.join(", ") + ")";
+				}
+				// Component walks: take each mesh's walks from the classifier that won
+				for (cwi2 = 0; cwi2 < classifyResult.componentWalks.length; cwi2++) {
+					var hw = classifyResult.componentWalks[cwi2];
+					if ((hw.mesh === "A" && !fallbackA) || (hw.mesh === "B" && !fallbackB)) mergedWalks.push(hw);
+				}
+				for (cwi2 = 0; cwi2 < hefResult.componentWalks.length; cwi2++) {
+					var fw = hefResult.componentWalks[cwi2];
+					if ((fw.mesh === "A" && fallbackA) || (fw.mesh === "B" && fallbackB)) mergedWalks.push(fw);
+				}
+				classifyResult.componentWalks = mergedWalks;
+			}
+		}
 	}
 
 	var groups = {
@@ -203,7 +283,9 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 		meshEdgePolys: meshEdgePolys,
 		componentWalks: classifyResult.componentWalks,
 		megaSoup: megaSoup,
-		pool: isect.pool
+		pool: isect.pool,
+		classifier: classifierReport,
+		verification: verification
 	};
 
 	// Step 8) If operation specified, combine groups
