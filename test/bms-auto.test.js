@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { bmsBooleanOp, bmsIntersect, bmsSplit, verifyBmsClassification, countOpenEdges } from "../src/index.js";
 import { needsSliverGuard, interiorLatticePoints } from "../src/boolean/sliverGuard.js";
-import { createCube } from "./fixtures/meshes.js";
+import { createCube, createFlatPatch } from "./fixtures/meshes.js";
 
 // ── Helpers ──
 
@@ -224,6 +224,39 @@ describe("bmsBooleanOp auto-classifier", function () {
 		var result = bmsBooleanOp(cubeA, cubeB, null, { classifier: "hybrid" });
 		expect(result.classifier.A).toBe("hybrid");
 		expect(result.verification).toBeNull();
+	});
+
+	it("heffalump component-majority snap kills lone flipped triangles (no spurs)", function () {
+		// Open patch (A) crossing a closed cube (B): the heffalump's
+		// per-triangle nearest-surface test can flip individual tall cube
+		// sub-triangles whose centroids hug the patch surface. With the
+		// majority snap, the cube's above/below components are coherent:
+		// nothing classified "inside" (below the patch) may reach the
+		// cube's top, and nothing "outside" may reach its bottom.
+		var patch = createFlatPatch(0, 0, 0, 8, 8, 5, 5);
+		var cube = createCube(0, 0, 0, 2);
+		var result = bmsBooleanOp(patch, cube, null, { classifier: "heffalump" });
+
+		expect(result.groups.bInside.length).toBeGreaterThan(0);
+		expect(result.groups.bOutside.length).toBeGreaterThan(0);
+
+		// The patch is the plane z=0, so each cube group must be coherent:
+		// all of a group's triangle centroids on ONE side of the plane.
+		// A lone flipped "spur" triangle puts a centroid on the wrong side.
+		function centroidSides(soup) {
+			var sides = {};
+			for (var i = 0; i < soup.length; i++) {
+				var cz = (soup[i].v0.z + soup[i].v1.z + soup[i].v2.z) / 3;
+				if (Math.abs(cz) < 0.05) continue; // skip near-plane slivers
+				sides[cz > 0 ? "above" : "below"] = true;
+			}
+			return Object.keys(sides);
+		}
+		var inSides = centroidSides(result.groups.bInside);
+		var outSides = centroidSides(result.groups.bOutside);
+		expect(inSides.length).toBe(1);
+		expect(outSides.length).toBe(1);
+		expect(inSides[0]).not.toBe(outSides[0]);
 	});
 
 	it("reports 'none' when meshes do not intersect", function () {

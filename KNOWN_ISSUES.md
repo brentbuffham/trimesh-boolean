@@ -214,6 +214,8 @@ End state: callers (e.g. Kirra's TrimeshBooleanDialog) can delete their Force He
 
 All added points are **strictly interior** (clearance from parent edges), so edge conformity with neighbouring uncrossed triangles is preserved — no T-junctions. On the 100 m floor vs 0.5 m fence regression: needle count (normalised aspect > 100) went from ~160 to **0**, and >95% of intersection segments survive as constraint edges in the output.
 
+**Companion fix — heffalump component-majority snap (v0.5.8):** the same coin-flip mechanism showed as "spurs" under the forced heffalump on terrain vs cylinder (8 tall cylinder sub-triangles whose centroids hug the terrain flipped into B-inside, reaching 21 m above the terrain). `heffalumpClassify` now votes per component after the per-triangle tests: when ≥ 90% of a component agrees (`opts.snapThreshold`, default 0.9), the stragglers snap to the majority. Genuinely mixed components — the barrier-gap case the heffalump exists for — are nowhere near unanimous and stay per-triangle. Terrain vs cylinder forced-heffalump now matches hybrid exactly (B: 198/198).
+
 **Workaround (no longer needed):** subdivide oversized faces at creation so they are comparable in size to the other mesh's triangles.
 
 **Affected files:** `src/boolean/sliverGuard.js` (new), `src/bms/bmsSplit.js`, `src/boolean/splitTriangles.js`

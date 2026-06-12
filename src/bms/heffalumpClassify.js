@@ -402,12 +402,18 @@ export function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
 	// ── Step 6: The Heffalump's question — one bite at a time ──
 	//
 	// When the other mesh is CLOSED, classify each triangle individually
-	// by ray casting. This is the radial neighbourhood taken to its
-	// logical conclusion: every triangle gets its own answer.
-	// No flood fill, no barriers, no components — just geometry.
+	// by ray casting. When the other mesh is OPEN, use the per-triangle
+	// nearest-surface test.
 	//
-	// When the other mesh is OPEN, fall back to barrier flood fill +
-	// barrier-normal for components that touch the intersection.
+	// COMPONENT-MAJORITY SNAP (v0.5.8): per-triangle tests are coin-flip
+	// for needle/tall sub-triangles whose centroids hug the other surface —
+	// lone flipped triangles survive as visible "spurs" (KNOWN_ISSUES #21).
+	// After voting, if ≥ snapThreshold of a component agrees, the stragglers
+	// snap to the majority. Genuinely mixed components (e.g. a flood-fill
+	// component spanning a barrier gap — the very case the heffalump exists
+	// for) stay per-triangle, because their vote is nowhere near unanimous.
+
+	var snapThreshold = opts && opts.snapThreshold !== undefined ? opts.snapThreshold : 0.9;
 
 	var aInside = [], aOutside = [];
 	var bInside = [], bOutside = [];
@@ -422,50 +428,42 @@ export function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
 		var insideArr = comp.mesh === "A" ? aInside : bInside;
 		var outsideArr = comp.mesh === "A" ? aOutside : bOutside;
 
-		if (otherIsClosed) {
-			// ── The Heffalump's trunk: per-triangle ray casting ──
-			// Other mesh is closed → ray cast EACH triangle's centroid
-			// through the closed mesh. One bite at a time.
-			for (var ri = 0; ri < comp.triIndices.length; ri++) {
-				var rt = megaSoup[comp.triIndices[ri]];
-				var px = (rt.v0.x + rt.v1.x + rt.v2.x) / 3;
-				var py = (rt.v0.y + rt.v1.y + rt.v2.y) / 3;
-				var pz = (rt.v0.z + rt.v1.z + rt.v2.z) / 3;
-				if (isPointInsideClosedMesh(px, py, pz, otherTris)) {
-					insideArr.push({ v0: rt.v0, v1: rt.v1, v2: rt.v2 });
-				} else {
-					outsideArr.push({ v0: rt.v0, v1: rt.v1, v2: rt.v2 });
-				}
-			}
-			// Component walk — still useful for visualization
-			var walkSegs1 = extractBoundaryWalk(comp, megaSoup, barrierEdges);
-			componentWalks.push({
-				mesh: comp.mesh, side: "mixed", triCount: comp.triCount,
-				segments: walkSegs1
-			});
-		} else {
-			// ── The Heffalump's tail: per-triangle nearest-surface test ──
-			// Other mesh is open → find nearest surface triangle for each
-			// of our triangles and check which side we're on.
-			// One bite at a time, same as the closed-mesh path.
-			for (var oi = 0; oi < comp.triIndices.length; oi++) {
-				var ot = megaSoup[comp.triIndices[oi]];
-				var opx = (ot.v0.x + ot.v1.x + ot.v2.x) / 3;
-				var opy = (ot.v0.y + ot.v1.y + ot.v2.y) / 3;
-				var opz = (ot.v0.z + ot.v1.z + ot.v2.z) / 3;
-				if (isPointInsideOpenSurface(opx, opy, opz, otherTris)) {
-					insideArr.push({ v0: ot.v0, v1: ot.v1, v2: ot.v2 });
-				} else {
-					outsideArr.push({ v0: ot.v0, v1: ot.v1, v2: ot.v2 });
-				}
-			}
-
-			var walkSegs2 = extractBoundaryWalk(comp, megaSoup, barrierEdges);
-			componentWalks.push({
-				mesh: comp.mesh, side: "mixed",
-				triCount: comp.triCount, segments: walkSegs2
-			});
+		// Per-triangle vote — trunk (ray cast) or tail (nearest surface)
+		var flags = new Uint8Array(comp.triIndices.length);
+		var insideVotes = 0;
+		for (var ri = 0; ri < comp.triIndices.length; ri++) {
+			var rt = megaSoup[comp.triIndices[ri]];
+			var px = (rt.v0.x + rt.v1.x + rt.v2.x) / 3;
+			var py = (rt.v0.y + rt.v1.y + rt.v2.y) / 3;
+			var pz = (rt.v0.z + rt.v1.z + rt.v2.z) / 3;
+			var isIn = otherIsClosed
+				? isPointInsideClosedMesh(px, py, pz, otherTris)
+				: isPointInsideOpenSurface(px, py, pz, otherTris);
+			if (isIn) { flags[ri] = 1; insideVotes++; }
 		}
+
+		// Majority snap: only when the component is near-unanimous
+		var ratio = insideVotes / comp.triIndices.length;
+		var snapTo = -1; // -1 = keep per-triangle results
+		if (ratio >= snapThreshold) snapTo = 1;
+		else if (ratio <= 1 - snapThreshold) snapTo = 0;
+
+		for (var pi = 0; pi < comp.triIndices.length; pi++) {
+			var pt = megaSoup[comp.triIndices[pi]];
+			var finalIn = snapTo === -1 ? flags[pi] === 1 : snapTo === 1;
+			if (finalIn) {
+				insideArr.push({ v0: pt.v0, v1: pt.v1, v2: pt.v2 });
+			} else {
+				outsideArr.push({ v0: pt.v0, v1: pt.v1, v2: pt.v2 });
+			}
+		}
+
+		// Component walk — still useful for visualization
+		var walkSegs1 = extractBoundaryWalk(comp, megaSoup, barrierEdges);
+		componentWalks.push({
+			mesh: comp.mesh, side: "mixed", triCount: comp.triCount,
+			segments: walkSegs1
+		});
 	}
 
 	console.log("[heffalump] Classification: A: " + aInside.length + " inside, " +
