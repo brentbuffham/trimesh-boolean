@@ -242,17 +242,46 @@ export function triangulateLoop(loop) {
 		coords[j * 2 + 1] = projV(loop[j]);
 	}
 
+	// Guard against the Constrainautor infinite-loop on coincident projected
+	// points: two DISTINCT 3D loop vertices can collapse to the SAME 2D point
+	// after projection (a pinhole on/near a vertical wall). _splitSelfTouching
+	// dedups in 3D (vKey), so it cannot catch this 2D-only collision, and the
+	// try/catch below only guards THROWS, not hangs. Detect coincident projected
+	// points up front (n2 is small, so O(n^2) is trivial); if any exist, skip the
+	// constrain step — the unconstrained Delaunay is robust to duplicates and
+	// completes. (Fixes an order-dependent closeSolid hang on real mine data.)
+	var bbU0 = Infinity, bbV0 = Infinity, bbU1 = -Infinity, bbV1 = -Infinity;
+	for (var bi = 0; bi < n2; bi++) {
+		var bu = coords[bi * 2], bv = coords[bi * 2 + 1];
+		if (bu < bbU0) bbU0 = bu; if (bu > bbU1) bbU1 = bu;
+		if (bv < bbV0) bbV0 = bv; if (bv > bbV1) bbV1 = bv;
+	}
+	var diag2 = (bbU1 - bbU0) * (bbU1 - bbU0) + (bbV1 - bbV0) * (bbV1 - bbV0);
+	var coincidentEps2 = Math.max(diag2 * 1e-14, 1e-18); // relative + absolute floor
+	var hasDup2D = false;
+	for (var pi = 0; pi < n2 && !hasDup2D; pi++) {
+		for (var pj = pi + 1; pj < n2; pj++) {
+			var ddu = coords[pi * 2] - coords[pj * 2];
+			var ddv = coords[pi * 2 + 1] - coords[pj * 2 + 1];
+			if (ddu * ddu + ddv * ddv <= coincidentEps2) { hasDup2D = true; break; }
+		}
+	}
+
 	var del, con;
 	try {
 		del = new Delaunator(coords);
-		con = new Constrainautor(del);
+		// Only constrain when the projection is non-degenerate — Constrainautor
+		// can HANG (not throw) on coincident points or an empty triangulation.
+		if (!hasDup2D && del.triangles.length > 0) {
+			con = new Constrainautor(del);
 
-		for (var ci = 0; ci < n2; ci++) {
-			var ni = (ci + 1) % n2;
-			try {
-				con.constrainOne(ci, ni);
-			} catch (e) {
-				// Skip problematic constraint edges
+			for (var ci = 0; ci < n2; ci++) {
+				var ni = (ci + 1) % n2;
+				try {
+					con.constrainOne(ci, ni);
+				} catch (e) {
+					// Skip problematic constraint edges
+				}
 			}
 		}
 	} catch (e) {

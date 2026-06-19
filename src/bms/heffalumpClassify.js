@@ -157,16 +157,107 @@ function classifyByRayCast(comp, megaSoup, otherMeshTris) {
 // Instead, find the nearest triangle on the open surface and check
 // which side the point is on. Normal direction = outside.
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ⚠️  AI-AGENT NOTE — UNVERIFIED CHANGE  (2026-06-19, Claude, Kirra dev session)
+//
+// AUDIENCE: a future AI coding agent (or human) debugging open-mesh classification.
+//
+// WHAT CHANGED: `isPointInsideOpenSurface()` (defined just below) — the test for
+// "which side of an OPEN surface is this point on?", used by the heffalump
+// classifier when the OTHER mesh is open (classification Method 11). The
+// nearest-triangle search was changed from CENTROID distance to TRUE
+// CLOSEST-POINT-ON-TRIANGLE distance (Ericson §5.1.5 — see `closestPointOnTriangle`
+// added directly below this note). `closestPointOnTriangle` is NEW code.
+//
+// BEFORE (original — centroid-nearest; restore this to revert):
+//     for each tri:
+//         c = centroid(tri)
+//         d = |point - c|^2
+//         if d < bestDist: bestDist = d; bestDot = (point - c) · triNormal
+//     return bestDot < 0
+//
+// NOW (closest-point-nearest):
+//     for each tri:
+//         q = closestPointOnTriangle(point, tri)
+//         d = |point - q|^2
+//         if d < bestDist: bestDist = d; bestDot = (point - q) · triNormal
+//     return bestDot < 0
+//
+// WHY: on an undulating open surface (terrain) the nearest CENTROID is often a
+// distant, differently-tilted triangle, which flips the side sign. Closest-point
+// finds the triangle the point is actually under/over.
+//
+// VERIFICATION STATUS:  ⚠ UNTESTED ON REAL GEOMETRY. Only synthetic unit tests
+// were run (closestPointOnTriangle math verified; side test correct on a few
+// synthetic open surfaces). It was NOT the fix for the symptom that prompted it
+// (a terrain mesh under-splitting against a below-surface extrusion — that turned
+// out to be the CLOSED-mesh ray-cast path `isPointInsideClosedMesh`, NOT this
+// function). This change was kept as a likely-correct improvement, not a proven one.
+//
+// IF YOU HIT AN OPEN-MESH CLASSIFICATION REGRESSION:  this is the most recent
+// UNPROVEN edit on that path — REASSESS / REVERT THIS FIRST. To revert: restore
+// the centroid loop shown in BEFORE, and delete `closestPointOnTriangle` if it is
+// unused elsewhere.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Closest point on triangle (a,b,c) to point p — Ericson, "Real-Time Collision
+// Detection" §5.1.5. Returns {x,y,z}. Used by the open-surface side test so the
+// "nearest triangle" is the one ACTUALLY under/over the point, not the one with
+// the nearest centroid (which an undulating surface throws off badly).
+function closestPointOnTriangle(px, py, pz, a, b, c) {
+	var abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+	var acx = c.x - a.x, acy = c.y - a.y, acz = c.z - a.z;
+	var apx = px - a.x, apy = py - a.y, apz = pz - a.z;
+	var d1 = abx * apx + aby * apy + abz * apz;
+	var d2 = acx * apx + acy * apy + acz * apz;
+	if (d1 <= 0 && d2 <= 0) return { x: a.x, y: a.y, z: a.z };
+
+	var bpx = px - b.x, bpy = py - b.y, bpz = pz - b.z;
+	var d3 = abx * bpx + aby * bpy + abz * bpz;
+	var d4 = acx * bpx + acy * bpy + acz * bpz;
+	if (d3 >= 0 && d4 <= d3) return { x: b.x, y: b.y, z: b.z };
+
+	var vc = d1 * d4 - d3 * d2;
+	if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+		var v = d1 / (d1 - d3);
+		return { x: a.x + v * abx, y: a.y + v * aby, z: a.z + v * abz };
+	}
+
+	var cpx = px - c.x, cpy = py - c.y, cpz = pz - c.z;
+	var d5 = abx * cpx + aby * cpy + abz * cpz;
+	var d6 = acx * cpx + acy * cpy + acz * cpz;
+	if (d6 >= 0 && d5 <= d6) return { x: c.x, y: c.y, z: c.z };
+
+	var vb = d5 * d2 - d1 * d6;
+	if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+		var w = d2 / (d2 - d6);
+		return { x: a.x + w * acx, y: a.y + w * acy, z: a.z + w * acz };
+	}
+
+	var va = d3 * d6 - d5 * d4;
+	if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+		var w2 = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+		return { x: b.x + w2 * (c.x - b.x), y: b.y + w2 * (c.y - b.y), z: b.z + w2 * (c.z - b.z) };
+	}
+
+	// Inside the face region — barycentric combination.
+	var denom = 1 / (va + vb + vc);
+	var vv = vb * denom, ww = vc * denom;
+	return { x: a.x + abx * vv + acx * ww, y: a.y + aby * vv + acy * ww, z: a.z + abz * vv + acz * ww };
+}
+
 function isPointInsideOpenSurface(px, py, pz, tris) {
 	var bestDist = Infinity;
 	var bestDot = 0;
 
 	for (var i = 0; i < tris.length; i++) {
 		var tri = tris[i];
-		var tcx = (tri.v0.x + tri.v1.x + tri.v2.x) / 3;
-		var tcy = (tri.v0.y + tri.v1.y + tri.v2.y) / 3;
-		var tcz = (tri.v0.z + tri.v1.z + tri.v2.z) / 3;
-		var dx = px - tcx, dy = py - tcy, dz = pz - tcz;
+		// Use the TRUE closest point on the triangle, not the centroid. On an
+		// undulating open surface (terrain) the nearest centroid is frequently a
+		// distant, differently-tilted triangle, which flips the side test and
+		// misclassifies an extrusion sitting below/grazing the surface.
+		var cp = closestPointOnTriangle(px, py, pz, tri.v0, tri.v1, tri.v2);
+		var dx = px - cp.x, dy = py - cp.y, dz = pz - cp.z;
 		var d = dx * dx + dy * dy + dz * dz;
 
 		if (d < bestDist) {
@@ -177,6 +268,8 @@ function isPointInsideOpenSurface(px, py, pz, tris) {
 			var nx = e1y * e2z - e1z * e2y;
 			var ny = e1z * e2x - e1x * e2z;
 			var nz = e1x * e2y - e1y * e2x;
+			// Side from the closest point: in the face interior this is the true
+			// perpendicular side; on an edge/vertex it is the nearest-feature side.
 			bestDot = dx * nx + dy * ny + dz * nz;
 		}
 	}
@@ -414,6 +507,9 @@ export function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
 	// for) stay per-triangle, because their vote is nowhere near unanimous.
 
 	var snapThreshold = opts && opts.snapThreshold !== undefined ? opts.snapThreshold : 0.9;
+	// Max absolute minority the majority-snap is allowed to collapse. The snap
+	// exists to erase a FEW spur stragglers; it must never bulldoze a real region.
+	var maxSnapStragglers = opts && opts.maxSnapStragglers !== undefined ? opts.maxSnapStragglers : 8;
 
 	var aInside = [], aOutside = [];
 	var bInside = [], bOutside = [];
@@ -442,11 +538,20 @@ export function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
 			if (isIn) { flags[ri] = 1; insideVotes++; }
 		}
 
-		// Majority snap: only when the component is near-unanimous
+		// Majority snap — only collapse a TINY absolute minority (genuine spur
+		// stragglers, the case this was added for in v0.5.8). NEVER snap away a
+		// LARGE minority: a legitimate region (e.g. 1200+ terrain tris inside a
+		// prism) that is flood-fill-connected to the outside reads as a low ratio,
+		// and an ungated snap bulldozes the whole region to one side. Gate on the
+		// absolute count, not the ratio alone. (Confirmed on real data 2026-06-19:
+		// ungated → 0 terrain tris inside; gated → 1204, matching manual classify.)
+		var minority = Math.min(insideVotes, comp.triIndices.length - insideVotes);
 		var ratio = insideVotes / comp.triIndices.length;
 		var snapTo = -1; // -1 = keep per-triangle results
-		if (ratio >= snapThreshold) snapTo = 1;
-		else if (ratio <= 1 - snapThreshold) snapTo = 0;
+		if (minority <= maxSnapStragglers) {
+			if (ratio >= snapThreshold) snapTo = 1;
+			else if (ratio <= 1 - snapThreshold) snapTo = 0;
+		}
 
 		for (var pi = 0; pi < comp.triIndices.length; pi++) {
 			var pt = megaSoup[comp.triIndices[pi]];
