@@ -163,6 +163,8 @@ Merged boolean results can contain regions of opposite winding (user-flipped nor
 
 Degenerate loop input could send the Constrainautor CDT path into an infinite loop. Guarded in the `boundaryLoops` rewrite.
 
+**v0.5.9 — second hang variant (coincident projected points).** `triangulateLoop()` could still hang on real mine data: two *distinct* 3D loop vertices can collapse to the *same* 2D point after projection (a pinhole on/near a vertical wall). `_splitSelfTouching` dedups in 3D (`vKey`) so it never sees the 2D-only collision, and the `try/catch` only guards *throws*, not hangs. Fix: detect coincident projected points up front (O(n²), trivial for small loops) and skip the constrain step when any exist — unconstrained Delaunay is robust to duplicates and completes. Also guards against an empty triangulation (`del.triangles.length > 0`).
+
 **Affected file:** `src/repair/boundaryLoops.js`
 
 ---
@@ -198,6 +200,8 @@ A boolean result built from inputs with no winding convention (e.g., survey DXF 
 
 End state: callers (e.g. Kirra's TrimeshBooleanDialog) can delete their Force Heffalump / pre-repair checkboxes — no user should ever have to know what a "heffalump" is.
 
+**v0.5.9 — chain-closure false positives.** The chain-closure check flagged legitimate endpoints as "ending mid-mesh." `bmsChain` deliberately splits sharp bends and junctions into separate polylines, so an open chain's endpoint is fine when *another* chain's endpoint shares the same pool vertex (the chain network simply continues there). `verifyBmsClassification` now counts endpoints per pool vertex and only reports a *truly dangling* endpoint (not closed, not on a mesh boundary, and not joining another chain) — eliminating the cube-vs-cube false failure.
+
 **Affected files:** `src/bms/bmsVerify.js` (new), `src/bms/bmsBooleanOp.js`, `src/bms/bmsClassify.js`
 
 ---
@@ -215,6 +219,8 @@ End state: callers (e.g. Kirra's TrimeshBooleanDialog) can delete their Force He
 All added points are **strictly interior** (clearance from parent edges), so edge conformity with neighbouring uncrossed triangles is preserved — no T-junctions. On the 100 m floor vs 0.5 m fence regression: needle count (normalised aspect > 100) went from ~160 to **0**, and >95% of intersection segments survive as constraint edges in the output.
 
 **Companion fix — heffalump component-majority snap (v0.5.8):** the same coin-flip mechanism showed as "spurs" under the forced heffalump on terrain vs cylinder (8 tall cylinder sub-triangles whose centroids hug the terrain flipped into B-inside, reaching 21 m above the terrain). `heffalumpClassify` now votes per component after the per-triangle tests: when ≥ 90% of a component agrees (`opts.snapThreshold`, default 0.9), the stragglers snap to the majority. Genuinely mixed components — the barrier-gap case the heffalump exists for — are nowhere near unanimous and stay per-triangle. Terrain vs cylinder forced-heffalump now matches hybrid exactly (B: 198/198).
+
+**v0.5.9 — the snap needed an absolute-count gate.** The v0.5.8 snap gated on *ratio* alone (≥ 90%). On real data this bulldozed a legitimate region: a 1,204-triangle terrain area genuinely *inside* a prism is flood-fill-connected to the outside, so it reads as a low inside-ratio and the ungated snap collapsed the whole region to one side (0 terrain tris inside instead of 1,204). Fix: gate on the *absolute minority* as well — the snap only collapses a tiny stragglers count (`opts.maxSnapStragglers`, default 8), never a large minority. Confirmed on real data 2026-06-19: ungated → 0 terrain tris inside; gated → 1,204, matching manual classify. Companion (unverified) tweak: `isPointInsideOpenSurface` now measures the *true closest point on triangle* (Ericson §5.1.5) rather than the centroid, so an undulating surface no longer flips the side test — kept as a likely-correct improvement, flagged in-source as the first thing to revert on any open-mesh regression.
 
 **Workaround (no longer needed):** subdivide oversized faces at creation so they are comparable in size to the other mesh's triangles.
 

@@ -253,6 +253,8 @@ Barrier-only classification for meshes with defective topology. Classifies each 
 - **megaSoup**: Split triangles with `mesh` tags from `bmsSplit`
 - **segments**: Intersection segments with pool vertex endpoints
 - **trisA** / **trisB**: Original mesh triangles
+- **opts.snapThreshold** (v0.5.8, default `0.9`): per-component majority-snap ratio. After the per-triangle vote, if ≥ this fraction of a component agrees, the stragglers snap to the majority — this erases lone flipped "spur" triangles whose centroids hug the other surface. Genuinely mixed components (the barrier-gap case) are nowhere near unanimous and stay per-triangle.
+- **opts.maxSnapStragglers** (v0.5.9, default `8`): absolute-count gate on the snap. The snap only collapses a *tiny* minority — it never bulldozes a large, legitimate region that happens to read as a low ratio (e.g. a terrain area inside a prism that is flood-fill-connected to the outside).
 - **Returns**: `{ aInside, aOutside, bInside, bOutside, componentWalks }`
 
 ### `shouldUseHeffalump(trisA, trisB)`
