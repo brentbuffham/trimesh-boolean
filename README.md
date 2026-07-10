@@ -203,11 +203,52 @@ Run the full BMS pipeline. Both meshes are split into a unified mega soup where 
 - **options.classifier** (v0.5.8): `"auto"` (default) | `"hybrid"` | `"heffalump"`. Auto censuses the inputs (non-manifold → heffalump + pre-repair), runs the hybrid classifier, verifies partition / chain-closure / barrier post-conditions, and on any failure re-runs only the classification stage with the heffalump on the existing mega soup. No caller needs to know what a heffalump is anymore.
 - **options.preRepair**: `boolean` — resolve T-junctions + weld before splitting. Default: auto-enabled when the census finds non-manifold edges.
 - **options.tolerance**: `number` — vertex pool merge tolerance
-- **Returns**: `{ groups, segments, polylines, meshEdgePolys, componentWalks, megaSoup, pool, classifier, verification }` — `classifier` reports the path per mesh (e.g. `{ A: "hybrid", B: "heffalump (partition)" }`); `verification` carries the post-condition check results
+- **options.indexed**: `boolean` — also attach `result.indexed`, a compact indexed twin of the groups (one shared points pool + per-group `[i,j,k]` index triples). Back-compatible: the soup `groups` are unchanged. See [Indexed Group Output](#indexed-group-output) below.
+- **Returns**: `{ groups, segments, polylines, meshEdgePolys, componentWalks, megaSoup, pool, classifier, verification }` — `classifier` reports the path per mesh (e.g. `{ A: "hybrid", B: "heffalump (partition)" }`); `verification` carries the post-condition check results. With `{ indexed: true }`, also carries `indexed` (see below).
 
 ### `verifyBmsClassification(megaSoup, triSides, segments, polylines, trisA, trisB)` (v0.5.8)
 
 The auto-classifier's post-condition checks, exported standalone: partition (both meshes must have non-empty inside AND outside groups when intersection segments exist), chain closure (every intersection polyline closes or ends on a mesh boundary), and barrier constraint (same-mesh triangles sharing a barrier edge classify to opposite sides). Returns `{ ok, failures, counts }`.
+
+### Indexed Group Output
+
+The pipeline's native output is **triangle soup** — every triangle carries its own three `{x,y,z}` vertex objects. That form is simple to consume, but it stores each shared vertex many times over (~5–10× heavier than an indexed mesh). For a multi-million-triangle boolean result you'll want the **indexed twin**: one shared vertex pool plus per-group `[i,j,k]` index triples. The pool is shared **across all four groups**, so the seam between `aInside`/`aOutside` (and `bInside`/`bOutside`) welds automatically — no re-dedupe needed.
+
+This is purely additive: the soup `groups` are never modified. Opt in on `bmsBooleanOp` with `{ indexed: true }`, or call `indexGroups` directly on any soup groups.
+
+#### `indexGroups(groups, tolerance?)`
+
+Convert soup split groups into a compact indexed representation.
+
+- **groups**: `{ aInside?, aOutside?, bInside?, bOutside? }` — soup groups (`{ v0, v1, v2 }` triangles), as returned by `splitMeshPair`, `bmsBooleanOp`, etc.
+- **tolerance**: `number` — vertex-weld quantization in world units (default: `1e-4`)
+- **Returns**: `{ points, groups }` where `points` is a shared `Vertex[]` pool and `groups` is `{ aInside, aOutside, bInside, bOutside }`, each an array of `[i, j, k]` index triples into `points`
+
+```javascript
+import { bmsBooleanOp, indexGroups, splitMeshPair } from 'trimesh-boolean';
+
+// Opt in on the pipeline result...
+var bms = bmsBooleanOp(meshA, meshB, 'subtract', { indexed: true });
+// bms.indexed = { points: Vertex[], groups: { aInside: [i,j,k][], ... } }
+
+// ...or index any soup groups after the fact:
+var split = splitMeshPair(meshA, meshB);
+var indexed = indexGroups(split.groups, 1e-4);
+```
+
+#### `indexGroupsToTypedArrays(indexed)`
+
+Flatten indexed groups into typed arrays for transfer or GPU upload. Positions are the **same shared pool** across all groups (indices are global), so a `BufferGeometry` can point every group's index buffer at one position buffer.
+
+- **indexed**: the return value of `indexGroups`
+- **Returns**: `{ positions, index }` where `positions` is a `Float64Array` of `[x,y,z,...]` and `index` is `{ aInside, aOutside, bInside, bOutside }`, each a `Uint32Array` of flattened triangle indices
+
+```javascript
+import { indexGroupsToTypedArrays } from 'trimesh-boolean';
+
+var flat = indexGroupsToTypedArrays(bms.indexed);
+// flat.positions -> Float64Array, flat.index.aInside -> Uint32Array, ...
+```
 
 ### `bmsIntersect(trisA, trisB, options?)`
 
@@ -415,6 +456,8 @@ Individual repair steps, usable standalone:
 | `countOpenEdges(tris)` | Count boundary and non-manifold edges |
 | `vKey(v)` | Vertex to string key for spatial hashing |
 | `edgeKey(k1, k2)` | Canonical edge key from two vertex keys |
+| `indexGroups(groups, tolerance?)` | Soup groups → shared points pool + per-group `[i,j,k]` index triples (see [Indexed Group Output](#indexed-group-output)) |
+| `indexGroupsToTypedArrays(indexed)` | Flatten indexed groups → `Float64Array` positions + per-group `Uint32Array` indices |
 
 ## Working with Kirra Surface Data
 
