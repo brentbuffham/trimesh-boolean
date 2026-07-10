@@ -35,6 +35,10 @@ export { weldVertices, weldedToSoup } from "./repair/weldVertices.js";
 // ── Mesh format conversion aliases ──
 export { weldVertices as soupToIndexed } from "./repair/weldVertices.js";
 export { weldedToSoup as indexedToSoup } from "./repair/weldVertices.js";
+
+// ── Indexed group output (shared pool + [i,j,k] triples) ──
+// Also available directly on a bmsBooleanOp result via { indexed: true }.
+export { indexGroups, indexGroupsToTypedArrays } from "./util/indexGroups.js";
 export { removeDegenerateTriangles } from "./repair/removeDegenerates.js";
 export { extractBoundaryLoops, triangulateLoop, capBoundaryLoops, capBoundaryLoopsSequential } from "./repair/boundaryLoops.js";
 export { stitchByProximity } from "./repair/stitchEdges.js";

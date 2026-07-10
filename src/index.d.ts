@@ -254,6 +254,39 @@ export function soupToIndexed(tris: TriangleSoup, tolerance: number): WeldedMesh
 /** Alias for weldedToSoup — converts indexed triangles back to triangle soup */
 export function indexedToSoup(weldedTriangles: WeldedTriangle[]): TriangleSoup;
 
+// ── Indexed group output ──
+
+export interface SoupGroups {
+	aInside?: TriangleSoup;
+	aOutside?: TriangleSoup;
+	bInside?: TriangleSoup;
+	bOutside?: TriangleSoup;
+}
+
+/** Per-group triangles as [i,j,k] index triples into a shared points pool. */
+export interface IndexedGroups {
+	points: Vertex[];
+	groups: {
+		aInside: number[][];
+		aOutside: number[][];
+		bInside: number[][];
+		bOutside: number[][];
+	};
+}
+
+/**
+ * Convert soup split groups into a compact indexed representation: one shared
+ * vertex pool + per-group [i,j,k] triples. Also available directly on a
+ * bmsBooleanOp result via `{ indexed: true }`.
+ */
+export function indexGroups(groups: SoupGroups, tolerance?: number): IndexedGroups;
+
+/** Flatten indexed groups into a shared Float64Array of positions + per-group Uint32Array indices. */
+export function indexGroupsToTypedArrays(indexed: IndexedGroups): {
+	positions: Float64Array;
+	index: { aInside: Uint32Array; aOutside: Uint32Array; bInside: Uint32Array; bOutside: Uint32Array };
+};
+
 // ── Normals ──
 
 export function triNormal(tri: Triangle): Vertex;

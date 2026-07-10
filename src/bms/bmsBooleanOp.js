@@ -24,6 +24,7 @@ import { resolveTJunctions } from "../repair/resolveTJunctions.js";
 import { weldBoundaryVertices } from "../repair/weldBoundary.js";
 import { weldVertices } from "../repair/weldVertices.js";
 import { deduplicateSeamVertices } from "../repair/deduplicateVertices.js";
+import { indexGroups } from "../util/indexGroups.js";
 
 /**
  * Flip the winding order of all triangles in a soup.
@@ -62,6 +63,9 @@ function flipSoup(tris) {
  *        splitting. Default: auto-enabled when classifier is "auto" and the census
  *        finds non-manifold edges.
  * @param {number} [options.tolerance] - Vertex pool tolerance
+ * @param {boolean} [options.indexed] - Also attach `result.indexed` — a compact
+ *        indexed twin of the groups (shared points pool + per-group [i,j,k] triples).
+ *        Back-compatible: the soup `groups` are unchanged; this is additive + opt-in.
  * @returns {{
  *   groups: { aInside: Array, aOutside: Array, bInside: Array, bOutside: Array },
  *   segments: Array,
@@ -287,6 +291,14 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 		classifier: classifierReport,
 		verification: verification
 	};
+
+	// Opt-in INDEXED twin of the groups (back-compatible; soup `groups` unchanged).
+	// One shared vertex pool + per-group [i,j,k] triples — ~5-10x lighter than soup,
+	// so consumers can render/persist a multi-million-triangle result without
+	// re-deduping it themselves (which is where large booleans OOM).
+	if (opts.indexed) {
+		result.indexed = indexGroups(groups, opts.tolerance !== undefined ? opts.tolerance : 1e-4);
+	}
 
 	// Step 8) If operation specified, combine groups
 	if (operation) {
