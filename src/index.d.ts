@@ -181,7 +181,8 @@ export interface SplitComponent {
 }
 
 export function splitToComponents(
-	groups: SplitResult["groups"]
+	groups: SplitResult["groups"],
+	options?: { pooled?: boolean; tolerance?: number }
 ): SplitComponent[];
 
 export function mergeSmallComponents(
@@ -323,3 +324,51 @@ export function vKey(v: Vertex): string;
 export function edgeKey(ka: string, kb: string): string;
 export function countOpenEdges(tris: TriangleSoup): EdgeStats;
 export function findConnectedComponents(soup: TriangleSoup): TriangleSoup[];
+
+/**
+ * Integer-id ("pooled") twin of findConnectedComponents — an opt-in fast path for large
+ * soups. Same shared-edge adjacency and largest-first ordering, but vertices are hashed to
+ * integer ids so the edge map avoids toFixed string keys. Identical result on clean input.
+ */
+export function findConnectedComponentsPooled(
+	soup: TriangleSoup,
+	options?: { tolerance?: number }
+): TriangleSoup[];
+
+// ── Indexed connected components (integer-id, soup-free) ──
+
+/** A triangle as an [i, j, k] triple of indices into a shared points pool. */
+export type IndexedTri = [number, number, number];
+
+/**
+ * Connected components of an already-indexed mesh via shared-vertex union-find.
+ * O(N·α(N)), no soup, no string keys. Connectivity is shared-vertex (see module note);
+ * for an exact edge-based equivalent on soup use findConnectedComponentsPooled.
+ */
+export function connectedComponentsIndexed(tris: IndexedTri[]): IndexedTri[][];
+
+export interface IndexedComponent {
+	/** "A" | "B" — which input mesh it came from */
+	mesh: string;
+	/** "inside" | "outside" — relative to the other mesh */
+	side: string;
+	/** Source group key: "aInside" | "aOutside" | "bInside" | "bOutside" */
+	group: string;
+	/** Component index within its group (0 = largest) */
+	index: number;
+	/** Shared vertex pool (same reference across all components) */
+	points: Vertex[];
+	/** This component's triangles as [i,j,k] triples into `points` */
+	triangles: IndexedTri[];
+	/** Number of triangles */
+	triCount: number;
+}
+
+/**
+ * Decompose the four indexed groups (from indexGroups or bmsBooleanOp({ indexed: true }))
+ * into connected components, mirroring splitToComponents but keeping the indexed form.
+ */
+export function decomposeIndexedGroups(indexed: IndexedGroups, smallThreshold?: number): IndexedComponent[];
+
+/** Fold indexed components below `threshold` triangles into the largest component. */
+export function mergeSmallIndexedComponents(comps: IndexedTri[][], threshold: number): IndexedTri[][];

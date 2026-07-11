@@ -254,6 +254,28 @@ Current grid-based spatial indexing works well for moderate meshes. For very lar
 - Web Worker offloading
 - BVH tree instead of flat grid
 
+**Partly addressed (0.5.12) — integer-id components.** The two `toFixed(6)` string-keyed
+hotspots at scale now have opt-in integer-id fast paths (the default string paths are
+unchanged):
+- `findConnectedComponentsPooled(soup, { tolerance })` — edge-adjacency components with
+  integer edge keys instead of string concatenation. Identical result to
+  `findConnectedComponents` on clean input.
+- `splitToComponents(groups, { pooled: true })` — routes each group through the pooled path.
+- `connectedComponentsIndexed` / `decomposeIndexedGroups` — decompose an already-indexed
+  result (shared pool + `[i,j,k]`) with no soup and no re-hashing.
+
+**Caveat — vertex vs edge connectivity.** `decomposeIndexedGroups` groups by shared **vertex**
+(union-find over pool ids), which is *coarser* than the soup path's shared **edge** relation:
+it also joins triangles that meet at a single pool vertex. On a clean, seam-welded boolean
+result the two agree; on meshes with genuine vertex-only touches the indexed decompose yields
+fewer, larger components. For an exact edge-based partition over soup, use
+`findConnectedComponentsPooled`.
+
+Still open (future work): the remaining `toFixed` sites on the classic pipeline / repair paths
+(`bmsSplit`, `heffalumpClassify`, `classifyTriangles`, `splitTriangles`, `fillOpenLoops`,
+`resolveTJunctions`, `math.vKey`) were intentionally left untouched — changing `vKey`
+semantics risks the whole classic pipeline. Streaming / Web Worker / BVH remain as above.
+
 ### 10. Half-Space Calibration Sample Size
 The half-space normal convention calibration samples up to 8 intersection segments. For meshes with locally inconsistent normals (e.g., a mix of outward and inward faces), the calibration could vote wrong. Consider per-triangle normal consistency checking as a pre-processing step.
 

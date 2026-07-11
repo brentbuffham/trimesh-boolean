@@ -161,12 +161,34 @@ Merge split groups into a single result based on the operation type.
 - **operation**: `"subtract"` | `"union"` | `"intersect"`
 - **Returns**: `{ soup, points, triangles }` or `null`
 
-### `splitToComponents(groups)`
+### `splitToComponents(groups, options?)`
 
 Decompose each of the 4 split groups into connected components (disconnected mesh regions). Useful for multi-crossing surfaces where a single group contains multiple spatially separated zones.
 
 - **groups**: `{ aInside, aOutside, bInside, bOutside }` from `splitMeshPair`
+- **options.pooled**: `boolean` — route each group through the integer-id `findConnectedComponentsPooled` fast path (identical result, far less string hashing at scale). Default off.
+- **options.tolerance**: `number` — vertex-weld quantization for the pooled path (default `1e-6`)
 - **Returns**: `[{ mesh: "A"|"B", side: "inside"|"outside", index: number, soup: Triangle[], triCount: number }, ...]` — sorted largest-first within each group
+
+### Scaling at millions of triangles
+
+`findConnectedComponents` and the default `splitToComponents` key their edge map on `toFixed(6)` **strings**; at millions of triangles that string hashing dominates time and heap. Three opt-in, back-compatible integer-id paths avoid it (the default string paths are unchanged):
+
+- **`findConnectedComponentsPooled(soup, options?)`** — same shared-edge adjacency and largest-first ordering as `findConnectedComponents`, but vertices are hashed to integer ids so the edge map uses integer keys. Identical result on clean input. `options.tolerance` defaults to `1e-6`.
+- **`splitToComponents(groups, { pooled: true })`** — the same, applied to all four groups.
+- **`connectedComponentsIndexed(tris)` / `decomposeIndexedGroups(indexed, smallThreshold?)`** — decompose an *already-indexed* result (`indexGroups(...)` or `bmsBooleanOp(..., { indexed: true }).indexed`) with no soup and no re-hashing. Connectivity here is shared-**vertex** (union-find over pool ids), which is *coarser* than the soup path's shared-**edge** relation — on a clean seam-welded result they agree; on meshes with genuine vertex-only touches the indexed decompose yields fewer, larger components. `decomposeIndexedGroups` returns `[{ mesh, side, group, index, points, triangles, triCount }, ...]` where `triangles` are `[i,j,k]` triples into the shared `points`.
+
+```javascript
+import { bmsBooleanOp, splitToComponents, decomposeIndexedGroups } from 'trimesh-boolean';
+
+// Soup, pooled edge-based components (drop-in accelerator):
+var bms = bmsBooleanOp(meshA, meshB, null, { indexed: true });
+var comps = splitToComponents(bms.groups, { pooled: true });
+
+// Or decompose the indexed twin directly — no soup:
+var indexedComps = decomposeIndexedGroups(bms.indexed);
+// indexedComps[0] = { mesh, side, group, index, points, triangles: [[i,j,k], ...], triCount }
+```
 
 ### `mergeSmallComponents(comps, threshold?)`
 
@@ -390,8 +412,12 @@ Individual repair steps, usable standalone:
 | Function | Description |
 |----------|-------------|
 | `findConnectedComponents(soup)` | Split a soup into connected components via shared edges |
-| `splitToComponents(groups)` | Decompose 4 split groups into per-component list |
+| `findConnectedComponentsPooled(soup, options?)` | Integer-id twin of the above — same result, no `toFixed` string keys (see [Scaling](#scaling-at-millions-of-triangles)) |
+| `splitToComponents(groups, options?)` | Decompose 4 split groups into per-component list (`{ pooled: true }` for the fast path) |
+| `connectedComponentsIndexed(tris)` | Components of an already-indexed mesh via shared-vertex union-find |
+| `decomposeIndexedGroups(indexed, smallThreshold?)` | Decompose indexed groups (shared pool + `[i,j,k]`) — soup-free |
 | `mergeSmallComponents(comps, threshold?)` | Merge small fragments into nearest same-group neighbor |
+| `mergeSmallIndexedComponents(comps, threshold)` | Fold small indexed components into the largest |
 | `mergeComponents(picks)` | Merge user-selected component soups into welded result |
 | `selectSplits(groups, selections)` | Select specific groups with optional flip |
 

@@ -78,4 +78,7 @@ export { bmsBooleanOp } from "./bms/bmsBooleanOp.js";
 
 // ── Utilities ──
 export { dist3, distSq3, triangleArea3D, computeBounds, cross, lerpVert, vKey, edgeKey, countOpenEdges } from "./util/math.js";
-export { findConnectedComponents } from "./util/connectedComponents.js";
+export { findConnectedComponents, findConnectedComponentsPooled } from "./util/connectedComponents.js";
+
+// ── Indexed connected components (integer-id, soup-free — opt-in scaling path) ──
+export { connectedComponentsIndexed, decomposeIndexedGroups, mergeSmallIndexedComponents } from "./util/indexedComponents.js";

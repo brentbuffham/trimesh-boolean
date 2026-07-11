@@ -26,7 +26,7 @@ import { vKey, soupCentroid, translateSoup } from "../util/math.js";
 import { resolveTJunctions } from "../repair/resolveTJunctions.js";
 import { weldBoundaryVertices } from "../repair/weldBoundary.js";
 import { fillOpenEdgeLoops } from "../repair/fillOpenLoops.js";
-import { findConnectedComponents } from "../util/connectedComponents.js";
+import { findConnectedComponents, findConnectedComponentsPooled } from "../util/connectedComponents.js";
 import { forceCloseIndexedMesh } from "../repair/forceClose.js";
 
 
@@ -415,11 +415,15 @@ export function selectSplits(groups, selection) {
  *   triCount   number                — soup.length
  *
  * @param {{ aInside: Array, aOutside: Array, bInside: Array, bOutside: Array }} groups
+ * @param {{ pooled?: boolean, tolerance?: number }} [options] `pooled: true` routes each
+ *        group through the integer-id `findConnectedComponentsPooled` fast path (identical
+ *        result, far less string hashing at scale). Default (omitted) is the classic path.
  * @returns {Array<{ mesh: string, side: string, index: number, soup: Array, triCount: number }>}
  */
-export function splitToComponents(groups) {
+export function splitToComponents(groups, options) {
 	if (!groups) return [];
 	var result = [];
+	var pooled = !!(options && options.pooled);
 
 	var groupDefs = [
 		{ key: "aInside",  mesh: "A", side: "inside"  },
@@ -433,7 +437,9 @@ export function splitToComponents(groups) {
 		var soup = groups[def.key];
 		if (!soup || soup.length === 0) continue;
 
-		var components = findConnectedComponents(soup);
+		var components = pooled
+			? findConnectedComponentsPooled(soup, options)
+			: findConnectedComponents(soup);
 		for (var c = 0; c < components.length; c++) {
 			result.push({
 				mesh: def.mesh,
