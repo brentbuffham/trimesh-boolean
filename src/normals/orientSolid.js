@@ -136,6 +136,39 @@ export function orientSolid(soup, options) {
 		componentCount++;
 	}
 
+	// ── Coherence-only early exit (preOrient for the winding-number field) ──
+	// Materialise the soup with ONLY the coherence flips (no per-component
+	// direction decision). Used to make a self-intersecting, non-orientable
+	// mesh's per-patch winding CONSISTENT before generalized-winding-number
+	// queries — the direction step is meaningless (and volume undefined) for
+	// such input, so it is skipped. windingViolationsAfter here reports the
+	// residual non-orientable seam (0 for orientable input).
+	if (opts.coherenceOnly) {
+		var cohSoup = new Array(n);
+		for (var chi = 0; chi < n; chi++) {
+			if (flipped[chi]) {
+				var cs = soup[chi];
+				cohSoup[chi] = { v0: cs.v0, v1: cs.v2, v2: cs.v1 };
+			} else {
+				cohSoup[chi] = soup[chi];
+			}
+		}
+		return {
+			soup: cohSoup,
+			diagnostics: {
+				components: componentCount,
+				flippedForCoherence: flippedForCoherence,
+				componentsFlippedForDirection: 0,
+				windingViolationsBefore: violationsBefore,
+				windingViolationsAfter: countViolations(flipped),
+				signedVolume: null,
+				closedComponents: 0,
+				openComponents: 0,
+				coherenceOnly: true
+			}
+		};
+	}
+
 	// ── Step 2: per-component signed volume → global direction ──
 	// Local origin (first vertex of first triangle of each component) keeps the
 	// determinant well-conditioned at UTM scale.

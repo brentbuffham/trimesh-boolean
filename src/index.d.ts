@@ -246,7 +246,7 @@ export interface OrientSolidResult {
 	diagnostics: OrientSolidDiagnostics;
 }
 
-export function orientSolid(soup: TriangleSoup, options?: { outward?: boolean }): OrientSolidResult;
+export function orientSolid(soup: TriangleSoup, options?: { outward?: boolean; coherenceOnly?: boolean }): OrientSolidResult;
 export function weldBoundaryVertices(tris: TriangleSoup, tolerance: number): TriangleSoup;
 
 // ── Mesh format conversion aliases ──
@@ -372,3 +372,260 @@ export function decomposeIndexedGroups(indexed: IndexedGroups, smallThreshold?: 
 
 /** Fold indexed components below `threshold` triangles into the largest component. */
 export function mergeSmallIndexedComponents(comps: IndexedTri[][], threshold: number): IndexedTri[][];
+
+// ── Self-intersection fold resolver (mesh arrangement + winding number) ──
+
+/** Shared-pool vertex — deduplicated by tolerance, identity-comparable. */
+export interface PoolVertex extends Vertex {
+	id: number;
+	triRefs: Array<{ mesh: string; triIdx: number }>;
+}
+
+/** Shared vertex pool (createVertexPool). */
+export interface VertexPool {
+	getOrCreate(x: number, y: number, z: number, triRef?: { mesh: string; triIdx: number }): PoolVertex;
+	getAll(): PoolVertex[];
+	size(): number;
+}
+
+/** Mega-soup triangle: split output tagged with source mesh + original index. */
+export interface MegaSoupTriangle extends Triangle {
+	mesh: string;
+	origIdx: number;
+}
+
+/** Convex coplanar overlap polygon of two triangles (the fold primitive). */
+export function coplanarOverlap(
+	triA: Triangle,
+	triB: Triangle,
+	options?: { nearParallel?: number; distTolerance?: number; weldTolerance?: number; minAreaRatio?: number }
+): { polygon: Vertex[]; area: number; areaRatio: number } | null;
+
+/** Emit overlap-polygon edges as pool-shared intersection segments. */
+export function emitCoplanarSegments(
+	polygon: Vertex[],
+	pool: VertexPool,
+	refA: { mesh: string; triIdx: number },
+	refB: { mesh: string; triIdx: number }
+): TaggedSegment[];
+
+export interface SelfIntersectStats {
+	candidatePairs: number;
+	coplanarPairs: number;
+	crossingPairs: number;
+	refinementSplits: number;
+	edgeSteinerPoints?: number;
+	edgeSteinerTris?: number;
+}
+
+/**
+ * Build the edge-Steiner map: intersection-segment endpoints lying ON triangle
+ * edges, registered against every triangle owning that edge, so all sides split
+ * the edge at the same shared PoolVertex (conforming, no T-junction).
+ */
+export function buildEdgeSteinerMap(
+	triCount: number,
+	triOf: (t: number) => Triangle,
+	keyOf: (t: number, cornerIdx: number) => string | number,
+	segments: TaggedSegment[],
+	tol: number
+): Record<number, PoolVertex[]>;
+
+/** Self-intersect one soup: Moller crossings + coplanar folds through one shared pool. */
+export function bmsSelfIntersect(
+	soup: TriangleSoup,
+	options?: { tolerance?: number; minAreaRatio?: number; coplanarDistTolerance?: number }
+): { segments: TaggedSegment[]; crossedSet: Record<number, TaggedSegment[]>; pool: VertexPool; stats: SelfIntersectStats };
+
+/** Self-arrangement: intersect + conforming split into a mega soup. */
+export function bmsSelfArrange(
+	soup: TriangleSoup,
+	options?: { tolerance?: number; minAreaRatio?: number; noTranslate?: boolean }
+): { megaSoup: MegaSoupTriangle[]; segments: TaggedSegment[]; crossedSet: Record<number, TaggedSegment[]>; pool: VertexPool; stats: SelfIntersectStats };
+
+export interface SelfResolveDiagnostics {
+	inputTris: number;
+	segments: number;
+	coplanarPairs: number;
+	crossingPairs: number;
+	refinementSplits: number;
+	crossedTris: number;
+	subTris: number;
+	classified: number;
+	kept: number;
+	dropped: number;
+	flipped: number;
+	duplicateGroups?: number;
+	duplicatesRemoved: number;
+	dedupClusters?: number;
+	preOrient: boolean;
+	preOrientFlips: number;
+	preOrientSeamViolations: number;
+	/** Open edges of the CONFORMING arrangement (welded), before winding drop. */
+	arrangementOpenEdges?: number;
+	/** Region-consistent (patch) classification stats (when the patch path runs). */
+	patches?: number;
+	keptPatches?: number;
+	droppedPatches?: number;
+	/** "cell-complex" or "patch" — which classifier produced the result. */
+	classifier?: string;
+	/** cell-complex stats (always computed unless classifier:"patch"). */
+	cellComplex?: CellComplexDiagnostics;
+	orient: OrientSolidDiagnostics | null;
+}
+
+/**
+ * One-call exact fold resolver (soup in, soup out): self-arrange →
+ * winding-number extraction → coincident dedup → orientSolid.
+ */
+export function bmsSelfResolve(
+	soup: TriangleSoup,
+	options?: {
+		tolerance?: number;
+		minAreaRatio?: number;
+		farField?: "keep" | "classify";
+		threshold?: number;
+		offsetFactor?: number;
+		samplesPerPatch?: number;
+		weldTolerance?: number;
+		classifier?: "cell" | "patch";
+		leakTolerance?: number;
+		seamTolerance?: number;
+		/** Opt-in (default false): EXACT coincident-sheet snap in the leak-recovery. */
+		exactSeamSnap?: boolean;
+		exactSeamTolerance?: number;
+		orient?: boolean;
+		preOrient?: boolean;
+	}
+): { soup: TriangleSoup; changed: boolean; diagnostics: SelfResolveDiagnostics };
+
+/** Snap intersection-segment endpoints within snapTol of an original vertex onto it. */
+export function snapEndpointsToVertices(soup: TriangleSoup, segments: TaggedSegment[], snapTol: number): number;
+
+/**
+ * Condition a nearly-conforming arrangement toward watertight — targeted seam
+ * snap-round (open-edge vertices only) + seam-loop hole-fill, iterated. No-op on
+ * a watertight input. Preserves volume by touching only the seam region.
+ */
+export function conditionArrangement(
+	soup: TriangleSoup,
+	seamTol: number,
+	maxPasses?: number
+): { soup: TriangleSoup; openBefore: number; openAfter: number; capsAdded: number; snaps: number };
+
+/**
+ * EXACT coincident-sheet snapping: snap near-coincident coplanar face pairs
+ * (coplanarity via robust orient3d) to TRUE coincidence so the cell-complex
+ * facet-merge cancels opposite coplanar sub-faces and the radial fan becomes
+ * unambiguous. Only coincident-pair vertices move (≤ tol) → volume preserved.
+ */
+export function snapCoincidentSheets(
+	soup: TriangleSoup,
+	tol: number
+): { soup: TriangleSoup; snappedVertices: number; coincidentPairs: number };
+
+/** Weld a tagged soup to shared representative vertices (mesh/origIdx preserved). */
+export function weldTaggedSoup(
+	soup: Array<Triangle & { mesh?: string; origIdx?: number }>,
+	tol: number,
+	seedVertices?: Vertex[]
+): { soup: Array<Triangle & { mesh?: string; origIdx?: number }>; repOf: (x: number, y: number, z: number) => Vertex | null };
+
+/** Region-consistent (patch) winding classification — one decision per patch. */
+export function extractByWindingPatches(
+	subTris: TriangleSoup,
+	barrierKeys: Record<string, boolean>,
+	windingFn: (px: number, py: number, pz: number) => number,
+	options?: { threshold?: number; offsetFactor?: number; samplesPerPatch?: number }
+): { kept: TriangleSoup; patches: number; keptPatches: number; droppedPatches: number };
+
+export interface CellComplexDiagnostics {
+	faces: number; edges: number; cells: number; components: number;
+	windingMin: number; windingMax: number;
+	propagationViolations: number;
+	openEdges: number; nonManifoldEdges: number; degenerateFaces: number;
+	/** cells whose interior GWN samples are mixed (inside↔outside merged via a hole) */
+	leakedCells: number;
+	/** face-weight fraction in leaked cells — caller falls back above ~0.02 */
+	leakedFaceFraction: number;
+}
+
+/**
+ * Volumetric winding extraction via a 3-D cell complex (Zhou et al. 2016):
+ * radial edge fans → cells → per-cell winding → keep faces between inside
+ * (≥threshold) and outside cells. Manifold by construction. Needs a watertight
+ * arrangement; where a residual hole leaks inside↔outside, `leakedFaceFraction`
+ * flags it so the caller can fall back to the patch classifier.
+ */
+export function extractByCellComplex(
+	soup: TriangleSoup,
+	windingFn: (px: number, py: number, pz: number) => number,
+	options?: { threshold?: number; offsetFactor?: number; offsetSamples?: number; debug?: boolean }
+): { kept: TriangleSoup; diagnostics: CellComplexDiagnostics };
+
+export interface SelfResolveIndexedDiagnostics {
+	inputTris: number;
+	bandTris: number;
+	segments: number;
+	coplanarPairs: number;
+	crossingPairs: number;
+	refinementSplits: number;
+	subTris: number;
+	kept: number;
+	dropped: number;
+	flipped: number;
+	duplicateGroups: number;
+	duplicatesRemoved: number;
+	dedupClusters: number;
+	preOrient: boolean;
+	preOrientFlips: number;
+	preOrientSeamViolations: number;
+	edgeSteinerPoints?: number;
+	edgeSteinerTris?: number;
+	newVertices: number;
+	outputTris: number;
+}
+
+/**
+ * INDEXED, narrow-band fold resolver: candidate detection on raw typed
+ * arrays, arrangement + winding classification on the band only, far
+ * triangles pass through by index. Cost scales with fold count, not mesh size.
+ */
+export function bmsSelfResolveIndexed(
+	mesh: { positions: Float64Array | number[]; index: Uint32Array | number[] },
+	options?: { tolerance?: number; minAreaRatio?: number; threshold?: number; offsetFactor?: number; preOrient?: boolean }
+): { positions: Float64Array; index: Uint32Array; changed: boolean; diagnostics: SelfResolveIndexedDiagnostics };
+
+/** Signed solid angle (Van Oosterom & Strackee) of triangle abc from point p. */
+export function solidAngleAt(
+	px: number, py: number, pz: number,
+	ax: number, ay: number, az: number,
+	bx: number, by: number, bz: number,
+	cx: number, cy: number, cz: number
+): number;
+
+/** Signed solid angle of a soup triangle from point p. */
+export function solidAngle(p: Vertex, tri: Triangle): number;
+
+/** Generalized winding number (Jacobson 2013) of p w.r.t. a soup. */
+export function windingNumber(p: Vertex, soup: TriangleSoup): number;
+
+/** Generalized winding number over raw typed arrays (no soup). */
+export function windingNumberIndexed(
+	px: number, py: number, pz: number,
+	positions: Float64Array | number[],
+	index: Uint32Array | number[]
+): number;
+
+/** Winding-number STEP extraction — keep sub-triangles on the solid boundary. */
+export function extractByWinding(
+	subTris: TriangleSoup,
+	windingFn: (px: number, py: number, pz: number) => number,
+	options?: { threshold?: number; offsetFactor?: number }
+): { kept: TriangleSoup; dropped: number; flipped: number; keptFlags: Uint8Array; flipFlags: Uint8Array };
+
+/** Remove coincident duplicate sheets (exact triples + cluster re-CDT). */
+export function dedupCoincidentTriangles(
+	tris: TriangleSoup,
+	options?: { minAreaRatio?: number }
+): { soup: TriangleSoup; duplicateGroups: number; duplicatesRemoved: number; clusters: number; clusterTrisIn: number; clusterTrisOut: number };

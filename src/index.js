@@ -76,6 +76,14 @@ export { verifyBmsClassification } from "./bms/bmsVerify.js";
 export { heffalumpClassify, shouldUseHeffalump, reclassifyTriangles, reclassifyAtPoint, reclassifyRegion } from "./bms/heffalumpClassify.js";
 export { bmsBooleanOp } from "./bms/bmsBooleanOp.js";
 
+// ── Self-intersection fold resolver (mesh arrangement + winding number) ──
+export { coplanarOverlap, emitCoplanarSegments } from "./intersect/coplanarOverlap.js";
+export { bmsSelfIntersect, bmsSelfArrange, bmsSelfResolve, buildEdgeSteinerMap, snapEndpointsToVertices, weldTaggedSoup, conditionArrangement, snapCoincidentSheets } from "./bms/bmsSelfArrange.js";
+export { bmsSelfResolveIndexed } from "./bms/bmsSelfResolveIndexed.js";
+export { solidAngle, solidAngleAt, windingNumber, windingNumberIndexed, extractByWinding, extractByWindingPatches } from "./classify/windingNumber.js";
+export { extractByCellComplex } from "./classify/cellComplex.js";
+export { dedupCoincidentTriangles } from "./classify/coincidentDedup.js";
+
 // ── Utilities ──
 export { dist3, distSq3, triangleArea3D, computeBounds, cross, lerpVert, vKey, edgeKey, countOpenEdges } from "./util/math.js";
 export { findConnectedComponents, findConnectedComponentsPooled } from "./util/connectedComponents.js";

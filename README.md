@@ -302,6 +302,51 @@ Hybrid classification (v0.5.0). Barrier flood-fill produces connected components
 
 Also extracts per-component boundary walk segments (`componentWalks`) for visualization.
 
+### Self-Intersection Fold Resolver (v0.6.0)
+
+Resolves a self-intersecting, coincident-folded, or **non-orientable** closed mesh into a clean solid — the case `orientSolid` alone cannot fix, because a folded component has no consistent winding to orient toward. It re-cuts the coincident and self-crossing triangles into a conforming mesh arrangement, then classifies the resulting cells by generalized winding number (Zhou et al. 2016 + Jacobson et al. 2013).
+
+This is a purely **additive** feature: every function below is a new export, and no existing API, default, or output changed. The A-vs-B `bmsBooleanOp` / `boolean` paths are byte-for-byte unchanged (the new edge-Steiner split path only activates when a self-arrangement populates `intersectResult.edgePointsA/B`, and the new `orientSolid` branch only runs under `options.coherenceOnly`).
+
+#### `bmsSelfResolveIndexed(indexed, options?)`
+
+Main entry. Takes and returns **indexed** geometry — the efficient form for large meshes.
+
+```javascript
+import { bmsSelfResolveIndexed } from 'trimesh-boolean';
+
+var result = bmsSelfResolveIndexed(
+  { positions: Float64Array, index: Uint32Array },   // xyz-per-vertex + triangle indices
+  { weldTolerance: /* default avgEdge · 0.012 */ }   // all options opt-in
+);
+// result = { positions: Float64Array, index: Uint32Array, diagnostics }
+```
+
+`diagnostics` reports what happened, honestly:
+- `classifier` — `"cell-complex"` when the mesh resolved watertight, `"patch"` when it fell back (see below).
+- `arrangementOpenEdges`, `preOrientSeamViolations` — residual non-orientable seams, if any.
+- `cellComplex.leakedFaceFraction`, `seamOpenBefore` / `seamOpenAfter` — per-mesh, where inside and outside could not be separated.
+
+**Genuinely-degenerate input** — coincident folds whose seam glues inside to outside as a single topological cell — cannot be made watertight by any winding method. On those, the resolver **falls back to a volume-accurate result** (typical volume error < 0.01%) rather than tearing or collapsing the mesh, and reports `classifier: "patch"`. It never ships a proximity-stitch collapse.
+
+**Coincident-sheet vs. pinch (v0.6.1).** Some degenerate leaks come from *near*-coincident coplanar sheets — vertices within tolerance but not exactly equal — which the radial fan then glues ambiguously. `exactSeamSnap: true` (default off) collapses those pairs to *exact* coincidence with robust predicates, so the facet-merge cancels them and the cell complex can separate inside from outside; only coincident-pair vertices move (≤ tolerance, and a zero-thickness pair encloses no volume, so volume is preserved). Enable it and read `diagnostics.exactSeamSnap.coincidentPairs` and `diagnostics.cellComplexConditioned.leakedFaceFraction`: if the leak drops below `leakTolerance` the mesh closes via the cell complex; if it **holds**, the leak is a genuine topological **pinch** (the surface passes through itself — inside and outside are one cell), which no winding method can separate, so it stays on the volume-safe patch. Default-off keeps the 0.6.0 path byte-for-byte unchanged.
+
+#### `bmsSelfResolve(soup, options?)`
+
+Soup-form entry (`{v0,v1,v2}[]` in, `{ soup, diagnostics }` out) for when you are not already indexed.
+
+#### Pipeline internals (advanced)
+
+Exposed for composition and testing; you normally only need the two entries above.
+
+- `coplanarOverlap`, `emitCoplanarSegments` — coincident (coplanar) overlap detection and segment emission. This is the fold case the classic Möller test near-parallel-rejects, so ordinary intersection never sees it.
+- `bmsSelfIntersect`, `bmsSelfArrange` — self-intersection detection and the conforming self-arrangement (shared-pool edge-Steiner splits → no T-junctions).
+- `conditionArrangement` — opt-in seam snap-round + hole-fill; runs only when the cell complex detects a leak, and is a no-op on watertight input.
+- `snapCoincidentSheets` (v0.6.1) — the `exactSeamSnap` primitive: union-finds near-coincident coplanar face-pair vertices onto a shared representative (exact coincidence) so facet-merge cancels them; a no-op on non-coincident geometry.
+- `solidAngle`, `windingNumber`, `windingNumberIndexed`, `extractByWinding`, `extractByWindingPatches` — the generalized winding-number field and surface extraction.
+- `extractByCellComplex` — the volumetric cell-complex classifier (radial edge fans → cells → winding propagation → manifold-by-construction extraction).
+- `dedupCoincidentTriangles` — exact coincident-face deduplication.
+
 ### Heffalump Classifier (v0.5.5)
 
 The heffalump classifier is a barrier-only classification strategy for meshes with defective topology (non-manifold edges, fragmented boundaries, cracks, holes). Instead of relying on boundary walks (which break when the boundary is fragmented), it classifies each triangle individually:

@@ -21,10 +21,19 @@ import { needsSliverGuard, interiorLatticePoints } from "../boolean/sliverGuard.
  * @param {Array<{ p0: PoolVertex, p1: PoolVertex }>} segments - Intersection segments with pool vertices
  * @param {Array<{x,y,z}>} [extraPoints] - Additional interior Steiner points
  *        (sliver guard lattice) — plain vertices, not pool vertices
+ * @param {Array<PoolVertex>} [edgePoolPoints] - Pool vertices that lie on THIS
+ *        triangle's EDGES, contributed by a NEIGHBOURING triangle's intersection
+ *        segments (conforming edge splits). Inserted as vertices with shared pool
+ *        identity, NOT as constraints — being present on the shared edge is enough
+ *        for the triangulation to split that edge at the SAME point on both sides,
+ *        eliminating the T-junction. (Self-intersection segments routinely END on
+ *        the mesh's own manifold edges; A-vs-B booleans never hit this.)
  * @returns {Array<{ v0: Object, v1: Object, v2: Object }>} Sub-triangles
  */
-function bmsRetriangulate(tri, segments, extraPoints) {
-	if (!segments || segments.length === 0) return [tri];
+function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
+	var hasEdgePts = edgePoolPoints && edgePoolPoints.length > 0;
+	if ((!segments || segments.length === 0) && !hasEdgePts) return [tri];
+	segments = segments || [];
 
 	// -- Step 1: Build local 2D coordinate frame on triangle plane --
 	var e1x = tri.v1.x - tri.v0.x;
@@ -170,6 +179,38 @@ function bmsRetriangulate(tri, segments, extraPoints) {
 		}
 	}
 
+	// -- Step 2b: Edge Steiner points from neighbouring triangles --
+	// Same identity handling as the segment Steiner points, but these come from
+	// a neighbour's segment endpoint that lands on one of THIS triangle's edges.
+	// Inserted as vertices only (no constraint) — the shared PoolVertex makes the
+	// edge split match the neighbour's exactly → conforming, no T-junction.
+	if (hasEdgePts) {
+		for (var ei = 0; ei < edgePoolPoints.length; ei++) {
+			var ep = edgePoolPoints[ei];
+			var epk = vKey(ep);
+			if (epk === v0Key || epk === v1Key || epk === v2Key) {
+				if (ep.id !== undefined) idToIndex[ep.id] = keyToIndex[epk];
+				continue;
+			}
+			if (ep.id !== undefined && seenIds[ep.id]) continue;
+			if (ep.id !== undefined) seenIds[ep.id] = true;
+
+			// Accept on-edge / inside points (on-edge passes exactPointInTri3D since
+			// one determinant is exactly 0 → not both-signs). Reject far-outside drift.
+			if (!exactPointInTri3D(ep)) {
+				var elp = toLocal(ep);
+				var ebc = baryCoords(elp[0], elp[1]);
+				if (Math.min(ebc[0], ebc[1], ebc[2]) < -0.01) continue;
+			}
+
+			var eidx = pts.length;
+			pts.push(ep);
+			if (ep.id !== undefined) idToIndex[ep.id] = eidx;
+			keyToIndex[epk] = eidx;
+			validSteiner.push(ep);
+		}
+	}
+
 	if (validSteiner.length === 0 && (!extraPoints || extraPoints.length === 0)) return [tri];
 
 	// Sliver guard lattice points: strictly interior, no pool identity needed
@@ -274,8 +315,16 @@ function bmsRetriangulate(tri, segments, extraPoints) {
  *
  * Falls back to bmsRetriangulate for multi-chain, same-edge entry/exit,
  * or vertex-hit cases.
+ *
+ * @param {Array<PoolVertex>} [edgePoolPoints] - Edge Steiner points (see
+ *        bmsRetriangulate). When present, fan cannot place arbitrary edge points,
+ *        so re-triangulation goes straight to CDT (bmsRetriangulate).
  */
-function bmsFanTriangulate(tri, segments) {
+function bmsFanTriangulate(tri, segments, edgePoolPoints) {
+	// Fan can't honour arbitrary edge points — CDT them in with the segments.
+	if (edgePoolPoints && edgePoolPoints.length > 0) {
+		return bmsRetriangulate(tri, segments, undefined, edgePoolPoints);
+	}
 	if (!segments || segments.length === 0) return [tri];
 
 	// Step 1: Chain segments using identity-based chaining
@@ -446,12 +495,17 @@ function bmsFanTriangulate(tri, segments) {
 export function bmsSplit(trisA, trisB, intersectResult) {
 	var crossedSetA = intersectResult.crossedSetA;
 	var crossedSetB = intersectResult.crossedSetB;
+	// Optional edge-Steiner maps (conforming edge splits for self-intersection).
+	var edgePointsA = intersectResult.edgePointsA || {};
+	var edgePointsB = intersectResult.edgePointsB || {};
 	var megaSoup = [];
 
 	// Process mesh A
 	for (var i = 0; i < trisA.length; i++) {
-		if (!crossedSetA[i]) {
-			// Non-crossed: pass through directly
+		var segsA = crossedSetA[i];
+		var epsA = edgePointsA[i];
+		if (!segsA && (!epsA || epsA.length === 0)) {
+			// Neither crossed nor carrying edge points: pass through directly
 			megaSoup.push({
 				v0: trisA[i].v0,
 				v1: trisA[i].v1,
@@ -460,8 +514,8 @@ export function bmsSplit(trisA, trisB, intersectResult) {
 				origIdx: i
 			});
 		} else {
-			// Crossed: re-triangulate with pool vertices
-			var subTris = bmsFanTriangulate(trisA[i], crossedSetA[i]);
+			// Crossed and/or edge-point-bearing: re-triangulate with pool vertices
+			var subTris = bmsFanTriangulate(trisA[i], segsA || [], epsA);
 			for (var si = 0; si < subTris.length; si++) {
 				megaSoup.push({
 					v0: subTris[si].v0,
@@ -476,7 +530,9 @@ export function bmsSplit(trisA, trisB, intersectResult) {
 
 	// Process mesh B
 	for (var j = 0; j < trisB.length; j++) {
-		if (!crossedSetB[j]) {
+		var segsB = crossedSetB[j];
+		var epsB = edgePointsB[j];
+		if (!segsB && (!epsB || epsB.length === 0)) {
 			megaSoup.push({
 				v0: trisB[j].v0,
 				v1: trisB[j].v1,
@@ -485,7 +541,7 @@ export function bmsSplit(trisA, trisB, intersectResult) {
 				origIdx: j
 			});
 		} else {
-			var subTrisB = bmsFanTriangulate(trisB[j], crossedSetB[j]);
+			var subTrisB = bmsFanTriangulate(trisB[j], segsB || [], epsB);
 			for (var sj = 0; sj < subTrisB.length; sj++) {
 				megaSoup.push({
 					v0: subTrisB[sj].v0,
