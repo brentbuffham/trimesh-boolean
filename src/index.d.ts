@@ -216,6 +216,10 @@ export function estimateAvgEdge(tris: TriangleSoup): number;
 export function repairMesh(soup: TriangleSoup, config?: RepairConfig, onProgress?: (msg: string) => void): Promise<RepairResult>;
 export function deduplicateSeamVertices(tris: TriangleSoup, tolerance?: number): TriangleSoup;
 export function resolveTJunctions(soup: TriangleSoup, tolerance?: number, maxPasses?: number): TriangleSoup;
+/** Hole-free T-junction resolution: shared welded identity so triangles across an edge split it identically (no cracks). */
+export function resolveTJunctionsHoleFree(soup: TriangleSoup, tolerance?: number, maxPasses?: number): TriangleSoup;
+/** Cancel opposite-winding coincident triangle pairs (zero-thickness membranes). Stricter/safer than removeOverlappingTriangles. */
+export function cancelCoincidentFaces(soup: TriangleSoup, tolerance?: number): TriangleSoup;
 export function weldVertices(tris: TriangleSoup, tolerance: number): WeldedMesh;
 export function weldedToSoup(weldedTriangles: WeldedTriangle[]): TriangleSoup;
 export function removeDegenerateTriangles(tris: TriangleSoup, minArea?: number, sliverRatio?: number): TriangleSoup;

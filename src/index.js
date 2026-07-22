@@ -30,6 +30,8 @@ export {
 export { repairMesh } from "./repair/repairMesh.js";
 export { deduplicateSeamVertices } from "./repair/deduplicateVertices.js";
 export { resolveTJunctions } from "./repair/resolveTJunctions.js";
+export { resolveTJunctionsHoleFree } from "./repair/resolveTJunctionsHoleFree.js";
+export { cancelCoincidentFaces } from "./repair/cancelCoincidentFaces.js";
 export { weldVertices, weldedToSoup } from "./repair/weldVertices.js";
 
 // ── Mesh format conversion aliases ──

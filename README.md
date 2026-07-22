@@ -436,6 +436,8 @@ Individual repair steps, usable standalone:
 |----------|-------------|
 | `deduplicateSeamVertices(tris, tol?)` | Merge coincident seam vertices |
 | `resolveTJunctions(soup, tol?, maxPasses?)` | Split edges at T-junction vertices |
+| `resolveTJunctionsHoleFree(soup, tol?, maxPasses?)` | Hole-free T-junction resolution (shared welded identity, no cracks) |
+| `cancelCoincidentFaces(soup, tol?)` | Cancel opposite-winding coincident pairs (zero-thickness membranes) |
 | `weldVertices(tris, tolerance)` | Merge vertices within tolerance → indexed mesh |
 | `weldedToSoup(weldedTris)` | Convert indexed mesh back to soup |
 | `removeDegenerateTriangles(tris, minArea?, sliverRatio?)` | Remove zero-area and sliver triangles |
@@ -451,6 +453,39 @@ Individual repair steps, usable standalone:
 | `weldBoundaryVertices(tris, tolerance)` | Weld boundary-only vertices |
 | `soupToIndexed(tris, tolerance)` | Alias for `weldVertices` — convert soup to indexed mesh |
 | `indexedToSoup(weldedTris)` | Alias for `weldedToSoup` — convert indexed mesh back to soup |
+
+#### Hole-free repair (v0.6.2)
+
+Polygon/prism cuts on **battered** (near- but not-quite-vertical) walls can leave two artifacts
+where the cut grazes a triangle near an edge: sub-tolerance slivers weld back onto the surface with
+the **reverse winding** (zero-thickness "membrane" pairs), and the off-edge crossing vertex becomes a
+**T-junction**. These preserve volume but z-fight on render and break downstream tooling.
+
+The existing `resolveTJunctions` keys vertices with `toFixed()` strings, so two triangles sharing an
+edge can disagree on that edge's split points and the mesh **tears open**. The two functions below fix
+both artifacts **without opening the mesh**:
+
+```js
+import { cancelCoincidentFaces, resolveTJunctionsHoleFree } from "trimesh-boolean";
+
+// 1) remove the zero-thickness membranes (opposite-winding coincident pairs only —
+//    same-winding duplicates and degenerates are left for the dedup/degenerate passes)
+var soup = cancelCoincidentFaces(piece, weldEps);
+
+// 2) resolve remaining T-junctions hole-free
+soup = resolveTJunctionsHoleFree(soup, weldEps);
+```
+
+- **Identity** is a **neighbourhood-weld integer pool** (`round(x/eps)` with a 27-cell search), not
+  `toFixed()` and not exact rationals — welding is a tolerance operation, so two triangles across a
+  shared edge resolve to the *same* vertex ids and split that edge identically. Exact predicates stay
+  reserved for orientation *signs*, not fuzzy identity.
+- `cancelCoincidentFaces` is **stricter and safer** than `removeOverlappingTriangles`: it cancels only
+  *exact* opposite-winding coincident pairs, so it never deletes near-coincident but genuinely-distinct
+  wall triangles (which would tear holes).
+- `resolveTJunctionsHoleFree` re-triangulates each affected triangle with a **local-frame Delaunay**
+  pass (never a corner fan, which emits collinear zero-area slivers) and re-orients each sub-triangle
+  to the source normal. It inserts only existing vertices, so it converges in a couple of passes.
 
 ### Component Functions
 
