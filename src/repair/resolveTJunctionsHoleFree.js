@@ -61,8 +61,19 @@ export function resolveTJunctionsHoleFree(soup, tolerance, maxPasses) {
 		}
 		var V = pool.points;
 
-		// vertex grid for on-edge queries
-		var gcell = Math.max(tol * 16, 1e-6);
+		// Vertex grid for on-edge queries. The cell MUST be sized to the mean edge
+		// length, NOT the tolerance: interiorOnEdge walks along each edge in steps of
+		// one cell, so a tol-sized cell (e.g. 0.016 m) makes a 50 m edge take ~3000
+		// steps (measured 25 s on an 876-tri piece). A mean-edge cell keeps it to a
+		// handful of steps per edge while still bucketing ~1 vertex per cell.
+		var eSum = 0, eCnt = 0, nSamp = Math.min(work.length, 300);
+		for (var es = 0; es < nSamp; es++) {
+			var et = work[es];
+			eSum += edist(et.v0, et.v1) + edist(et.v1, et.v2) + edist(et.v2, et.v0);
+			eCnt += 3;
+		}
+		var avgEdge = eCnt > 0 ? eSum / eCnt : 1;
+		var gcell = Math.max(avgEdge, tol * 4, 1e-6);
 		var ginv = 1 / gcell;
 		var vgrid = new Map();
 		for (var vi = 0; vi < V.length; vi++) {
@@ -142,6 +153,11 @@ export function resolveTJunctionsHoleFree(soup, tolerance, maxPasses) {
 		if (splits === 0) break;
 	}
 	return work;
+}
+
+function edist(a, b) {
+	var dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+	return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 function collect(hits, V, into) {

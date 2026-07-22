@@ -1,6 +1,6 @@
 {
   "name": "trimesh-boolean",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Triangle mesh boolean operations — supports open surfaces, terrain intersection, and mesh repair",
   "type": "module",
   "main": "build/trimesh-boolean.umd.cjs",

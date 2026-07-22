@@ -193,4 +193,27 @@ describe("resolveTJunctionsHoleFree", function () {
 		expect(measure(out, 1e-6).tj).toBe(0);
 		expect(measure(out, 1e-6).degen).toBe(0);
 	});
+
+	it("stays fast on a dense large-coordinate mesh (grid cell ~ mean edge, not tolerance)", function () {
+		// ~1800 triangles over UTM-ish coords with ~30 m edges + one T-junction. If the
+		// on-edge grid cell were tolerance-sized (0.016 m) the segment walk would take
+		// ~1800*3*(30/0.016)*27 ≈ 270M ops (many seconds); sized to the mean edge it's
+		// a few ops per edge. Guarded by the timeout below + an explicit bound.
+		var N = 30, step = 30, base = 478000;
+		var pts = [];
+		for (var j = 0; j <= N; j++) for (var i = 0; i <= N; i++) pts.push({ x: base + i * step, y: base + j * step, z: 0 });
+		function P(i, j) { return pts[j * (N + 1) + i]; }
+		var soup = [];
+		for (var jj = 0; jj < N; jj++) for (var ii = 0; ii < N; ii++) {
+			soup.push({ v0: P(ii, jj), v1: P(ii + 1, jj), v2: P(ii + 1, jj + 1) });
+			soup.push({ v0: P(ii, jj), v1: P(ii + 1, jj + 1), v2: P(ii, jj + 1) });
+		}
+		// a triangle whose long edge passes through an existing grid vertex -> T-junction
+		soup.push({ v0: P(4, 5), v1: P(6, 5), v2: P(5, 6) }); // P(5,5) sits on edge P(4,5)-P(6,5)
+		var t0 = Date.now();
+		var out = resolveTJunctionsHoleFree(soup, 1e-3);
+		var ms = Date.now() - t0;
+		expect(ms).toBeLessThan(3000);
+		expect(out.length).toBeGreaterThan(soup.length - 5); // completed, geometry retained
+	}, 5000);
 });
