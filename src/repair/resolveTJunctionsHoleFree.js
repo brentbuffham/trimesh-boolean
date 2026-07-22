@@ -78,25 +78,36 @@ export function resolveTJunctionsHoleFree(soup, tolerance, maxPasses) {
 			var L2 = dx * dx + dy * dy + dz * dz;
 			if (L2 < 1e-20) return null;
 			var hits = null;
-			var mnx = Math.min(A.x, B.x) - tol, mxx = Math.max(A.x, B.x) + tol;
-			var mny = Math.min(A.y, B.y) - tol, mxy = Math.max(A.y, B.y) + tol;
-			var mnz = Math.min(A.z, B.z) - tol, mxz = Math.max(A.z, B.z) + tol;
-			for (var cx = Math.floor(mnx * ginv); cx <= Math.floor(mxx * ginv); cx++) {
-				for (var cy = Math.floor(mny * ginv); cy <= Math.floor(mxy * ginv); cy++) {
-					for (var cz = Math.floor(mnz * ginv); cz <= Math.floor(mxz * ginv); cz++) {
-						var arr = vgrid.get(cx + "," + cy + "," + cz);
-						if (!arr) continue;
-						for (var k = 0; k < arr.length; k++) {
-							var v = arr[k];
-							if (v === a || v === b) continue;
-							var P = V[v];
-							var s = ((P.x - A.x) * dx + (P.y - A.y) * dy + (P.z - A.z) * dz) / L2;
-							if (s <= 1e-9 || s >= 1 - 1e-9) continue; // strictly interior
-							var px = A.x + s * dx, py = A.y + s * dy, pz = A.z + s * dz;
-							var ex = P.x - px, ey = P.y - py, ez = P.z - pz;
-							if (ex * ex + ey * ey + ez * ez > tol2) continue;
-							if (!hits) hits = [];
-							hits.push({ v: v, s: s });
+			// Walk ALONG the segment (spacing <= one grid cell) and test the 27-cell
+			// neighbourhood of each sample. This is O(length/cell), not O(bbox area) —
+			// a long diagonal edge would otherwise sweep hundreds of thousands of cells.
+			var L = Math.sqrt(L2);
+			var steps = Math.ceil(L * ginv) + 1;
+			var seen = null; // lazily allocated Set of vertex ids already tested
+			for (var st = 0; st <= steps; st++) {
+				var f = st / steps;
+				var sx = A.x + f * dx, sy = A.y + f * dy, sz = A.z + f * dz;
+				var bx = Math.floor(sx * ginv), by = Math.floor(sy * ginv), bz = Math.floor(sz * ginv);
+				for (var ox = -1; ox <= 1; ox++) {
+					for (var oy = -1; oy <= 1; oy++) {
+						for (var oz = -1; oz <= 1; oz++) {
+							var arr = vgrid.get((bx + ox) + "," + (by + oy) + "," + (bz + oz));
+							if (!arr) continue;
+							for (var k = 0; k < arr.length; k++) {
+								var v = arr[k];
+								if (v === a || v === b) continue;
+								if (seen && seen.has(v)) continue;
+								if (!seen) seen = new Set();
+								seen.add(v);
+								var P = V[v];
+								var s = ((P.x - A.x) * dx + (P.y - A.y) * dy + (P.z - A.z) * dz) / L2;
+								if (s <= 1e-9 || s >= 1 - 1e-9) continue; // strictly interior
+								var px = A.x + s * dx, py = A.y + s * dy, pz = A.z + s * dz;
+								var ex = P.x - px, ey = P.y - py, ez = P.z - pz;
+								if (ex * ex + ey * ey + ez * ez > tol2) continue;
+								if (!hits) hits = [];
+								hits.push({ v: v, s: s });
+							}
 						}
 					}
 				}

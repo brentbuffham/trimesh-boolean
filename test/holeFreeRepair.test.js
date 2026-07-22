@@ -176,4 +176,21 @@ describe("resolveTJunctionsHoleFree", function () {
 		expect(out.length).toBe(4);
 		expect(totalArea(out)).toBeCloseTo(totalArea(t), 9);
 	});
+
+	it("scales to long diagonal edges (segment walk, not bbox sweep)", function () {
+		// A long diagonal edge (0,0)->(100,100) with a mid-edge vertex. The old
+		// on-edge query iterated the edge's bounding BOX of grid cells — ~100/eps per
+		// axis squared = tens of millions of cells -> multi-second hang. The segment
+		// walk is O(length/cell). This test must finish well under the default timeout.
+		var A = { x: 0, y: 0, z: 0 }, B = { x: 100, y: 100, z: 0 }, M = { x: 50, y: 50, z: 0 };
+		var Lap = { x: 0, y: 100, z: 0 }, Rap = { x: 100, y: 0, z: 0 };
+		var patch = [
+			{ v0: A, v1: M, v2: Lap },
+			{ v0: M, v1: B, v2: Lap },
+			{ v0: A, v1: Rap, v2: B } // unsplit -> T-junction at M on the long diagonal
+		];
+		var out = resolveTJunctionsHoleFree(patch, 1e-3);
+		expect(measure(out, 1e-6).tj).toBe(0);
+		expect(measure(out, 1e-6).degen).toBe(0);
+	});
 });
