@@ -194,6 +194,38 @@ describe("resolveTJunctionsHoleFree", function () {
 		expect(measure(out, 1e-6).degen).toBe(0);
 	});
 
+	it("resolves NEAR-edge T-junctions without slivers or holes (boolean/clip seam case)", function () {
+		// Boolean/clip seams place the hanging vertex WITHIN tolerance of the host edge but
+		// NOT exactly on it. Inserting the neighbour's RAW vertex left near-collinear points
+		// -> Delaunay emits wafer-thin slivers, some fall just outside the parent and are
+		// dropped ("outside parent") -> holes, and the vertex stays a T-junction on the new
+		// sub-edges (measured: tj 8 -> 7, minArea 0.00025). Snapping each on-edge hit to its
+		// perpendicular projection puts it dead on the host edge so the fan tiles exactly.
+		var A = { x: 0, y: 0, z: 0 }, B = { x: 10, y: 0, z: 0 }, Lap = { x: 5, y: 0.5, z: 0 };
+		var big = { v0: A, v1: B, v2: Lap };
+		var soup = [big];
+		for (var bx = 2; bx <= 8; bx += 2) {
+			// apex verts 0.5 mm below the base edge (within tol = 1e-3), NOT exactly on it
+			soup.push({ v0: { x: bx - 0.5, y: 0.0005, z: 0 }, v1: { x: bx + 0.5, y: 0.0005, z: 0 }, v2: { x: bx, y: -0.6, z: 0 } });
+		}
+		var before = measure(soup, 1e-3);
+		expect(before.tj).toBeGreaterThan(0);
+
+		var parentArea = area(big);
+		var neighbourArea = totalArea(soup.slice(1));
+		var out = resolveTJunctionsHoleFree(soup, 1e-3);
+		var after = measure(out, 1e-3);
+
+		expect(after.tj).toBe(0);                              // fully resolved (was 7 before the snap)
+		expect(after.degen).toBe(0);                           // no zero-area tris
+		expect(after.open).toBeLessThanOrEqual(before.open);   // hole-free: no NEW open edges
+		// the big triangle's region still tiles its parent (to within the ≤tol snap, which moves
+		// the hanging vertex up to `tol` onto the edge) -> no dropped slivers leaving holes
+		expect(totalArea(out) - neighbourArea).toBeCloseTo(parentArea, 2);
+		// no wafer-thin slivers: the thinnest sub-triangle has real area (was 0.00025 before)
+		expect(Math.min.apply(null, out.map(area))).toBeGreaterThan(1e-3);
+	});
+
 	it("stays fast on a dense large-coordinate mesh (grid cell ~ mean edge, not tolerance)", function () {
 		// ~1800 triangles over UTM-ish coords with ~30 m edges + one T-junction. If the
 		// on-edge grid cell were tolerance-sized (0.016 m) the segment walk would take

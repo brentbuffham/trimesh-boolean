@@ -117,7 +117,9 @@ export function resolveTJunctionsHoleFree(soup, tolerance, maxPasses) {
 								var ex = P.x - px, ey = P.y - py, ez = P.z - pz;
 								if (ex * ex + ey * ey + ez * ez > tol2) continue;
 								if (!hits) hits = [];
-								hits.push({ v: v, s: s });
+								// Keep the perpendicular projection (px,py,pz) — the point EXACTLY on
+								// this edge. collect() inserts that, not the neighbour's raw vertex.
+								hits.push({ v: v, s: s, sx: px, sy: py, sz: pz });
 							}
 						}
 					}
@@ -162,7 +164,17 @@ function edist(a, b) {
 
 function collect(hits, V, into) {
 	if (!hits) return;
-	for (var i = 0; i < hits.length; i++) into.push(V[hits[i].v]);
+	// Insert each on-edge hit SNAPPED exactly onto the host edge (its perpendicular
+	// projection sx,sy,sz), NOT the neighbour's raw vertex. A hanging vertex a fraction
+	// off the edge — the norm for boolean/clip seams, where the neighbour's vertex lands
+	// within tolerance of but not ON the edge — would otherwise leave the re-triangulated
+	// fan non-conforming: near-collinear points make Delaunay emit slivers, some fall just
+	// outside the parent and get dropped (holes), and the point stays a T-junction on the
+	// new sub-edges. Snapping puts it dead on the edge so the fan tiles the parent exactly.
+	// The snap moves the point by ≤ tol, so the next pass's weld pool re-merges it with the
+	// neighbour's vertex → hole-free. Shared-edge case stays consistent: both incident
+	// triangles project the same neighbour vertex to the same segment point.
+	for (var i = 0; i < hits.length; i++) into.push({ x: hits[i].sx, y: hits[i].sy, z: hits[i].sz });
 }
 
 /**

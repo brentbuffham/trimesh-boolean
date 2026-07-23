@@ -485,7 +485,15 @@ soup = resolveTJunctionsHoleFree(soup, weldEps);
   wall triangles (which would tear holes).
 - `resolveTJunctionsHoleFree` re-triangulates each affected triangle with a **local-frame Delaunay**
   pass (never a corner fan, which emits collinear zero-area slivers) and re-orients each sub-triangle
-  to the source normal. It inserts only existing vertices, so it converges in a couple of passes.
+  to the source normal, converging in a couple of passes.
+- **v0.6.5 — near-edge snap.** A seam T-junction usually places the hanging vertex *within tolerance*
+  of the host edge but not exactly **on** it. Inserting that raw off-edge vertex left near-collinear
+  points → Delaunay slivers, some dropped as "outside parent" → holes, and the vertex stayed a
+  T-junction on the new sub-edges. Each on-edge hit is now **snapped to its perpendicular projection**
+  (the point exactly on the host edge), so the fan tiles the parent exactly. The snap moves the point
+  ≤ `eps`, so the next pass's weld pool re-merges it with the neighbour's vertex — still hole-free.
+  (Before v0.6.5, on a flat 10 m triangle with 0.5 mm-off hits: `tj 8 → 7`, min sub-area `2.5e-4`;
+  after: `tj 8 → 0`, min sub-area `0.25`, no new open edges, at local **and** UTM scale.)
 
 ### Component Functions
 
