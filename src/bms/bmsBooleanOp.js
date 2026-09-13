@@ -20,7 +20,7 @@ import { verifyBmsClassification } from "./bmsVerify.js";
 import { heffalumpClassify, shouldUseHeffalump } from "./heffalumpClassify.js";
 import { estimateAvgEdge } from "../intersect/spatialGrid.js";
 import { soupCentroid, translateSoup } from "../util/math.js";
-import { resolveTJunctions } from "../repair/resolveTJunctions.js";
+import { resolveTJunctionsHoleFree } from "../repair/resolveTJunctionsHoleFree.js";
 import { weldBoundaryVertices } from "../repair/weldBoundary.js";
 import { weldVertices } from "../repair/weldVertices.js";
 import { deduplicateSeamVertices } from "../repair/deduplicateVertices.js";
@@ -164,9 +164,12 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	if (doPreRepair) {
 		var tolA = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupA) * 0.01;
 		var tolB = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupB) * 0.01;
-		soupA = resolveTJunctions(soupA, tolA, 3);
+		// Hole-free variant: the legacy pass tears shared edges apart (independent
+		// per-edge sampling on toFixed keys) and does not preserve winding, both
+		// of which poison the barrier-normal classification downstream.
+		soupA = resolveTJunctionsHoleFree(soupA, tolA, 3);
 		soupA = weldBoundaryVertices(soupA, tolA);
-		soupB = resolveTJunctions(soupB, tolB, 3);
+		soupB = resolveTJunctionsHoleFree(soupB, tolB, 3);
 		soupB = weldBoundaryVertices(soupB, tolB);
 	}
 

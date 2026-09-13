@@ -11,7 +11,7 @@
 
 import { countOpenEdges } from "../util/math.js";
 import { deduplicateSeamVertices } from "./deduplicateVertices.js";
-import { resolveTJunctions } from "./resolveTJunctions.js";
+import { resolveTJunctionsHoleFree } from "./resolveTJunctionsHoleFree.js";
 import { weldVertices, weldedToSoup } from "./weldVertices.js";
 import { removeDegenerateTriangles } from "./removeDegenerates.js";
 import { stitchByProximity } from "./stitchEdges.js";
@@ -90,9 +90,17 @@ export async function repairMesh(soup, config, onProgress) {
 	soup = deduplicateSeamVertices(soup, 1e-4);
 
 	// Step 1.5: Resolve T-junctions
+	//
+	// Hole-free, not the legacy resolveTJunctions. The legacy pass keys vertices
+	// with toFixed(6) strings and samples each edge independently, so triangles
+	// sharing an edge can disagree about its split points and the mesh tears
+	// open. It also takes Delaunator's output order as-is, which does not
+	// preserve the source triangle's orientation — about a third of the
+	// sub-triangles came back wound backwards, flipping the surface normal.
+	// See test/repairWinding.test.js.
 	progress("Resolving T-junctions...");
 	await yieldUI();
-	soup = resolveTJunctions(soup, 1e-4);
+	soup = resolveTJunctionsHoleFree(soup, 1e-4);
 
 	// Step 2: Weld vertices
 	progress("Welding vertices...");
