@@ -64,10 +64,20 @@ describe("scaling: splitToComponents({ pooled: true }) equivalence", function ()
 		// is coarser (it also joins triangles that meet at a single pooled vertex). The
 		// guaranteed invariants: (1) no triangle is lost or duplicated, and (2) every
 		// edge-based component sits inside exactly one vertex-based component.
+		//
+		// Keys are qualified by mesh/side. Bare coordinate keys are NOT unique: these
+		// two cubes share coplanar side faces, so once bmsIntersect emits coplanar
+		// barriers (0.6.6) the coincident A and B faces split into pieces at IDENTICAL
+		// coordinates. An unqualified key made those collide in the lookup map and the
+		// coarsening check read a triangle's component id off the wrong mesh. Both
+		// decompositions partition WITHIN a (mesh, side) group, so qualifying the key
+		// is the faithful comparison, not a loosened one.
 		var classic = splitToComponents(res.groups);
 		var indexed = decomposeIndexedGroups(res.indexed);
 
 		// (1) Same flattened triangle multiset across all components.
+		function qual(c, key) { return c.mesh + "/" + c.side + "::" + key; }
+
 		function flatKeys(list, isIdx) {
 			var keys = [];
 			for (var i = 0; i < list.length; i++) {
@@ -75,10 +85,10 @@ describe("scaling: splitToComponents({ pooled: true }) equivalence", function ()
 				if (isIdx) {
 					for (var t = 0; t < c.triangles.length; t++) {
 						var tr = c.triangles[t];
-						keys.push(triKey(c.points[tr[0]], c.points[tr[1]], c.points[tr[2]]));
+						keys.push(qual(c, triKey(c.points[tr[0]], c.points[tr[1]], c.points[tr[2]])));
 					}
 				} else {
-					for (var s = 0; s < c.soup.length; s++) keys.push(triKey(c.soup[s].v0, c.soup[s].v1, c.soup[s].v2));
+					for (var s = 0; s < c.soup.length; s++) keys.push(qual(c, triKey(c.soup[s].v0, c.soup[s].v1, c.soup[s].v2)));
 				}
 			}
 			return keys.sort();
@@ -92,14 +102,17 @@ describe("scaling: splitToComponents({ pooled: true }) equivalence", function ()
 		indexed.forEach(function (c, ci) {
 			for (var t = 0; t < c.triangles.length; t++) {
 				var tr = c.triangles[t];
-				triToIdxComp.set(triKey(c.points[tr[0]], c.points[tr[1]], c.points[tr[2]]), ci);
+				triToIdxComp.set(qual(c, triKey(c.points[tr[0]], c.points[tr[1]], c.points[tr[2]])), ci);
 			}
 		});
 		classic.forEach(function (c) {
 			var landed = new Set();
 			for (var s = 0; s < c.soup.length; s++) {
-				landed.add(triToIdxComp.get(triKey(c.soup[s].v0, c.soup[s].v1, c.soup[s].v2)));
+				landed.add(triToIdxComp.get(qual(c, triKey(c.soup[s].v0, c.soup[s].v1, c.soup[s].v2))));
 			}
+			// A missing key would land `undefined` in the set and still read as
+			// size 1 — assert the lookup actually resolved.
+			expect(landed.has(undefined)).toBe(false);
 			expect(landed.size).toBe(1);
 		});
 	});

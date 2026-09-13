@@ -19,6 +19,22 @@ import { triNormal } from "../normals/triNormal.js";
 import { cross } from "../util/math.js";
 
 /**
+ * Near-parallel reject gate (|nA . nB|).
+ *
+ * This is NOT the conditioning limit — `lineDirLen < 1e-12` and the
+ * `denom > 1e-15` reprojection guard below are. Those are the tests that
+ * decide whether the intersection line is actually computable. This gate
+ * exists only to hand exactly-coplanar pairs (where the line is undefined,
+ * not merely ill-conditioned) to {@link module:intersect/coplanarOverlap}.
+ *
+ * It used to sit at 0.9999, which rejected every crossing shallower than
+ * ~0.81 degrees even though the orient3d sign tests above had already
+ * PROVEN the two triangles straddle each other. On bench-face-vs-cut
+ * geometry that silently produced zero barrier segments. See CHANGELOG 0.6.6.
+ */
+export var NEAR_PARALLEL = 1 - 1e-14;
+
+/**
  * Moller triangle-triangle intersection.
  *
  * Projects each triangle onto the plane of the other, computes the
@@ -30,7 +46,7 @@ import { cross } from "../util/math.js";
  * @returns {{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number} } | null}
  *          Intersection segment, or null when no intersection exists.
  */
-export function triTriIntersection(triA, triB) {
+export function triTriIntersection(triA, triB, options) {
     // Robust orientation: signed distances of triA vertices to plane(triB)
     // orient3d returns a value proportional to 6× signed tetrahedron volume;
     // its sign is guaranteed correct even for near-degenerate configurations.
@@ -57,7 +73,9 @@ export function triTriIntersection(triA, triB) {
 
     // Near-parallel planes
     var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
-    if (Math.abs(dotN) > 0.9999) return null;
+    var nearParallel = (options && options.nearParallel !== undefined)
+        ? options.nearParallel : NEAR_PARALLEL;
+    if (Math.abs(dotN) > nearParallel) return null;
 
     // Intersection line direction
     var lineDir = cross(nA, nB);
@@ -145,7 +163,7 @@ export function triTriIntersection(triA, triB) {
  *          dB = signed distances of triB vertices to plane(triA),
  *          segLen = parametric length of the intersection segment.
  */
-export function triTriIntersectionDetailed(triA, triB) {
+export function triTriIntersectionDetailed(triA, triB, options) {
     // Robust orientation: signed distances of triA vertices to plane(triB)
     var dA0 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v0.x, triA.v0.y, triA.v0.z);
     var dA1 = orient3d(triB.v0.x, triB.v0.y, triB.v0.z, triB.v1.x, triB.v1.y, triB.v1.z, triB.v2.x, triB.v2.y, triB.v2.z, triA.v1.x, triA.v1.y, triA.v1.z);
@@ -166,7 +184,9 @@ export function triTriIntersectionDetailed(triA, triB) {
     var nB = triNormal(triB);
 
     var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
-    if (Math.abs(dotN) > 0.9999) return null;
+    var nearParallel = (options && options.nearParallel !== undefined)
+        ? options.nearParallel : NEAR_PARALLEL;
+    if (Math.abs(dotN) > nearParallel) return null;
 
     var lineDir = cross(nA, nB);
     var lineDirLen = Math.sqrt(lineDir.x * lineDir.x + lineDir.y * lineDir.y + lineDir.z * lineDir.z);

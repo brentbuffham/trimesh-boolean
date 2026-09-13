@@ -8,6 +8,7 @@
  */
 
 import { triTriIntersection } from "../intersect/triTriIntersection.js";
+import { coplanarOverlap, emitCoplanarSegments } from "../intersect/coplanarOverlap.js";
 import { buildSpatialGrid, queryGrid, triBBox, estimateAvgEdge } from "../intersect/spatialGrid.js";
 import { createVertexPool } from "./bmsVertexPool.js";
 
@@ -19,6 +20,10 @@ import { createVertexPool } from "./bmsVertexPool.js";
  * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB
  * @param {Object} [options]
  * @param {number} [options.tolerance] - Pool vertex merge tolerance
+ * @param {boolean} [options.coplanar=true] - Emit overlap-polygon segments for
+ *        exactly-coplanar A-vs-B pairs, which the Moller path cannot express
+ *        as a segment. Set false for the pre-0.6.6 behaviour.
+ * @param {number} [options.minAreaRatio] - Coplanar overlap area gate
  * @returns {{
  *   segments: Array<{ p0: PoolVertex, p1: PoolVertex, idxA: number, idxB: number }>,
  *   crossedSetA: Object.<number, Array>,
@@ -46,6 +51,10 @@ export function bmsIntersect(trisA, trisB, options) {
 	var crossedSetA = {};
 	var crossedSetB = {};
 
+	var doCoplanar = opts.coplanar !== false;
+	var copOpts = opts.minAreaRatio !== undefined ? { minAreaRatio: opts.minAreaRatio } : undefined;
+	var coplanarPairs = 0;
+
 	for (var i = 0; i < trisA.length; i++) {
 		var triA = trisA[i];
 		var bbA = triBBox(triA);
@@ -56,6 +65,32 @@ export function bmsIntersect(trisA, trisB, options) {
 			var triB = trisB[j];
 
 			var seg = triTriIntersection(triA, triB);
+
+			// ── Coplanar A-vs-B fallback ──
+			// Moller cannot return a segment for coplanar pairs (the
+			// intersection is a polygon, not a line), so it returns null.
+			// Before 0.6.6 that null was the end of it and two overlapping
+			// coplanar sheets produced NO barrier at all — bmsClassify then
+			// had nothing to partition against. Emit the overlap polygon's
+			// edges into the same pool instead, exactly as bmsSelfArrange
+			// already does for self-folds.
+			if (!seg && doCoplanar) {
+				var cop = coplanarOverlap(triA, triB, copOpts);
+				if (cop) {
+					var copSegs = emitCoplanarSegments(cop.polygon, pool,
+						{ mesh: "A", triIdx: i }, { mesh: "B", triIdx: j });
+					for (var cs = 0; cs < copSegs.length; cs++) {
+						var cseg = copSegs[cs];
+						segments.push(cseg);
+						if (!crossedSetA[i]) crossedSetA[i] = [];
+						crossedSetA[i].push(cseg);
+						if (!crossedSetB[j]) crossedSetB[j] = [];
+						crossedSetB[j].push(cseg);
+						coplanarPairs++;
+					}
+				}
+			}
+
 			if (!seg) continue;
 
 			// Register both endpoints in the shared pool.
@@ -86,6 +121,7 @@ export function bmsIntersect(trisA, trisB, options) {
 		segments: segments,
 		crossedSetA: crossedSetA,
 		crossedSetB: crossedSetB,
-		pool: pool
+		pool: pool,
+		coplanarPairs: coplanarPairs
 	};
 }

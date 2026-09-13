@@ -27,6 +27,65 @@ import { deduplicateSeamVertices } from "../repair/deduplicateVertices.js";
 import { indexGroups } from "../util/indexGroups.js";
 
 /**
+ * Axis-aligned bounding box of a triangle soup, or null when empty.
+ */
+function soupBBox(soup) {
+	if (!soup || soup.length === 0) return null;
+	var minX = Infinity, minY = Infinity, minZ = Infinity;
+	var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+	for (var i = 0; i < soup.length; i++) {
+		var t = soup[i];
+		var vs = [t.v0, t.v1, t.v2];
+		for (var k = 0; k < 3; k++) {
+			var v = vs[k];
+			if (v.x < minX) minX = v.x;
+			if (v.y < minY) minY = v.y;
+			if (v.z < minZ) minZ = v.z;
+			if (v.x > maxX) maxX = v.x;
+			if (v.y > maxY) maxY = v.y;
+			if (v.z > maxZ) maxZ = v.z;
+		}
+	}
+	return { minX: minX, minY: minY, minZ: minZ, maxX: maxX, maxY: maxY, maxZ: maxZ };
+}
+
+/**
+ * Do the two bounding boxes genuinely interpenetrate?
+ *
+ * Deliberately NOT a plain slack-inset AABB test. Two cases must stay apart:
+ *
+ *  - Shells that merely ABUT (face-to-face contact) have ~zero overlap on one
+ *    axis while both boxes have real extent there. That is a legitimate
+ *    zero-segment result, so it must not be flagged.
+ *  - Coplanar SHEETS are degenerate (zero extent) on the shared-plane axis.
+ *    Insetting that axis would judge every flat sheet "apart" and defeat the
+ *    check entirely — which is precisely the geometry it exists to catch.
+ *
+ * So an axis only vetoes when it has real extent AND the overlap collapses.
+ */
+function bboxesOverlap(a, b) {
+	var span = Math.max(
+		a.maxX - a.minX, a.maxY - a.minY, a.maxZ - a.minZ,
+		b.maxX - b.minX, b.maxY - b.minY, b.maxZ - b.minZ
+	);
+	var eps = span > 0 ? span * 1e-9 : 1e-12;
+
+	var axes = [
+		[a.minX, a.maxX, b.minX, b.maxX],
+		[a.minY, a.maxY, b.minY, b.maxY],
+		[a.minZ, a.maxZ, b.minZ, b.maxZ]
+	];
+	for (var i = 0; i < 3; i++) {
+		var aMin = axes[i][0], aMax = axes[i][1], bMin = axes[i][2], bMax = axes[i][3];
+		var overlap = Math.min(aMax, bMax) - Math.max(aMin, bMin);
+		if (overlap < -eps) return false; // separated on this axis
+		var degenerate = (aMax - aMin) <= eps && (bMax - bMin) <= eps;
+		if (!degenerate && overlap <= eps) return false; // touching, not crossing
+	}
+	return true;
+}
+
+/**
  * Flip the winding order of all triangles in a soup.
  * @param {Array} tris
  * @returns {Array}
@@ -63,6 +122,10 @@ function flipSoup(tris) {
  *        splitting. Default: auto-enabled when classifier is "auto" and the census
  *        finds non-manifold edges.
  * @param {number} [options.tolerance] - Vertex pool tolerance
+ * @param {boolean} [options.coplanar=true] - Emit barrier segments for
+ *        exactly-coplanar A-vs-B triangle pairs (coincident sheets /
+ *        shared faces). Set false for the pre-0.6.6 behaviour.
+ * @param {number} [options.minAreaRatio] - Coplanar overlap area gate
  * @param {boolean} [options.indexed] - Also attach `result.indexed` — a compact
  *        indexed twin of the groups (shared points pool + per-group [i,j,k] triples).
  *        Back-compatible: the soup `groups` are unchanged; this is additive + opt-in.
@@ -108,10 +171,27 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 	}
 
 	// Step 2) Intersect with shared vertex pool
-	var isect = bmsIntersect(soupA, soupB, { tolerance: opts.tolerance });
+	var isect = bmsIntersect(soupA, soupB, {
+		tolerance: opts.tolerance,
+		coplanar: opts.coplanar,
+		minAreaRatio: opts.minAreaRatio
+	});
 
 	if (isect.segments.length === 0) {
-		// No intersection — everything is outside, translate back
+		// No segments. Usually that genuinely means "these meshes are apart",
+		// but it is ALSO exactly what a MISSED intersection looks like, and the
+		// two used to be indistinguishable: this path returned verification:null
+		// and a confident "no intersection", so a silent miss was reported as a
+		// clean result. bmsVerify cannot help here — its partition check is
+		// gated on segments.length > 0 and never runs.
+		//
+		// So: if the bounding boxes do not overlap, the meshes are provably
+		// apart and the empty result is correct. If they DO overlap and we
+		// still found nothing, say so rather than claim success.
+		var bbA = soupBBox(soupA);
+		var bbB = soupBBox(soupB);
+		var apart = bbA === null || bbB === null || !bboxesOverlap(bbA, bbB);
+
 		return {
 			groups: {
 				aInside: [],
@@ -124,7 +204,21 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 			megaSoup: null,
 			pool: isect.pool,
 			classifier: { A: "none (no intersection)", B: "none (no intersection)" },
-			verification: null
+			verification: apart ? null : {
+				ok: false,
+				failures: [{
+					check: "no-segments-but-bboxes-overlap",
+					mesh: "both",
+					detail: "bounding boxes overlap but tri-tri intersection found 0 " +
+						"segments; the meshes may intersect in a configuration the " +
+						"intersector missed (grazing, coplanar, or below tolerance). " +
+						"This empty result is unverified, not confirmed."
+				}],
+				counts: {
+					A: { inside: 0, outside: soupA.length },
+					B: { inside: 0, outside: soupB.length }
+				}
+			}
 		};
 	}
 
