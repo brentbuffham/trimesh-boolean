@@ -633,3 +633,47 @@ export function dedupCoincidentTriangles(
 	tris: TriangleSoup,
 	options?: { minAreaRatio?: number }
 ): { soup: TriangleSoup; duplicateGroups: number; duplicatesRemoved: number; clusters: number; clusterTrisIn: number; clusterTrisOut: number };
+
+// ── Output invariant verification ────────────────────────────────────────────
+
+/** One invariant checked by {@link verifyOutput}. */
+export interface OutputCheck {
+	/** Invariant name, e.g. "consistentWinding", "noTJunctions". */
+	check: string;
+	/** Did it hold? */
+	ok: boolean;
+	/** Number of violations; 0 when ok. */
+	count: number;
+	/** Human-readable summary. */
+	detail: string;
+}
+
+export interface VerifyOutputResult {
+	/** True only when every check held. */
+	ok: boolean;
+	checks: OutputCheck[];
+	stats: {
+		triangles: number;
+		vertices: number;
+		openEdges: number;
+		nonManifoldEdges: number;
+		area: number;
+	};
+}
+
+/**
+ * Read-only invariant check on a finished triangle soup: degenerates,
+ * duplicate triangles, winding consistency across shared edges, non-manifold
+ * edges, T-junctions, and (optionally) closure. Mutates nothing.
+ */
+export function verifyOutput(
+	soup: TriangleSoup,
+	options?: {
+		/** Weld epsilon. Default: estimateWeldEps(soup). */
+		tolerance?: number;
+		/** Require a closed solid (no open edges). Open surfaces pass by default. */
+		expectClosed?: boolean;
+		/** Area below which a triangle counts as degenerate. Default: tolerance^2 / 2. */
+		minArea?: number;
+	}
+): VerifyOutputResult;

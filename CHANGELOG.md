@@ -3,6 +3,38 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## Unreleased
+
+### Added — `verifyOutput`: read-only invariant check on finished geometry
+
+The output-side twin of `verifyBmsClassification`. That one asks whether the
+*classification* held together; this asks whether the *geometry* about to be
+handed back is valid. It mutates nothing and repairs nothing — it reports, so a
+caller can decide.
+
+It exists because the pre-repair gate (`censusMessy`) inspects the INPUT and
+guesses, and on the real Kirra surfaces that guess is wrong: it reports clean
+while the meshes demonstrably contain T-junctions (see 0.6.7). Guessing the
+input is a heuristic; measuring the output is a fact.
+
+Checks: `noDegenerateTriangles`, `noDuplicateTriangles`, `consistentWinding`
+(shared edges traversed oppositely by their two triangles), `manifoldEdges`,
+`noTJunctions`, and `closed` under `{ expectClosed: true }`. Open surfaces pass
+by default — that is the normal case for terrain and DTM work. Identity is a
+neighbourhood weld (shared integer ids), not `toFixed` strings.
+
+It independently reproduces the 0.6.7 finding by a different method — edge
+traversal parity rather than normal direction — and reaches the same verdict:
+the legacy `resolveTJunctions` leaves 8 winding conflicts on the fixture where
+`resolveTJunctionsHoleFree` leaves none.
+
+Run over the shipped Kirra surfaces it also flags pre-existing input defects:
+terrain has 46 inconsistently-wound shared edges and convoluted has 6, which
+matches their 99.9% / 21.9% up-facing fractions. These are data-quality issues
+in the source surfaces, not library faults.
+
+Typed in `src/index.d.ts`.
+
 ## 0.6.7
 
 ### Fixed — T-junction repair corrupted winding on the default path
