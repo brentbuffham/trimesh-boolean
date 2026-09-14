@@ -3,6 +3,67 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## 0.7.1
+
+### Changed — the Three.js adapter now runs BMS, and stops losing UTM precision
+
+Two problems in `src/three.js`, which is what the documented one-liner and the
+`trimesh-boolean/three` entry point actually run.
+
+**1. It drove the classic pipeline.** `booleanFromMeshes` called
+`boolean()` — flood-fill plus half-space — not BMS. So every Three.js consumer
+missed the shared Steiner pool, the hybrid classifier and the heffalump
+fallback: the engine this library exists for. It now runs `booleanAuto`.
+Pass `{ engine: "classic" }` for the old behaviour.
+
+**2. `soupToMesh` wrote absolute survey coordinates into a Float32 attribute.**
+Float32 spacing at a UTM northing of 7.4e6 is **0.5 m**, so any two vertices
+closer than that collapsed onto the same value. Measured:
+
+| coordinate | stored as Float32 | error |
+|---|---|---|
+| 7444123.456 | 7444123.5 | 0.044 m |
+| 6771845.678 | 6771845.5 | **0.178 m** |
+| 748291.234 | 748291.25 | 0.016 m |
+
+Geometry is now built in a local frame with the centroid on `mesh.position`, so
+world position is unchanged and the same coordinates carry ~1e-6 m of error.
+Pass `{ recenter: false }` for the old behaviour — only safe near the origin.
+
+Note this is a *storage* problem, independent of the exact predicates used
+upstream: `orient3d` gives exact SIGNS, not exact coordinates, and no amount of
+exactness survives truncation to Float32 at UTM magnitude.
+
+### Added — `booleanAuto`: pick the inputs and the output type
+
+```js
+booleanAuto(terrain, cutter, "subtract")  // -> { soup, ok, report }
+```
+
+Runs the BMS boolean, merges for the requested operation, and applies the gated
+finisher. Output quality is an invariant, not an option — there is no flag to
+disable correct winding. `quality` chooses effort: `"strict"` (default) finishes,
+`"raw"` returns the merged boolean untouched. `bmsBooleanOp` is unchanged and
+remains the full-control entry point.
+
+Measured across all three operations on four real Kirra pairs (12 cases),
+finishing improved or held every one and degraded none. terrain x cylinder and
+terrain x cup reach fully clean output on all three operations.
+
+### Added — the BMS public API is finally typed
+
+`src/index.d.ts` declared none of `bmsBooleanOp`, `bmsIntersect`,
+`heffalumpClassify`, `shouldUseHeffalump`, `verifyBmsClassification`,
+`createVertexPool` or `fanTriangulate` — the entire BMS surface was untyped, so
+every documented BMS example was too. Also adds `bmsSplit`, `bmsChain`,
+`bmsClassify`, `bmsClosePolylines`, `chainedOpenEdge`, the `reclassify*` family,
+`booleanAuto` and `NEAR_PARALLEL` (now exported).
+
+`test/typings.test.js` keeps them honest: it parses `index.d.ts`, compares it
+against the runtime exports in both directions, and fails on drift. It found 8
+further undeclared exports on its first run. The declaration file also
+type-checks clean under `--strict`.
+
 ## 0.7.0
 
 ### Added — `assessRepair` and `finishMesh`: automated finishing that cannot make things worse

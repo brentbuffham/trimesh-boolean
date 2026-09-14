@@ -754,3 +754,279 @@ export function finishMesh(
 		force?: boolean;
 	}
 ): FinishMeshResult;
+
+// ── BMS pipeline ─────────────────────────────────────────────────────────────
+// The BMS path targets OPEN, non-watertight, often non-manifold surfaces
+// (terrain, DTMs, mining shells). These declarations were missing entirely
+// until 0.7.1, so the README's BMS examples were untyped.
+
+/** One post-condition checked by verifyBmsClassification. */
+export interface BmsVerificationFailure {
+	/** "partition" | "chainClosure" | "barrierConstraint" */
+	check: string;
+	mesh: "A" | "B" | "both";
+	detail: string;
+}
+
+export interface BmsVerification {
+	ok: boolean;
+	failures: BmsVerificationFailure[];
+	counts: {
+		A: { inside: number; outside: number };
+		B: { inside: number; outside: number };
+	};
+}
+
+export interface BmsBooleanOptions {
+	/**
+	 * Classification strategy.
+	 * - "auto" (default): census the inputs, run the hybrid classifier, verify the
+	 *   post-conditions, and on any failure re-run ONLY classification with the
+	 *   heffalump on the existing mega soup (no re-split).
+	 * - "hybrid": always hybrid, no verification (legacy behaviour).
+	 * - "heffalump": always heffalump.
+	 */
+	classifier?: "auto" | "hybrid" | "heffalump";
+	/** Deprecated alias for classifier: "heffalump". */
+	forceHeffalump?: boolean;
+	/**
+	 * Resolve T-junctions and weld boundaries before splitting. Defaults to on
+	 * when classifier is "auto" AND the census finds non-manifold edges — note
+	 * that census inspects the INPUT and can report clean on meshes that do
+	 * contain T-junctions, so pass it explicitly if you need it.
+	 */
+	preRepair?: boolean;
+	/** Vertex pool tolerance. */
+	tolerance?: number;
+	/**
+	 * Emit barrier segments for exactly-coplanar A-vs-B pairs (coincident sheets,
+	 * shared faces). Default true; set false for pre-0.6.6 behaviour.
+	 */
+	coplanar?: boolean;
+	/** Coplanar overlap area gate. */
+	minAreaRatio?: number;
+	/** Also attach `result.indexed`, a compact indexed twin of the groups. */
+	indexed?: boolean;
+}
+
+export interface BmsBooleanResult {
+	groups: SoupGroups;
+	segments: TaggedSegment[];
+	polylines: unknown[];
+	/** Null when the inputs did not intersect. */
+	megaSoup: MegaSoupTriangle[] | null;
+	pool: VertexPool;
+	classifier: { A: string; B: string };
+	/**
+	 * Null when classification was not verified, OR when the meshes are provably
+	 * apart. Since 0.6.6 a zero-segment result whose bounding boxes interpenetrate
+	 * returns a "no-segments-but-bboxes-overlap" failure instead of null, so an
+	 * empty result is never silently reported as confirmed.
+	 */
+	verification: BmsVerification | null;
+	/** Present when `{ indexed: true }` was passed. */
+	indexed?: IndexedGroups;
+}
+
+/**
+ * Run the full BMS boolean pipeline — shared Steiner vertex pool, hybrid
+ * classification with auto heffalump fallback, and post-condition verification.
+ * Omit `operation` to get the split groups only.
+ */
+export function bmsBooleanOp(
+	soupA: TriangleSoup,
+	soupB: TriangleSoup,
+	operation?: "subtract" | "union" | "intersect" | null,
+	options?: BmsBooleanOptions
+): BmsBooleanResult | null;
+
+/** Verify the hybrid classification's partition / chain-closure / barrier post-conditions. */
+export function verifyBmsClassification(
+	megaSoup: MegaSoupTriangle[],
+	triSides: Int8Array | number[],
+	segments: TaggedSegment[],
+	polylines: unknown[],
+	trisA: TriangleSoup,
+	trisB: TriangleSoup
+): BmsVerification;
+
+/**
+ * Census two inputs for non-manifold edges — the signal that the hybrid
+ * classifier's boundary topology cannot be trusted and the heffalump should run.
+ */
+export function shouldUseHeffalump(trisA: TriangleSoup, trisB: TriangleSoup): boolean;
+
+/** Barrier-only classification that needs no boundary topology. */
+export function heffalumpClassify(
+	megaSoup: MegaSoupTriangle[],
+	segments: TaggedSegment[],
+	trisA: TriangleSoup,
+	trisB: TriangleSoup,
+	options?: {
+		snapThreshold?: number;
+		maxSnapStragglers?: number;
+		[key: string]: unknown;
+	}
+): { triSides: Int8Array; report?: { A: string; B: string }; [key: string]: unknown };
+
+/**
+ * Triangle-triangle intersection across two meshes with a shared vertex pool, so
+ * both meshes receive the SAME PoolVertex object at each intersection location.
+ */
+export function bmsIntersect(
+	trisA: TriangleSoup,
+	trisB: TriangleSoup,
+	options?: {
+		tolerance?: number;
+		/** Emit overlap-polygon segments for coplanar pairs. Default true. */
+		coplanar?: boolean;
+		minAreaRatio?: number;
+	}
+): {
+	segments: TaggedSegment[];
+	crossedSetA: Record<number, TaggedSegment[]>;
+	crossedSetB: Record<number, TaggedSegment[]>;
+	pool: VertexPool;
+	/** Segments contributed by the coplanar fallback. */
+	coplanarPairs: number;
+};
+
+/**
+ * Create a shared vertex pool. Identity is object `===` plus an integer `id`,
+ * not a quantised string key.
+ */
+export function createVertexPool(tolerance?: number): VertexPool;
+
+/** Fan-triangulate a triangle against constraint segments. */
+export function fanTriangulate(tri: Triangle, segments: Segment[]): TriangleSoup;
+
+/**
+ * Near-parallel reject gate for triTriIntersection, as |nA . nB|.
+ * Lowered from 0.9999 to 1 - 1e-14 in 0.6.6: the old value discarded every
+ * crossing shallower than ~0.81 degrees even though the orient3d sign tests had
+ * already proven the triangles straddle each other.
+ */
+export const NEAR_PARALLEL: number;
+
+// ── BMS pipeline stages (individually usable) ────────────────────────────────
+
+/** A mega-soup polyline: a chain of pool vertices. */
+export type PoolPolyline = PoolVertex[];
+
+export interface MeshEdgePolySide {
+	segments: Array<{ verts: unknown[]; type: string }>;
+	closed: boolean;
+}
+
+/** Split both meshes against the intersection segments into one tagged mega soup. */
+export function bmsSplit(
+	trisA: TriangleSoup,
+	trisB: TriangleSoup,
+	intersectResult: {
+		segments: TaggedSegment[];
+		crossedSetA: Record<number, TaggedSegment[]>;
+		crossedSetB: Record<number, TaggedSegment[]>;
+		pool: VertexPool;
+	}
+): MegaSoupTriangle[];
+
+/** Chain intersection segments into polylines, on pool vertex identity. */
+export function bmsChain(segments: TaggedSegment[]): PoolPolyline[];
+
+/** Close chained polylines against the mesh boundaries into usable barriers. */
+export function bmsClosePolylines(
+	polylines: PoolPolyline[],
+	trisA: TriangleSoup,
+	trisB: TriangleSoup,
+	megaSoup: MegaSoupTriangle[],
+	segments: TaggedSegment[]
+): {
+	closedPolylines: PoolPolyline[];
+	meshEdgePolys: { A: MeshEdgePolySide; B: MeshEdgePolySide };
+};
+
+/** Walk the complete open boundary of a mesh as a closed polygon. */
+export function chainedOpenEdge(tris: TriangleSoup): unknown[];
+
+/** Hybrid classification: boundary topology for open meshes, barrier-normal for closed. */
+export function bmsClassify(
+	megaSoup: MegaSoupTriangle[],
+	closedPolylines: PoolPolyline[],
+	segments: TaggedSegment[],
+	trisA: TriangleSoup,
+	trisB: TriangleSoup,
+	meshEdgePolys: { A: MeshEdgePolySide; B: MeshEdgePolySide }
+): SoupGroups & {
+	componentWalks: Array<{
+		mesh: string;
+		side: string;
+		triCount: number;
+		segments: Array<{ verts: unknown[]; type: string }>;
+	}>;
+};
+
+/** Move specific triangles between inside and outside. Mutates `groups` in place. */
+export function reclassifyTriangles(
+	groups: SoupGroups,
+	mesh: "A" | "B",
+	fromSide: "inside" | "outside",
+	triIndices: number[]
+): SoupGroups;
+
+/** Flip whichever triangle sits at the given centroid. */
+export function reclassifyAtPoint(
+	groups: SoupGroups,
+	cx: number,
+	cy: number,
+	cz: number,
+	tolerance?: number
+): { moved: boolean; mesh: string; from: string; to: string };
+
+/** Flood-fill from a seed triangle and flip the whole connected region. */
+export function reclassifyRegion(
+	groups: SoupGroups,
+	mesh: "A" | "B",
+	fromSide: "inside" | "outside",
+	seedIdx: number
+): number;
+
+// ── One-call entry point ─────────────────────────────────────────────────────
+
+export interface BooleanAutoResult {
+	/** The finished result soup. Empty when the operation selects nothing. */
+	soup: TriangleSoup;
+	/** True when the output satisfies every invariant. */
+	ok: boolean;
+	operation: string;
+	/** finishMesh report — null when quality is "raw" or the result is empty. */
+	report: FinishMeshResult | null;
+	/** Classification verification from the boolean stage. */
+	verification: BmsVerification | null;
+	classifier: { A: string; B: string } | null;
+	/** The full bmsBooleanOp result, for callers that want the stages. */
+	boolean: BmsBooleanResult | null;
+}
+
+/**
+ * Run a boolean and return finished, valid geometry in one call.
+ *
+ * Output quality is an invariant, not an option — there is no flag to disable
+ * correct winding. `quality` chooses how hard to work: "strict" (default) runs
+ * the gated finisher, "raw" returns the merged boolean untouched.
+ */
+export function booleanAuto(
+	soupA: TriangleSoup,
+	soupB: TriangleSoup,
+	operation: "subtract" | "union" | "intersect",
+	options?: {
+		quality?: "strict" | "raw";
+		classifier?: "auto" | "hybrid" | "heffalump";
+		tolerance?: number;
+		preRepair?: boolean;
+		coplanar?: boolean;
+		minAreaRatio?: number;
+		expectClosed?: boolean;
+		minArea?: number;
+		volumeTolPct?: number;
+	}
+): BooleanAutoResult | null;

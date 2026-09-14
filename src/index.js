@@ -13,7 +13,7 @@ export { boolean, splitMeshPair, mergeSplitGroups, selectSplits, splitToComponen
 
 // ── Intersection ──
 export { intersectMeshPair, intersectMeshPairTagged } from "./intersect/intersectMeshPair.js";
-export { triTriIntersection, triTriIntersectionDetailed } from "./intersect/triTriIntersection.js";
+export { triTriIntersection, triTriIntersectionDetailed, NEAR_PARALLEL } from "./intersect/triTriIntersection.js";
 export { chainSegments, simplifyPolyline } from "./intersect/chainSegments.js";
 export {
 	buildSpatialGrid,
@@ -78,6 +78,7 @@ export { verifyBmsClassification } from "./bms/bmsVerify.js";
 export { verifyOutput } from "./verify/verifyOutput.js";
 export { assessRepair, describeAssessment, violationCount } from "./verify/assessRepair.js";
 export { finishMesh, DEFAULT_STAGES } from "./verify/finishMesh.js";
+export { booleanAuto } from "./booleanAuto.js";
 export { heffalumpClassify, shouldUseHeffalump, reclassifyTriangles, reclassifyAtPoint, reclassifyRegion } from "./bms/heffalumpClassify.js";
 export { bmsBooleanOp } from "./bms/bmsBooleanOp.js";
 
