@@ -733,7 +733,7 @@ export interface FinishMeshResult {
 	stages: Array<{ stage: string; assessment: RepairAssessment }>;
 }
 
-/** The default finishing stages: dedupCoincident, resolveTJunctions, orientWinding. */
+/** The default finishing stages: dedupCoincident, resolveTJunctionsHoleFree, orientWinding. */
 export const DEFAULT_STAGES: FinishStage[];
 
 /**

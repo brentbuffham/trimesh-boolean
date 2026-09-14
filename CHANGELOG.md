@@ -3,6 +3,53 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## 0.7.2
+
+### Fixed — the heffalump's closed-mesh test was a single un-jittered ray
+
+`isPointInsideClosedMesh` cast one **+Z** parity ray with no jitter and no
+on-edge epsilon. When such a ray grazes an edge shared by two triangles the hit
+is counted twice or not at all, the parity flips, and the point lands on the
+wrong side. The classic path guards exactly this with three deterministic
+jitters (`classifyTriangles.js` `JITTERS`); the heffalump — the **fallback** the
+auto classifier reaches for when the hybrid fails — had no guard at all, making
+it less robust than the path it exists to back up.
+
+It is now a three-axis majority vote. Each axis reports whether any of its hits
+landed on a projected edge (a scale-free barycentric test, not an absolute
+epsilon); shaky axes are discarded and the survivors vote. If every axis is
+shaky the vote is taken anyway — a wrong answer beats no answer, and the
+existing majority-snap pass can still correct a lone straggler.
+
+`test/heffalumpRay.test.js` drives a sheet threaded through an axis-aligned box
+along its diagonal seam — the geometry that breaks a single-axis parity test,
+and the geometry mining work is full of. It asserts against **ground truth**
+(centroid inside the box), not against another classifier.
+
+That test turned up something worth recording: on this geometry the **hybrid**
+classifier puts all 10 inside-triangles in the outside group, while the
+heffalump gets all 10 right. `classifier: "auto"` detects the failure and falls
+back, matching the heffalump exactly — concrete evidence that the auto
+classifier and its verification earn their place.
+
+No change on the real Kirra surfaces: terrain × cylinder, terrain × convoluted,
+terrain × cup and shell × presplit-a are identical to 0.7.1, and no slower.
+
+### Changed — `finishMesh` stage renamed to `resolveTJunctionsHoleFree`
+
+The stage was named `"resolveTJunctions"` but ran `resolveTJunctionsHoleFree`.
+The legacy function corrupts winding (see 0.6.7) and is deliberately not used
+anywhere in this pipeline; the name now says what it runs.
+
+### Added — README documents the verify/finish stack
+
+`verifyOutput`, `assessRepair`, `finishMesh` and `booleanAuto` were typed and
+tested but appeared nowhere in the README — the headline features were
+invisible. Quick Start now leads with `booleanAuto` and states plainly which
+engine to use for which input. The Three.js section documents the BMS default
+and the UTM local-frame behaviour. Includes the warning that `repairMesh`
+defaults to `sliverRatio: 0.01`.
+
 ## 0.7.1
 
 ### Changed — the Three.js adapter now runs BMS, and stops losing UTM precision

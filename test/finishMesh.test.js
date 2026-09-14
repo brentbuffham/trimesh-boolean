@@ -99,7 +99,7 @@ describe("finishMesh", function () {
 		expect(res.ok).toBe(true);
 		expect(res.after.ok).toBe(true);
 		expect(violationCount(res.after)).toBe(0);
-		expect(res.applied).toContain("resolveTJunctions");
+		expect(res.applied).toContain("resolveTJunctionsHoleFree");
 	});
 
 	it("leaves already-valid geometry completely alone", function () {

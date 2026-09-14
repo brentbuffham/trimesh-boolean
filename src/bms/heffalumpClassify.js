@@ -106,36 +106,104 @@ function classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris) {
 // is inside it by casting a ray and counting crossings. Odd = inside.
 // This works even when barriers don't form closed loops.
 
-function isPointInsideClosedMesh(px, py, pz, tris) {
-	// Cast ray along +Z from point, count crossings with triangles
-	var crossings = 0;
-	for (var i = 0; i < tris.length; i++) {
-		var tri = tris[i];
-		var ax = tri.v0.x, ay = tri.v0.y, az = tri.v0.z;
-		var bx = tri.v1.x, by = tri.v1.y, bz = tri.v1.z;
-		var cx = tri.v2.x, cy = tri.v2.y, cz = tri.v2.z;
+/**
+ * Parity of a single axis-aligned ray against a closed mesh.
+ *
+ * Projects to the plane perpendicular to `axis`, counts triangles whose
+ * projection contains the point and whose surface lies on the positive side,
+ * and reports whether any of those hits landed suspiciously close to a
+ * projected triangle EDGE. An on-edge hit is counted by both adjacent
+ * triangles (or neither), which flips the parity — so the caller uses that
+ * flag to discard the axis rather than trust a coin toss.
+ *
+ * @returns {{ inside: boolean, shaky: boolean }}
+ */
+function parityAlongAxis(px, py, pz, tris, axis) {
+	// u,v = the projection plane; w = the ray direction.
+	var iu = axis === 0 ? 1 : 0;              // x-ray -> (y,z); else x is one axis
+	var iv = axis === 2 ? 1 : 2;              // z-ray -> (x,y); else z is the other
+	var P = [px, py, pz];
+	var pu = P[iu], pv = P[iv], pw = P[axis];
 
-		// Check if (px, py) is inside the triangle's 2D projection (XY plane)
-		var d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
-		var d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
-		var d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+	var crossings = 0;
+	var shaky = false;
+
+	for (var i = 0; i < tris.length; i++) {
+		var t = tris[i];
+		var A = [t.v0.x, t.v0.y, t.v0.z];
+		var B = [t.v1.x, t.v1.y, t.v1.z];
+		var C = [t.v2.x, t.v2.y, t.v2.z];
+
+		var au = A[iu], av = A[iv];
+		var bu = B[iu], bv = B[iv];
+		var cu = C[iu], cv = C[iv];
+
+		// Edge functions of the projected triangle.
+		var d1 = (pu - bu) * (av - bv) - (au - bu) * (pv - bv);
+		var d2 = (pu - cu) * (bv - cv) - (bu - cu) * (pv - cv);
+		var d3 = (pu - au) * (cv - av) - (cu - au) * (pv - av);
 
 		var hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
 		var hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
-		if (hasNeg && hasPos) continue; // point outside triangle in XY
+		if (hasNeg && hasPos) continue; // outside the projected triangle
 
-		// Compute Z at intersection using barycentric coords
-		var det = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
-		if (Math.abs(det) < 1e-20) continue;
+		var det = (bv - cv) * (au - cu) + (cu - bu) * (av - cv);
+		if (Math.abs(det) < 1e-20) continue; // edge-on in this projection
+
+		// Scale-relative "is the point basically ON a projected edge?" test.
+		// |d| is twice the sub-triangle area, so |d| / |det| is a barycentric
+		// coordinate — comparing that to a small epsilon is scale-free.
+		var invAbsDet = 1 / Math.abs(det);
+		if (Math.abs(d1) * invAbsDet < 1e-9 ||
+			Math.abs(d2) * invAbsDet < 1e-9 ||
+			Math.abs(d3) * invAbsDet < 1e-9) {
+			shaky = true;
+		}
+
 		var invDet = 1.0 / det;
-		var u = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) * invDet;
-		var v = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) * invDet;
+		var u = ((bv - cv) * (pu - cu) + (cu - bu) * (pv - cv)) * invDet;
+		var v = ((cv - av) * (pu - cu) + (au - cu) * (pv - cv)) * invDet;
 		var w = 1.0 - u - v;
-		var zHit = u * az + v * bz + w * cz;
+		var hit = u * A[axis] + v * B[axis] + w * C[axis];
 
-		if (zHit > pz) crossings++;
+		if (hit > pw) crossings++;
 	}
-	return (crossings % 2) === 1;
+
+	return { inside: (crossings % 2) === 1, shaky: shaky };
+}
+
+/**
+ * Is a point inside a CLOSED mesh?
+ *
+ * Three-axis majority vote, not a single +Z ray.
+ *
+ * A single axis-aligned parity ray is not robust: when it grazes an edge shared
+ * by two triangles the hit is counted twice or not at all, and the parity — and
+ * therefore the answer — flips. The classic path guards this with three
+ * deterministic jitters (see classifyTriangles.js JITTERS); this function had
+ * no guard at all, which made the heffalump's closed-mesh test less robust than
+ * the path it exists to back up.
+ *
+ * Each axis reports whether any of its hits landed on a projected edge. Shaky
+ * axes are discarded, and the surviving axes vote. If every axis is shaky the
+ * vote is taken anyway — a wrong answer beats no answer, and the caller's
+ * majority-snap pass can still correct a lone straggler.
+ */
+function isPointInsideClosedMesh(px, py, pz, tris) {
+	var inside = 0, total = 0;
+	var shakyInside = 0, shakyTotal = 0;
+
+	for (var axis = 0; axis < 3; axis++) {
+		var r = parityAlongAxis(px, py, pz, tris, axis);
+		if (r.inside) shakyInside++;
+		shakyTotal++;
+		if (r.shaky) continue;
+		if (r.inside) inside++;
+		total++;
+	}
+
+	if (total > 0) return inside * 2 > total;
+	return shakyInside * 2 > shakyTotal;
 }
 
 /**

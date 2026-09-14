@@ -62,7 +62,10 @@ export var DEFAULT_STAGES = [
 		}
 	},
 	{
-		name: "resolveTJunctions",
+		// Named for what it RUNS, not the family it belongs to. The legacy
+		// resolveTJunctions corrupts winding (see 0.6.7) and is deliberately
+		// not used anywhere in this pipeline.
+		name: "resolveTJunctionsHoleFree",
 		run: function (soup, ctx) {
 			return asSoup(resolveTJunctionsHoleFree(soup, ctx.tolerance, 4), soup);
 		}

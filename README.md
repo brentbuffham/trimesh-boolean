@@ -46,6 +46,35 @@ Edit demos only under `examples/` (Vite root). Local dev: `npm run dev`.
 
 ## Quick Start
 
+**Start here.** `booleanAuto` runs the BMS pipeline and finishes the result, so
+you get valid geometry from one call:
+
+```javascript
+import { booleanAuto } from 'trimesh-boolean';
+
+var result = booleanAuto(terrainSoup, cutterSoup, 'subtract');
+// result.soup   -> the finished triangles
+// result.ok     -> true when every output invariant holds
+// result.report -> what was repaired, and what was refused (and why)
+```
+
+Output quality is an **invariant, not an option** — there is no flag to disable
+correct winding. What you can choose is how hard to work: `quality: "strict"`
+(default) finishes the result, `quality: "raw"` hands back the merged boolean
+untouched.
+
+Two engines live in this package and they do different jobs:
+
+| | use it for | notes |
+|---|---|---|
+| **`booleanAuto`** / `bmsBooleanOp` | open, non-watertight, non-manifold surfaces — terrain, DTMs, mining shells | the engine this library exists for |
+| `boolean` | simple closed solids | classic flood-fill + half-space; kept for compatibility |
+
+They do not call each other. If your inputs are survey surfaces, use
+`booleanAuto`.
+
+### Lower-level API
+
 ```javascript
 import { boolean, splitMeshPair, mergeSplitGroups,
          splitToComponents, mergeSmallComponents, mergeComponents,
@@ -127,7 +156,7 @@ var repaired = await repairMesh(meshA, {
 ```javascript
 import { booleanFromMeshes, meshToSoup, soupToMesh } from 'trimesh-boolean/three';
 
-// Boolean on Three.js meshes directly
+// Boolean on Three.js meshes directly — runs BMS + finishing (v0.7.1+)
 var resultMesh = booleanFromMeshes(threeGroupA, threeGroupB, 'subtract');
 scene.add(resultMesh);
 
@@ -135,6 +164,21 @@ scene.add(resultMesh);
 var soup = meshToSoup(threeMesh);
 var mesh = soupToMesh(soup, { color: 0xff0000 });
 ```
+
+**Since v0.7.1** `booleanFromMeshes` runs the BMS pipeline via `booleanAuto`.
+Before that it ran the classic engine, so Three.js consumers silently missed the
+open-surface path. Pass `{ engine: 'classic' }` for the old behaviour.
+
+**UTM precision.** `soupToMesh` builds geometry in a **local frame**, putting the
+centroid on `mesh.position`. Three stores positions as `Float32`, whose spacing
+at a UTM northing of 7.4e6 is **0.5 m** — writing absolute survey coordinates
+straight in silently collapses nearby vertices. Measured: `6771845.678` stores
+as `6771845.5`, an error of 0.178 m. In the local frame the same value carries
+about 1e-6 m. Pass `{ recenter: false }` for the old behaviour; only safe near
+the origin.
+
+Note this is a *storage* limit, independent of the exact predicates used
+internally: `orient3d` gives exact **signs**, not exact coordinates.
 
 ## API Reference
 
@@ -212,6 +256,99 @@ Select specific split groups by name, with optional normal flipping.
 - **groups**: `{ aInside, aOutside, bInside, bOutside }` from `splitMeshPair`
 - **selections**: `{ aInside?: boolean|"flip", aOutside?: boolean|"flip", bInside?: boolean|"flip", bOutside?: boolean|"flip" }`
 - **Returns**: `{ soup, points, triangles }` or `null`
+
+### Output Verification & Finishing (v0.7.0+)
+
+A boolean result is not automatically valid geometry, and a *repair* is not
+automatically an improvement. These three APIs measure instead of assuming.
+
+#### `booleanAuto(soupA, soupB, operation, options?)`
+
+Boolean + merge + gated finishing, in one call. The recommended entry point.
+
+```javascript
+var r = booleanAuto(terrain, cutter, 'subtract');
+if (!r.ok) console.warn(r.report.after.checks.filter(c => !c.ok));
+```
+
+| option | default | meaning |
+|---|---|---|
+| `quality` | `"strict"` | `"strict"` finishes the result; `"raw"` returns the merged boolean |
+| `classifier` | `"auto"` | passed to `bmsBooleanOp` |
+| `tolerance` | derived | shared by the boolean **and** the finisher so they agree |
+| `expectClosed` | `false` | require a closed solid in the report |
+
+#### `verifyOutput(soup, options?)`
+
+Read-only invariant check. Mutates nothing, repairs nothing, reports.
+
+```javascript
+var v = verifyOutput(soup);
+// v.ok, v.checks[], v.stats { triangles, vertices, openEdges,
+//                             nonManifoldEdges, area, components, volume }
+```
+
+Checks: `noDegenerateTriangles`, `noDuplicateTriangles`, `consistentWinding`
+(a shared edge must be traversed in opposite directions by its two triangles),
+`manifoldEdges`, `noTJunctions`, and `closed` under `{ expectClosed: true }`.
+Open surfaces pass by default — the normal case for terrain and DTM work.
+
+Identity is a neighbourhood weld, not `toFixed` string keys. `volume` is
+computed **after translating to the centroid**: at UTM scale the raw sum is
+catastrophic cancellation (measured: 89,000,000 m³ reported for a 55,000 m³
+solid).
+
+Use it to check *output*, not to guess from input. The internal `censusMessy`
+gate inspects inputs and can report clean on meshes that demonstrably contain
+T-junctions.
+
+#### `assessRepair(before, after, options?)`
+
+Run a repair on a copy, diff the two reports, and decide.
+
+```javascript
+var candidate = resolveTJunctionsHoleFree(soup, tol, 4);
+var a = assessRepair(soup, candidate);
+if (a.recommend === 'keep') soup = candidate;
+else console.log(describeAssessment(a));   // says exactly what it would damage
+```
+
+Returns `recommend: "keep" | "discard"`, `harmful`, and itemised `benefits` /
+`damage`. Volume is only judged when the baseline is sound (0 open, 0
+non-manifold) — against a broken baseline the figure means nothing.
+
+#### `finishMesh(soup, options?)`
+
+Applies `dedupCoincident`, `resolveTJunctionsHoleFree` and `orientWinding`, each
+gated by `assessRepair`, keeping a stage only when it **strictly reduces**
+violations. It never returns geometry worse than its input.
+
+```javascript
+var f = finishMesh(soup);
+// f.soup, f.ok, f.applied[], f.skipped[] (stage + reason), f.before, f.after
+```
+
+The gate is load-bearing, not defensive. Measured on real survey data:
+
+| pair | before | `finishMesh` | ungated |
+|---|---|---|---|
+| terrain × cylinder | `consistentWinding:40` | **clean** | clean |
+| terrain × cup | `consistentWinding:46` | **clean** | clean |
+| terrain × convoluted | 108 violations | 2 | `manifoldEdges:2` |
+| shell × presplit-a | 4 | **4, untouched** | **6 — worse** |
+
+On that last row hole-free T-junction resolution trades 4 T-junctions for 2
+degenerates, 3 non-manifold edges and 1 remaining T-junction. Ungated, that
+ships as "repaired".
+
+No deleting stage is included. Deleting geometry stitched into a mesh tears it
+open — measured elsewhere as 1827 slivers removed producing 3567 open edges and
+90 components — while welding dissolves the same junk for free.
+
+> ⚠️ `repairMesh` still defaults to `sliverRatio: 0.01`, which is that ruinous
+> setting. Assess before trusting it as a blind default.
+
+---
 
 ### BMS Pipeline (v0.4.0+)
 
