@@ -47,7 +47,8 @@ import { makeWeldPool, estimateWeldEps } from "../repair/neighbourhoodPool.js";
  *   ok: boolean,
  *   checks: Array<OutputCheck>,
  *   stats: { triangles: number, vertices: number, openEdges: number,
- *            nonManifoldEdges: number, area: number }
+ *            nonManifoldEdges: number, area: number, components: number,
+ *            volume: number }
  * }}
  */
 export function verifyOutput(soup, options) {
@@ -59,7 +60,7 @@ export function verifyOutput(soup, options) {
 		return {
 			ok: false,
 			checks: [{ check: "nonEmpty", ok: false, count: 0, detail: "soup is empty" }],
-			stats: { triangles: 0, vertices: 0, openEdges: 0, nonManifoldEdges: 0, area: 0 }
+			stats: { triangles: 0, vertices: 0, openEdges: 0, nonManifoldEdges: 0, area: 0, components: 0, volume: 0 }
 		};
 	}
 
@@ -116,7 +117,8 @@ export function verifyOutput(soup, options) {
 			var lo = u < v ? u : v, hi = u < v ? v : u;
 			var ek = lo + "_" + hi;
 			var rec = edges[ek];
-			if (!rec) rec = edges[ek] = { fwd: 0, rev: 0 };
+			if (!rec) rec = edges[ek] = { fwd: 0, rev: 0, tris: [] };
+			rec.tris.push(i);
 			if (u === lo) rec.fwd++; else rec.rev++;
 		}
 	}
@@ -156,9 +158,74 @@ export function verifyOutput(soup, options) {
 			vertices: pool.points.length,
 			openEdges: openEdges,
 			nonManifoldEdges: nonManifold,
-			area: totalArea
+			area: totalArea,
+			components: countComponents(soup.length, edges),
+			volume: signedVolume(soup)
 		}
 	};
+}
+
+/** Edge-connected component count over the pooled adjacency. */
+function countComponents(n, edges) {
+	if (n === 0) return 0;
+	var adj = new Array(n);
+	for (var k in edges) {
+		var tris = edges[k].tris;
+		for (var a = 0; a < tris.length; a++) {
+			for (var b = a + 1; b < tris.length; b++) {
+				(adj[tris[a]] || (adj[tris[a]] = [])).push(tris[b]);
+				(adj[tris[b]] || (adj[tris[b]] = [])).push(tris[a]);
+			}
+		}
+	}
+	var seen = new Uint8Array(n);
+	var comps = 0;
+	for (var i = 0; i < n; i++) {
+		if (seen[i]) continue;
+		comps++;
+		var stack = [i];
+		seen[i] = 1;
+		while (stack.length) {
+			var cur = stack.pop();
+			var nb = adj[cur];
+			if (!nb) continue;
+			for (var j = 0; j < nb.length; j++) if (!seen[nb[j]]) { seen[nb[j]] = 1; stack.push(nb[j]); }
+		}
+	}
+	return comps;
+}
+
+/**
+ * Signed volume, TRANSLATED TO THE CENTROID FIRST.
+ *
+ * At UTM scale the raw sum is catastrophic cancellation and returns garbage —
+ * measured in Kirra as 89,000,000 m3 for a 55,000 m3 solid. The same reason
+ * bmsBooleanOp centroid-shifts before intersecting.
+ *
+ * Only meaningful for a sound closed mesh; see assessRepair, which refuses to
+ * judge volume against a baseline that is already open or non-manifold.
+ */
+function signedVolume(soup) {
+	var cx = 0, cy = 0, cz = 0, n = 0, i;
+	for (i = 0; i < soup.length; i++) {
+		var t = soup[i];
+		cx += t.v0.x + t.v1.x + t.v2.x;
+		cy += t.v0.y + t.v1.y + t.v2.y;
+		cz += t.v0.z + t.v1.z + t.v2.z;
+		n += 3;
+	}
+	if (n === 0) return 0;
+	cx /= n; cy /= n; cz /= n;
+
+	var vol = 0;
+	for (i = 0; i < soup.length; i++) {
+		var q = soup[i];
+		var ax = q.v0.x - cx, ay = q.v0.y - cy, az = q.v0.z - cz;
+		var bx = q.v1.x - cx, by = q.v1.y - cy, bz = q.v1.z - cz;
+		var dx = q.v2.x - cx, dy = q.v2.y - cy, dz = q.v2.z - cz;
+		vol += (ax * (by * dz - dy * bz) - ay * (bx * dz - dx * bz) + az * (bx * dy - dx * by)) / 6;
+	}
+	return Math.abs(vol);
 }
 
 function mk(name, count, detail) {

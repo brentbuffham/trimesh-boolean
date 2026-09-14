@@ -677,3 +677,80 @@ export function verifyOutput(
 		minArea?: number;
 	}
 ): VerifyOutputResult;
+
+// ── Repair assessment and finishing ──────────────────────────────────────────
+
+export interface RepairAssessment {
+	/** True when the candidate would damage the mesh in any measured way. */
+	harmful: boolean;
+	/** "keep" only when the candidate strictly reduces total violations. */
+	recommend: "keep" | "discard";
+	benefits: string[];
+	damage: string[];
+	before: VerifyOutputResult;
+	after: VerifyOutputResult;
+	violationsBefore: number;
+	violationsAfter: number;
+	trisDelta: number;
+	volumeDeltaPct: number;
+}
+
+/** Total invariant violations across a verifyOutput report. */
+export function violationCount(report: VerifyOutputResult): number;
+
+/**
+ * Diff two soups and report whether a candidate repair helps or harms.
+ * Run the repair on a copy, then pass both here.
+ */
+export function assessRepair(
+	before: TriangleSoup,
+	after: TriangleSoup,
+	options?: {
+		/** Volume drift beyond this percentage counts as damage. Default 0.5. */
+		volumeTolPct?: number;
+		/** Weld epsilon, applied to BOTH measurements so they are comparable. */
+		tolerance?: number;
+		expectClosed?: boolean;
+		minArea?: number;
+	}
+): RepairAssessment;
+
+/** Render an assessment as plain text. */
+export function describeAssessment(assessment: RepairAssessment): string;
+
+export interface FinishStage {
+	name: string;
+	run: (soup: TriangleSoup, ctx: { tolerance: number; options: object }) => TriangleSoup;
+}
+
+export interface FinishMeshResult {
+	soup: TriangleSoup;
+	ok: boolean;
+	before: VerifyOutputResult;
+	after: VerifyOutputResult;
+	applied: string[];
+	skipped: Array<{ stage: string; reason: string; violations: string }>;
+	stages: Array<{ stage: string; assessment: RepairAssessment }>;
+}
+
+/** The default finishing stages: dedupCoincident, resolveTJunctions, orientWinding. */
+export const DEFAULT_STAGES: FinishStage[];
+
+/**
+ * Bring a soup up to the output contract — no duplicates, no degenerates,
+ * consistent winding, no T-junctions — applying each stage ONLY where it
+ * measurably reduces violations. Never returns geometry worse than its input.
+ */
+export function finishMesh(
+	soup: TriangleSoup,
+	options?: {
+		tolerance?: number;
+		expectClosed?: boolean;
+		minArea?: number;
+		volumeTolPct?: number;
+		/** Override the stage list (advanced). */
+		stages?: FinishStage[];
+		/** Skip the gate entirely. Debugging only — this lets damage through. */
+		force?: boolean;
+	}
+): FinishMeshResult;

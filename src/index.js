@@ -76,6 +76,8 @@ export { bmsClosePolylines, chainedOpenEdge } from "./bms/bmsClose.js";
 export { bmsClassify } from "./bms/bmsClassify.js";
 export { verifyBmsClassification } from "./bms/bmsVerify.js";
 export { verifyOutput } from "./verify/verifyOutput.js";
+export { assessRepair, describeAssessment, violationCount } from "./verify/assessRepair.js";
+export { finishMesh, DEFAULT_STAGES } from "./verify/finishMesh.js";
 export { heffalumpClassify, shouldUseHeffalump, reclassifyTriangles, reclassifyAtPoint, reclassifyRegion } from "./bms/heffalumpClassify.js";
 export { bmsBooleanOp } from "./bms/bmsBooleanOp.js";
 

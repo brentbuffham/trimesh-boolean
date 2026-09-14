@@ -3,7 +3,53 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
-## Unreleased
+## 0.7.0
+
+### Added — `assessRepair` and `finishMesh`: automated finishing that cannot make things worse
+
+A repair is not automatically an improvement. Measured on the real Kirra
+surfaces, hole-free T-junction resolution applied to `shell x presplit-a` turns
+4 violations into 6, trading T-junctions for degenerates and non-manifold edges.
+An ungated pipeline ships that as "repaired".
+
+- **`assessRepair(before, after, options)`** — run a repair on a copy, diff the
+  two `verifyOutput` reports, and report benefit or damage. Returns
+  `recommend: "keep" | "discard"`, plus itemised `benefits` and `damage`.
+  Ported from Kirra's `helpers/MeshRepairAssessment.js` and rebuilt on
+  `verifyOutput`, so winding and T-junction violations count too — the original
+  tracked only open edges, non-manifold edges, components and volume.
+- **`finishMesh(soup, options)`** — apply the default stages
+  (`dedupCoincident`, `resolveTJunctions`, `orientWinding`), each gated by
+  `assessRepair`, keeping a stage only when it strictly reduces violations.
+  **Never returns geometry worse than its input** — that is pinned by a test.
+- **`violationCount(report)`** and **`describeAssessment(assessment)`** helpers.
+- `verifyOutput().stats` gains `components` and `volume`. Volume is translated
+  to the centroid before summing: at UTM scale the raw sum is catastrophic
+  cancellation, measured in Kirra as 89,000,000 m3 for a 55,000 m3 solid.
+
+Measured on real Kirra booleans:
+
+| pair | before | `finishMesh` | ungated |
+|---|---|---|---|
+| terrain x cylinder | `consistentWinding:40` | **clean** | clean |
+| terrain x cup | `consistentWinding:46` | **clean** | clean |
+| terrain x convoluted | 108 violations | 2 | `manifoldEdges:2` |
+| shell x presplit-a | 4 | **4, untouched** | **6 — worse** |
+
+No deleting stage is included. Kirra measured that removing geometry stitched
+into a mesh tears it open (deleting 1827 slivers produced 3567 open edges and 90
+components) while welding dissolves the same junk for free. Note that
+`repairMesh` still defaults to `sliverRatio: 0.01` — the setting measured as
+ruinous — so assess before trusting it.
+
+Known limitation: on `terrain x convoluted` the strict "must reduce" rule
+declines a 1-for-1 trade (one T-junction for one non-manifold edge), leaving 2
+violations where accepting the trade would leave 1. The rule is kept because
+`shell x presplit-a` shows what accepting trades costs.
+
+Purely additive. Typed in `src/index.d.ts`. No existing behaviour changes.
+
+## 0.6.7 (addendum — shipped in the 0.6.7 tarball)
 
 ### Added — `verifyOutput`: read-only invariant check on finished geometry
 
