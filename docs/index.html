@@ -87,8 +87,9 @@
 	}
 }
 </script>
-  <script type="module" crossorigin src="/trimesh-boolean/assets/index-BQINaVTl.js"></script>
-  <link rel="modulepreload" crossorigin href="/trimesh-boolean/assets/booleanOp-Dw0YP5VW.js">
+  <script type="module" crossorigin src="/trimesh-boolean/assets/index-BzdPVRRF.js"></script>
+  <link rel="modulepreload" crossorigin href="/trimesh-boolean/assets/booleanOp-DWkcdrYx.js">
+  <link rel="modulepreload" crossorigin href="/trimesh-boolean/assets/package-Cq53M33f.js">
 </head>
 <body>
 <div id="processing-overlay">Processing...</div>
@@ -104,8 +105,9 @@
 <div id="app">
 	<div id="toolbar">
 		<div class="toolbar-row">
-			<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.6</span></h1>
+			<h1>trimesh-boolean <span id="lib-version" style="font-size:0.5em;color:#888">…</span></h1>
 			<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
+			<a href="workflows.html" class="nav-link">Workflows &rarr;</a>
 			<div class="sep"></div>
 			<button type="button" id="btn-kap-import" title="Load triangulated surfaces from a Kirra .kap file">Import KAP</button>
 			<button type="button" id="btn-kap-export" title="Save Mesh A and Mesh B as a minimal Kirra-compatible .kap">Export KAP</button>
@@ -165,6 +167,11 @@
 			<button id="btn-custom" onclick="runOp('custom')">Custom</button>
 		</div>
 		<div class="toolbar-row">
+			<label>Classifier:</label>
+			<button id="btn-classifier-auto" onclick="setClassifier('auto')" title="Census inputs, run hybrid, verify partition / chain-closure / barrier post-conditions, fall back to heffalump on the existing mega soup on any failure (v0.5.8 default)">Auto</button>
+			<button id="btn-classifier-hybrid" onclick="setClassifier('hybrid')" title="Always hybrid (boundary topology + barrier-normal), no verification — legacy behaviour">Hybrid</button>
+			<button id="btn-classifier-heffalump" onclick="setClassifier('heffalump')" title="Always heffalump (per-triangle ray-cast / nearest-surface) — the old Force Heffalump checkbox">Heffalump</button>
+			<div class="sep"></div>
 			<label><input type="checkbox" id="chk-prerepair" checked> Fix T-Junctions</label>
 			<label><input type="checkbox" id="chk-fill-gaps"> Fill Gaps (Fan)</label>
 			<label><input type="checkbox" id="chk-force-close"> Force Close (Idx)</label>

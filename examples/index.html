@@ -94,8 +94,9 @@
 <div id="app">
 	<div id="toolbar">
 		<div class="toolbar-row">
-			<h1>trimesh-boolean <span style="font-size:0.5em;color:#888">v0.5.8</span></h1>
+			<h1>trimesh-boolean <span id="lib-version" style="font-size:0.5em;color:#888">…</span></h1>
 			<a href="2d.html" class="nav-link">&larr; 2D Demo</a>
+			<a href="workflows.html" class="nav-link">Workflows &rarr;</a>
 			<div class="sep"></div>
 			<button type="button" id="btn-kap-import" title="Load triangulated surfaces from a Kirra .kap file">Import KAP</button>
 			<button type="button" id="btn-kap-export" title="Save Mesh A and Mesh B as a minimal Kirra-compatible .kap">Export KAP</button>
@@ -222,6 +223,13 @@ import {
 	reclassifyAtPoint, reclassifyRegion
 } from '../src/index.js';
 import { parseKapSurfaces, buildMinimalKapBlob } from './kap-io.js';
+import pkg from '../package.json';
+
+// ── Version badge, read from package.json so it cannot go stale ──
+// It said v0.5.8 while the library was on 0.7.1. Hard-coded version strings in
+// a demo rot silently; this one cannot.
+var vEl = document.getElementById('lib-version');
+if (vEl) vEl.textContent = 'v' + pkg.version;
 
 // ── Load Kirra surfaces from pre-extracted JSON ──
 var kirraSurfaces = {};

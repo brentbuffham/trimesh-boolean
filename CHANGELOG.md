@@ -3,6 +3,32 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## 0.7.3
+
+### Added — a workflows demo: every pipeline, with the code that runs it
+
+`examples/workflows.html` — a guided catalogue aimed at people who need to
+*see* how the library works rather than read the source. Each workflow shows
+what it does, runs live in the browser, renders the geometry before and after,
+and reports the measured effect through `verifyOutput`.
+
+**The code listing is generated from the function itself** (`fn.toString()`),
+not copied alongside it, so what you read is literally what ran. A demo whose
+snippets drift from its behaviour is worse than no demo.
+
+Workflows: one-call `booleanAuto`; inspecting a surface with `verifyOutput`;
+**T-junction repair, legacy versus hole-free**, showing the legacy resolver
+leaving 66.7% of triangles correctly wound against the hole-free one's 100%; a
+repair being *refused* by the `assessRepair` gate; the BMS pipeline stage by
+stage; grazing and coplanar crossings; the three classifiers disagreeing on
+seam-aligned geometry; and the whole thing on real Kirra survey data
+(`consistentWinding:40` → clean on 11,200 triangles).
+
+### Fixed — the demo version badge said v0.5.8 while the library was on 0.7.1
+
+Both demo pages now import the version from `package.json`, so it is baked in at
+build time and cannot rot again.
+
 ## 0.7.2
 
 ### Fixed — the heffalump's closed-mesh test was a single un-jittered ray

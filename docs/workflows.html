@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>trimesh-boolean — workflows</title>
+<style>
+	:root {
+		--bg: #1a1a1a; --panel: #222; --edge: #333; --ink: #ddd; --dim: #888;
+		--accent: #F47920; --blue: #4472C4; --good: #4CAF50; --bad: #E05252;
+	}
+	* { box-sizing: border-box; }
+	body { margin: 0; background: var(--bg); color: var(--ink);
+		font: 13px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; }
+	a { color: var(--accent); }
+
+	header { padding: 10px 16px; border-bottom: 1px solid var(--edge);
+		display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+	header h1 { margin: 0; font-size: 18px; }
+	header .v { color: var(--dim); font-size: 12px; }
+	header nav { margin-left: auto; display: flex; gap: 12px; }
+
+	.wrap { display: grid; grid-template-columns: 260px 1fr; min-height: calc(100vh - 47px); }
+	@media (max-width: 860px) { .wrap { grid-template-columns: 1fr; } }
+
+	/* ── index ── */
+	aside { border-right: 1px solid var(--edge); padding: 10px 0; overflow-y: auto; }
+	aside .group { color: var(--dim); font-size: 11px; text-transform: uppercase;
+		letter-spacing: .06em; padding: 12px 14px 4px; }
+	aside button { display: block; width: 100%; text-align: left; padding: 7px 14px;
+		background: none; border: 0; border-left: 3px solid transparent;
+		color: var(--ink); cursor: pointer; font: inherit; }
+	aside button:hover { background: #2a2a2a; }
+	aside button.on { background: #2d2d2d; border-left-color: var(--accent); color: #fff; }
+
+	/* ── stage ── */
+	main { padding: 16px 20px 40px; max-width: 1100px; }
+	h2 { margin: 0 0 4px; font-size: 20px; }
+	.why { color: var(--dim); margin: 0 0 14px; max-width: 70ch; }
+	.why strong { color: var(--ink); }
+
+	.bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+	button.run { background: var(--accent); color: #111; border: 0; padding: 7px 16px;
+		border-radius: 3px; font: 600 13px inherit; cursor: pointer; }
+	button.run:hover { filter: brightness(1.1); }
+	button.ghost { background: #2c2c2c; color: var(--ink); border: 1px solid var(--edge);
+		padding: 6px 12px; border-radius: 3px; cursor: pointer; font: inherit; }
+	button.ghost.on { border-color: var(--accent); color: #fff; }
+
+	pre { background: #151515; border: 1px solid var(--edge); border-radius: 4px;
+		padding: 12px 14px; overflow-x: auto; margin: 0 0 14px;
+		font: 12px/1.6 "Cascadia Code", Consolas, monospace; color: #cfcfcf; }
+	pre .cm { color: #6a9955; }
+	pre .kw { color: #569cd6; }
+	pre .st { color: #ce9178; }
+
+	.cols { display: grid; grid-template-columns: 1fr 340px; gap: 16px; }
+	@media (max-width: 1000px) { .cols { grid-template-columns: 1fr; } }
+
+	#view { width: 100%; height: 420px; background: #111;
+		border: 1px solid var(--edge); border-radius: 4px; }
+
+	table { border-collapse: collapse; width: 100%; font-size: 12px; }
+	th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #2b2b2b; }
+	th { color: var(--dim); font-weight: 600; }
+	td.num { text-align: right; font-family: Consolas, monospace; }
+	.good { color: var(--good); } .bad { color: var(--bad); } .dim { color: var(--dim); }
+
+	.note { border-left: 3px solid var(--accent); background: #262117;
+		padding: 9px 12px; margin: 12px 0 0; color: #e8d8c4; }
+	.legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0 0; font-size: 12px; }
+	.legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px;
+		margin-right: 5px; vertical-align: -1px; }
+	.status { color: var(--dim); font-size: 12px; }
+</style>
+<script type="importmap">
+{ "imports": {
+	"three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+	"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+  <script type="module" crossorigin src="/trimesh-boolean/assets/workflows-Bq9LZoBL.js"></script>
+  <link rel="modulepreload" crossorigin href="/trimesh-boolean/assets/booleanOp-DWkcdrYx.js">
+  <link rel="modulepreload" crossorigin href="/trimesh-boolean/assets/package-Cq53M33f.js">
+</head>
+<body>
+
+<header>
+	<h1>trimesh-boolean</h1>
+	<span class="v" id="ver">…</span>
+	<span class="status">workflows — every pipeline, with the code that runs it</span>
+	<nav>
+		<a href="./index.html">Boolean playground</a>
+		<a href="./2d.html">2D demo</a>
+		<a href="https://github.com/brentbuffham/trimesh-boolean">GitHub</a>
+	</nav>
+</header>
+
+<div class="wrap">
+	<aside id="index"></aside>
+	<main>
+		<h2 id="title">…</h2>
+		<p class="why" id="why"></p>
+
+		<div class="bar">
+			<button class="run" id="run">Run it</button>
+			<span id="views"></span>
+			<span class="status" id="status"></span>
+		</div>
+
+		<pre id="code"></pre>
+
+		<div class="cols">
+			<div>
+				<div id="view"></div>
+				<div class="legend" id="legend"></div>
+			</div>
+			<div>
+				<table id="metrics"><tbody></tbody></table>
+				<div id="note"></div>
+			</div>
+		</div>
+	</main>
+</div>
+
+
+
+</body>
+</html>

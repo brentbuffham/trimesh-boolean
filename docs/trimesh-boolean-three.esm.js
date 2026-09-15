@@ -1705,6 +1705,22 @@ function triNormal(tri) {
 
 
 /**
+ * Near-parallel reject gate (|nA . nB|).
+ *
+ * This is NOT the conditioning limit — `lineDirLen < 1e-12` and the
+ * `denom > 1e-15` reprojection guard below are. Those are the tests that
+ * decide whether the intersection line is actually computable. This gate
+ * exists only to hand exactly-coplanar pairs (where the line is undefined,
+ * not merely ill-conditioned) to {@link module:intersect/coplanarOverlap}.
+ *
+ * It used to sit at 0.9999, which rejected every crossing shallower than
+ * ~0.81 degrees even though the orient3d sign tests above had already
+ * PROVEN the two triangles straddle each other. On bench-face-vs-cut
+ * geometry that silently produced zero barrier segments. See CHANGELOG 0.6.6.
+ */
+var NEAR_PARALLEL$1 = 1 - 1e-14;
+
+/**
  * Moller triangle-triangle intersection.
  *
  * Projects each triangle onto the plane of the other, computes the
@@ -1716,7 +1732,7 @@ function triNormal(tri) {
  * @returns {{ p0: {x:number,y:number,z:number}, p1: {x:number,y:number,z:number} } | null}
  *          Intersection segment, or null when no intersection exists.
  */
-function triTriIntersection(triA, triB) {
+function triTriIntersection(triA, triB, options) {
     // Robust orientation: signed distances of triA vertices to plane(triB)
     // orient3d returns a value proportional to 6× signed tetrahedron volume;
     // its sign is guaranteed correct even for near-degenerate configurations.
@@ -1743,7 +1759,8 @@ function triTriIntersection(triA, triB) {
 
     // Near-parallel planes
     var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
-    if (Math.abs(dotN) > 0.9999) return null;
+    var nearParallel = NEAR_PARALLEL$1;
+    if (Math.abs(dotN) > nearParallel) return null;
 
     // Intersection line direction
     var lineDir = cross(nA, nB);
@@ -2093,6 +2110,19 @@ function triBBox(tri) {
         maxY: Math.max(tri.v0.y, tri.v1.y, tri.v2.y),
         maxZ: Math.max(tri.v0.z, tri.v1.z, tri.v2.z)
     };
+}
+
+/**
+ * Test whether two axis-aligned bounding boxes overlap in all three axes.
+ *
+ * @param {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }} a
+ * @param {{ minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number }} b
+ * @returns {boolean}
+ */
+function bboxOverlap(a, b) {
+    return a.minX <= b.maxX && a.maxX >= b.minX &&
+           a.minY <= b.maxY && a.maxY >= b.minY &&
+           a.minZ <= b.maxZ && a.maxZ >= b.minZ;
 }
 
 /**
@@ -3394,6 +3424,229 @@ function chainSegments(segments, threshold) {
 }
 
 /**
+ * @module boolean/sliverGuard
+ *
+ * Fan-sliver detection and interior Steiner lattice generation (KNOWN_ISSUES #21).
+ *
+ * Splitting a giant triangle (e.g. a 50 m extruded-prism wall face) against a
+ * dense intersection chain makes fan triangulation emit dozens of needle
+ * slivers per face — fans from the face's far corners to every chain point.
+ * They tile the face correctly but per-triangle classification of needles is
+ * coin-flip and they survive into results as visually obvious "spurs".
+ *
+ * The guard: when the parent triangle's edge length is extreme relative to the
+ * chain point spacing, skip the corner fans and re-triangulate with a CDT
+ * constrained by the chain, seeded with a hexagonal lattice of INTERIOR
+ * Steiner points to bound the aspect ratio of the output.
+ *
+ * The lattice points are strictly interior — they never touch the parent
+ * triangle's edges, so edge conformity with neighbouring (possibly uncrossed)
+ * triangles is preserved: no T-junctions are introduced.
+ */
+
+
+// A fan triangle's aspect ratio is roughly (corner-to-chain distance) /
+// (chain point spacing). Guard only on genuinely extreme mismatches so
+// ordinary splits keep the cheaper, segment-exact fan path.
+var SLIVER_MIN_CHAIN_POINTS = 16;
+var SLIVER_ASPECT_THRESHOLD = 32;
+
+// Bound the lattice so a pathological face cannot generate unbounded points.
+var MAX_LATTICE_POINTS = 1024;
+var MIN_LATTICE_DIVISIONS = 24; // spacing never smaller than maxEdge / 24
+
+/**
+ * Average spacing between consecutive chain points (3D arc length / count).
+ */
+function chainSpacing(chain) {
+	var len = 0;
+	for (var i = 0; i < chain.length - 1; i++) {
+		len += dist3(chain[i], chain[i + 1]);
+	}
+	return chain.length > 1 ? len / (chain.length - 1) : 0;
+}
+
+function maxEdgeLength(tri) {
+	var a = dist3(tri.v0, tri.v1);
+	var b = dist3(tri.v1, tri.v2);
+	var c = dist3(tri.v2, tri.v0);
+	return Math.max(a, Math.max(b, c));
+}
+
+/**
+ * Decide whether fan triangulation of this triangle against this chain
+ * would shatter into needle slivers.
+ *
+ * @param {{ v0, v1, v2 }} tri - Parent triangle
+ * @param {Array<{x,y,z}>} chain - Ordered chain points crossing the triangle
+ * @returns {boolean}
+ */
+function needsSliverGuard(tri, chain) {
+	if (!chain || chain.length < SLIVER_MIN_CHAIN_POINTS) return false;
+	var spacing = chainSpacing(chain);
+	if (spacing < 1e-12) return false;
+	return maxEdgeLength(tri) / spacing >= SLIVER_ASPECT_THRESHOLD;
+}
+
+/**
+ * Generate a hexagonal lattice of interior Steiner points for a triangle,
+ * sized to the chain spacing, avoiding the chain itself and the triangle
+ * edges. Points are plain {x,y,z} objects on the triangle's plane.
+ *
+ * @param {{ v0, v1, v2 }} tri - Parent triangle
+ * @param {Array<{x,y,z}>} chain - Ordered chain points crossing the triangle
+ * @returns {Array<{x,y,z}>} Interior lattice points (possibly empty)
+ */
+function interiorLatticePoints(tri, chain) {
+	// ── Local 2D frame on the triangle plane ──
+	var e1x = tri.v1.x - tri.v0.x, e1y = tri.v1.y - tri.v0.y, e1z = tri.v1.z - tri.v0.z;
+	var e2x = tri.v2.x - tri.v0.x, e2y = tri.v2.y - tri.v0.y, e2z = tri.v2.z - tri.v0.z;
+	var e1Len = Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+	if (e1Len < 1e-12) return [];
+	var lux = e1x / e1Len, luy = e1y / e1Len, luz = e1z / e1Len;
+	var lnx = e1y * e2z - e1z * e2y;
+	var lny = e1z * e2x - e1x * e2z;
+	var lnz = e1x * e2y - e1y * e2x;
+	var lnLen = Math.sqrt(lnx * lnx + lny * lny + lnz * lnz);
+	if (lnLen < 1e-12) return [];
+	var lvx = lny * luz - lnz * luy;
+	var lvy = lnz * lux - lnx * luz;
+	var lvz = lnx * luy - lny * lux;
+	var lvLen = Math.sqrt(lvx * lvx + lvy * lvy + lvz * lvz);
+	if (lvLen < 1e-12) return [];
+	lvx /= lvLen; lvy /= lvLen; lvz /= lvLen;
+
+	function toLocal(p) {
+		var dx = p.x - tri.v0.x, dy = p.y - tri.v0.y, dz = p.z - tri.v0.z;
+		return [dx * lux + dy * luy + dz * luz, dx * lvx + dy * lvy + dz * lvz];
+	}
+
+	var a2 = toLocal(tri.v0), b2 = toLocal(tri.v1), c2 = toLocal(tri.v2);
+
+	// ── Spacing: a few chain spacings, but never finer than maxEdge / 24 ──
+	var maxEdge = maxEdgeLength(tri);
+	var spacing = chainSpacing(chain);
+	var s = Math.max(spacing * 4, maxEdge / MIN_LATTICE_DIVISIONS);
+
+	// Cap total points: triangle area / hex cell area, scale s up if needed
+	var triArea = lnLen * 0.5;
+	var expected = triArea / (s * s * 0.866);
+	if (expected > MAX_LATTICE_POINTS) {
+		s = s * Math.sqrt(expected / MAX_LATTICE_POINTS);
+	}
+
+	// ── 2D distance from point to segment ──
+	function segDist2(px, py, ax, ay, bx, by) {
+		var abx = bx - ax, aby = by - ay;
+		var lenSq = abx * abx + aby * aby;
+		var t = lenSq < 1e-20 ? 0 : ((px - ax) * abx + (py - ay) * aby) / lenSq;
+		if (t < 0) t = 0; else if (t > 1) t = 1;
+		var qx = ax + t * abx - px, qy = ay + t * aby - py;
+		return Math.sqrt(qx * qx + qy * qy);
+	}
+
+	// ── Bucket chain points for fast proximity rejection ──
+	var chainLocal = [];
+	var buckets = {};
+	var cell = s;
+	for (var ci = 0; ci < chain.length; ci++) {
+		var cl = toLocal(chain[ci]);
+		chainLocal.push(cl);
+		var bk = Math.floor(cl[0] / cell) + "|" + Math.floor(cl[1] / cell);
+		(buckets[bk] = buckets[bk] || []).push(ci);
+	}
+
+	// Clearance from the chain scales with CHAIN spacing, not lattice spacing:
+	// a wide corridor would leave the chain's 0.5 m points bridging to far
+	// lattice points (wedge-apex mini-fans where the chain crosses a parent
+	// edge). Letting the lattice approach the chain fills the corridor with
+	// small, well-shaped triangles instead.
+	var chainClear = Math.max(spacing * 1.2, s * 0.15);
+	var chainClearSq = chainClear * chainClear;
+	function nearChain(px, py) {
+		var bx = Math.floor(px / cell), by = Math.floor(py / cell);
+		for (var ox = -1; ox <= 1; ox++) {
+			for (var oy = -1; oy <= 1; oy++) {
+				var list = buckets[(bx + ox) + "|" + (by + oy)];
+				if (!list) continue;
+				for (var li = 0; li < list.length; li++) {
+					var cp = chainLocal[list[li]];
+					var ddx = cp[0] - px, ddy = cp[1] - py;
+					if (ddx * ddx + ddy * ddy < chainClearSq) return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	// ── Barycentric inside test (strict, with edge clearance via segDist2) ──
+	var baryD = (b2[1] - c2[1]) * (a2[0] - c2[0]) + (c2[0] - b2[0]) * (a2[1] - c2[1]);
+	if (Math.abs(baryD) < 1e-12) return [];
+	function isInside(pu, pv) {
+		var u = ((b2[1] - c2[1]) * (pu - c2[0]) + (c2[0] - b2[0]) * (pv - c2[1])) / baryD;
+		var v = ((c2[1] - a2[1]) * (pu - c2[0]) + (a2[0] - c2[0]) * (pv - c2[1])) / baryD;
+		var w = 1 - u - v;
+		return u > 0 && v > 0 && w > 0;
+	}
+
+	var edgeClear = s * 0.45;
+
+	var points = [];
+	function accept(pu, pv) {
+		if (!isInside(pu, pv)) return false;
+		if (segDist2(pu, pv, a2[0], a2[1], b2[0], b2[1]) < edgeClear) return false;
+		if (segDist2(pu, pv, b2[0], b2[1], c2[0], c2[1]) < edgeClear) return false;
+		if (segDist2(pu, pv, c2[0], c2[1], a2[0], a2[1]) < edgeClear) return false;
+		points.push({
+			x: tri.v0.x + pu * lux + pv * lvx,
+			y: tri.v0.y + pu * luy + pv * lvy,
+			z: tri.v0.z + pu * luz + pv * lvz
+		});
+		return true;
+	}
+
+	// ── Graded offset rows along the chain ──
+	// Rows parallel to the chain at doubling distances (1.5h, 3h, 6h, ... up
+	// to the lattice spacing), subsampled so along-row spacing ≈ row distance.
+	// These fill the corridor beside the chain AND the thin wedges where the
+	// chain crosses a parent edge — a fixed lattice can't land points there,
+	// which would leave chain points fanning to a single far vertex.
+	for (var d = spacing * 1.5; d < s; d *= 2) {
+		var stride = Math.max(1, Math.round(d / spacing));
+		for (var oi = 0; oi < chainLocal.length - 1; oi += stride) {
+			var c0 = chainLocal[oi];
+			var c1 = chainLocal[Math.min(oi + stride, chainLocal.length - 1)];
+			var tx = c1[0] - c0[0], ty = c1[1] - c0[1];
+			var tl = Math.sqrt(tx * tx + ty * ty);
+			if (tl < 1e-12) continue;
+			var onx = -ty / tl, ony = tx / tl;
+			accept(c0[0] + onx * d, c0[1] + ony * d);
+			accept(c0[0] - onx * d, c0[1] - ony * d);
+			if (points.length >= MAX_LATTICE_POINTS) return points;
+		}
+	}
+
+	// ── Hexagonal lattice over the triangle's 2D bounding box ──
+	var minU = Math.min(a2[0], b2[0], c2[0]);
+	var maxU = Math.max(a2[0], b2[0], c2[0]);
+	var minV = Math.min(a2[1], b2[1], c2[1]);
+	var maxV = Math.max(a2[1], b2[1], c2[1]);
+
+	var rowH = s * 0.866;
+	var row = 0;
+	for (var v = minV + rowH * 0.5; v < maxV; v += rowH, row++) {
+		var offset = (row % 2) ? s * 0.5 : 0;
+		for (var u = minU + offset + s * 0.5; u < maxU; u += s) {
+			if (nearChain(u, v)) continue;
+			accept(u, v);
+			if (points.length >= MAX_LATTICE_POINTS) return points;
+		}
+	}
+
+	return points;
+}
+
+/**
  * @module boolean/splitTriangles
  *
  * Re-triangulation of crossed triangles. Primary method is fan triangulation:
@@ -3419,9 +3672,10 @@ function chainSegments(segments, threshold) {
  *
  * @param {{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }} tri - Parent triangle
  * @param {Array<{ p0: {x,y,z}, p1: {x,y,z} }>} segments - Intersection segments crossing this triangle
+ * @param {Array<{x,y,z}>} [extraPoints] - Additional interior Steiner points (sliver guard lattice)
  * @returns {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} Sub-triangles, or [tri] on failure
  */
-function retriangulateWithSteinerPoints(tri, segments) {
+function retriangulateWithSteinerPoints(tri, segments, extraPoints) {
 	if (!segments || segments.length === 0) return [tri];
 
 	// -- Step 1: Build local 2D coordinate frame on triangle plane --
@@ -3527,7 +3781,7 @@ function retriangulateWithSteinerPoints(tri, segments) {
 		}
 	}
 
-	if (validSteiner.length === 0) return [tri];
+	if (validSteiner.length === 0 && (!extraPoints || extraPoints.length === 0)) return [tri];
 
 	// Build pts array: indices 0,1,2 = original vertices, 3+ = Steiner
 	var pts = [
@@ -3538,6 +3792,13 @@ function retriangulateWithSteinerPoints(tri, segments) {
 	for (var vi = 0; vi < validSteiner.length; vi++) {
 		keyToIndex[validSteiner[vi].key] = pts.length;
 		pts.push(validSteiner[vi]);
+	}
+
+	// Sliver guard lattice points: strictly interior, never constrained
+	if (extraPoints) {
+		for (var xp = 0; xp < extraPoints.length; xp++) {
+			pts.push(extraPoints[xp]);
+		}
 	}
 
 	// -- Step 3: Project all to local 2D, run Delaunator --
@@ -3653,6 +3914,17 @@ function fanTriangulate(tri, segments) {
 		return retriangulateWithSteinerPoints(tri, segments);
 	}
 	var chain = chains[0];
+
+	// Sliver guard (KNOWN_ISSUES #21): a giant triangle against a dense chain
+	// would fan into needle slivers from the far corners to every chain point.
+	// Re-triangulate with chain-constrained CDT + interior Steiner lattice
+	// instead — bounded aspect ratio, no T-junctions (lattice is interior-only).
+	if (needsSliverGuard(tri, chain)) {
+		var latticePts = interiorLatticePoints(tri, chain);
+		if (latticePts.length > 0) {
+			return retriangulateWithSteinerPoints(tri, segments, latticePts);
+		}
+	}
 
 	// Step 3) Build local 2D frame for barycentric classification
 	var verts = [tri.v0, tri.v1, tri.v2];
@@ -5681,7 +5953,7 @@ function propagateNormals(tris) {
  * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} tris
  * @returns {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>}
  */
-function flipSoup(tris) {
+function flipSoup$1(tris) {
 	var result = [];
 	for (var i = 0; i < tris.length; i++) {
 		var t = tris[i];
@@ -5814,7 +6086,7 @@ function mergeSplitGroups(groups, operation) {
 		for (var ai = 0; ai < groups.aOutside.length; ai++) {
 			combined.push(groups.aOutside[ai]);
 		}
-		var flippedBInside = flipSoup(groups.bInside);
+		var flippedBInside = flipSoup$1(groups.bInside);
 		for (var bi = 0; bi < flippedBInside.length; bi++) {
 			combined.push(flippedBInside[bi]);
 		}
@@ -6032,6 +6304,5356 @@ function boolean(soupA, soupB, operation, options) {
 	}
 
 	return result;
+}
+
+/**
+ * @module intersect/coplanarOverlap
+ *
+ * Coplanar triangle-triangle overlap — the case the Moller path
+ * ({@link module:intersect/triTriIntersection}) deliberately rejects with
+ * its near-parallel gate (|dotN| > 0.9999). Two coplanar triangles that
+ * overlap in AREA are a coincident fold: the intersection is not a segment
+ * but a convex polygon (A ∩ B).
+ *
+ * This module computes that overlap polygon and (optionally) emits its
+ * boundary edges as intersection segments through the shared BMS vertex
+ * pool, so both triangles get the SAME PoolVertex objects and the
+ * subsequent split is conforming (no T-junctions across the fold).
+ *
+ * Coplanarity is decided with robust orient3d (Shewchuk adaptive
+ * predicates) — the sign/zero of the 6x-tet-volume determinant — never
+ * with an n·v + d epsilon test.
+ *
+ * Exports:
+ *  - coplanarOverlap(triA, triB, options)          — overlap polygon or null
+ *  - emitCoplanarSegments(polygon, pool, refA, refB) — polygon edges → pool segments
+ */
+
+
+/** Same near-parallel threshold as triTriIntersection's reject gate. */
+var NEAR_PARALLEL = 0.9999;
+
+/**
+ * Compute the convex overlap polygon of two coplanar triangles.
+ *
+ * Steps:
+ *  1. Near-parallel gate: |nA · nB| must exceed `nearParallel` (default
+ *     0.9999 — the exact complement of the Moller reject).
+ *  2. Coplanarity: each vertex of B must lie on plane(A). The signed
+ *     distance is derived from robust orient3d (6x signed tet volume)
+ *     divided by |2A| of triangle A — exact sign, float magnitude.
+ *  3. Project both triangles to the dominant-axis 2D plane of A's normal.
+ *  4. Sutherland-Hodgman clip B against A (both convex) — intersection
+ *     points are lerped in full 3D so the polygon stays on the plane.
+ *  5. Area gate: the overlap must have real area (relative to the smaller
+ *     triangle) — this naturally excludes legitimate coplanar neighbours
+ *     that merely touch along a shared edge or vertex.
+ *
+ * @param {{ v0: Object, v1: Object, v2: Object }} triA
+ * @param {{ v0: Object, v1: Object, v2: Object }} triB
+ * @param {Object} [options]
+ * @param {number} [options.nearParallel=0.9999] - |dotN| gate
+ * @param {number} [options.distTolerance] - Max |distance| of B's vertices
+ *        from plane(A). Default: 1e-7 x longest edge of A/B.
+ * @param {number} [options.minAreaRatio=1e-6] - Overlap area must exceed
+ *        this fraction of the smaller projected triangle area.
+ * @returns {{ polygon: Array<{x,y,z}>, area: number, areaRatio: number } | null}
+ *          Overlap polygon (3+ vertices, on the shared plane), projected
+ *          2D area, and area / min(areaA, areaB). Null when not coplanar
+ *          or no positive-area overlap.
+ */
+function coplanarOverlap(triA, triB, options) {
+	var opts = options || {};
+	var nearParallel = opts.nearParallel !== undefined ? opts.nearParallel : NEAR_PARALLEL;
+
+	// ── 1. Near-parallel gate ──
+	var nA = triNormal(triA);
+	var nB = triNormal(triB);
+	var dotN = nA.x * nB.x + nA.y * nB.y + nA.z * nB.z;
+	if (Math.abs(dotN) < nearParallel) return null;
+
+	// ── 2. Coplanarity via robust orient3d ──
+	// |2A| of triangle A (cross product magnitude) converts the orient3d
+	// determinant (6x tet volume) into a true point-plane distance.
+	var e1x = triA.v1.x - triA.v0.x, e1y = triA.v1.y - triA.v0.y, e1z = triA.v1.z - triA.v0.z;
+	var e2x = triA.v2.x - triA.v0.x, e2y = triA.v2.y - triA.v0.y, e2z = triA.v2.z - triA.v0.z;
+	var cxA = e1y * e2z - e1z * e2y;
+	var cyA = e1z * e2x - e1x * e2z;
+	var czA = e1x * e2y - e1y * e2x;
+	var lenCrossA = Math.sqrt(cxA * cxA + cyA * cyA + czA * czA);
+	if (lenCrossA < 1e-30) return null; // degenerate A
+
+	var distTol = opts.distTolerance;
+	if (distTol === undefined) {
+		var maxEdge = 0;
+		var pairs = [
+			[triA.v0, triA.v1], [triA.v1, triA.v2], [triA.v2, triA.v0],
+			[triB.v0, triB.v1], [triB.v1, triB.v2], [triB.v2, triB.v0]
+		];
+		for (var pe = 0; pe < pairs.length; pe++) {
+			var dx = pairs[pe][0].x - pairs[pe][1].x;
+			var dy = pairs[pe][0].y - pairs[pe][1].y;
+			var dz = pairs[pe][0].z - pairs[pe][1].z;
+			var el = Math.sqrt(dx * dx + dy * dy + dz * dz);
+			if (el > maxEdge) maxEdge = el;
+		}
+		distTol = maxEdge * 1e-7;
+	}
+
+	var bVerts = [triB.v0, triB.v1, triB.v2];
+	for (var bi = 0; bi < 3; bi++) {
+		var bv = bVerts[bi];
+		var det = orient3d(
+			triA.v0.x, triA.v0.y, triA.v0.z,
+			triA.v1.x, triA.v1.y, triA.v1.z,
+			triA.v2.x, triA.v2.y, triA.v2.z,
+			bv.x, bv.y, bv.z
+		);
+		if (det !== 0) {
+			// Exact sign says off-plane; magnitude / |2A| is the distance.
+			var dist = det / lenCrossA;
+			if (Math.abs(dist) > distTol) return null;
+		}
+	}
+
+	// ── 3. Dominant-axis 2D projection (of A's normal) ──
+	var anx = Math.abs(nA.x), any = Math.abs(nA.y), anz = Math.abs(nA.z);
+	var getU, getV;
+	if (anz >= anx && anz >= any) {
+		getU = function (p) { return p.x; };
+		getV = function (p) { return p.y; };
+	} else if (any >= anx) {
+		getU = function (p) { return p.x; };
+		getV = function (p) { return p.z; };
+	} else {
+		getU = function (p) { return p.y; };
+		getV = function (p) { return p.z; };
+	}
+
+	function proj(p) {
+		return { x: p.x, y: p.y, z: p.z, u: getU(p), v: getV(p) };
+	}
+
+	var clipPoly = [proj(triA.v0), proj(triA.v1), proj(triA.v2)];
+	var subject = [proj(triB.v0), proj(triB.v1), proj(triB.v2)];
+
+	function shoelace(poly) {
+		var s = 0;
+		for (var i = 0; i < poly.length; i++) {
+			var j = (i + 1) % poly.length;
+			s += poly[i].u * poly[j].v - poly[j].u * poly[i].v;
+		}
+		return s * 0.5;
+	}
+
+	var areaA2 = shoelace(clipPoly);
+	var areaB2 = shoelace(subject);
+	if (Math.abs(areaA2) < 1e-30 || Math.abs(areaB2) < 1e-30) return null;
+
+	// Sutherland-Hodgman needs a CCW clip polygon in the projection.
+	if (areaA2 < 0) clipPoly.reverse();
+
+	// ── 4. Sutherland-Hodgman clip: subject (B) against convex clip (A) ──
+	// Inside test uses robust orient2d; intersection points are lerped in
+	// full 3D so they remain on the shared plane.
+	function intersectEdge(p, q, dp, dq) {
+		var t = dp / (dp - dq);
+		return {
+			x: p.x + t * (q.x - p.x),
+			y: p.y + t * (q.y - p.y),
+			z: p.z + t * (q.z - p.z),
+			u: p.u + t * (q.u - p.u),
+			v: p.v + t * (q.v - p.v)
+		};
+	}
+
+	var output = subject;
+	for (var ce = 0; ce < 3 && output.length > 0; ce++) {
+		var c1 = clipPoly[ce];
+		var c2 = clipPoly[(ce + 1) % 3];
+		var input = output;
+		output = [];
+
+		for (var ii = 0; ii < input.length; ii++) {
+			var cur = input[ii];
+			var prev = input[(ii + input.length - 1) % input.length];
+			// robust-predicates orient2d is POSITIVE for CLOCKWISE order, so
+			// negate: d > 0 → left of c1→c2 (inside for a CCW clip polygon).
+			var dCur = -orient2d(c1.u, c1.v, c2.u, c2.v, cur.u, cur.v);
+			var dPrev = -orient2d(c1.u, c1.v, c2.u, c2.v, prev.u, prev.v);
+			var curIn = dCur >= 0;
+			var prevIn = dPrev >= 0;
+
+			if (curIn) {
+				if (!prevIn) output.push(intersectEdge(prev, cur, dPrev, dCur));
+				output.push(cur);
+			} else if (prevIn) {
+				output.push(intersectEdge(prev, cur, dPrev, dCur));
+			}
+		}
+	}
+
+	if (output.length < 3) return null;
+
+	// ── Deduplicate near-coincident consecutive vertices ──
+	var weldTol = opts.weldTolerance !== undefined ? opts.weldTolerance : distTol;
+	var weldTolSq = weldTol * weldTol;
+	var polygon = [];
+	for (var oi = 0; oi < output.length; oi++) {
+		var op = output[oi];
+		var last = polygon.length > 0 ? polygon[polygon.length - 1] : null;
+		if (last) {
+			var ddx = op.x - last.x, ddy = op.y - last.y, ddz = op.z - last.z;
+			if (ddx * ddx + ddy * ddy + ddz * ddz <= weldTolSq) continue;
+		}
+		polygon.push(op);
+	}
+	// Closing duplicate
+	if (polygon.length >= 2) {
+		var first = polygon[0], lastP = polygon[polygon.length - 1];
+		var cdx = first.x - lastP.x, cdy = first.y - lastP.y, cdz = first.z - lastP.z;
+		if (cdx * cdx + cdy * cdy + cdz * cdz <= weldTolSq) polygon.pop();
+	}
+	if (polygon.length < 3) return null;
+
+	// ── 5. Area gate ──
+	var overlapArea = Math.abs(shoelace(polygon));
+	var minParent = Math.min(Math.abs(areaA2), Math.abs(areaB2));
+	var minAreaRatio = opts.minAreaRatio !== undefined ? opts.minAreaRatio : 1e-6;
+	if (overlapArea < minParent * minAreaRatio) return null;
+
+	// Strip the projection scratch fields from the result
+	var out = new Array(polygon.length);
+	for (var ri = 0; ri < polygon.length; ri++) {
+		out[ri] = { x: polygon[ri].x, y: polygon[ri].y, z: polygon[ri].z };
+	}
+
+	return { polygon: out, area: overlapArea, areaRatio: overlapArea / minParent };
+}
+
+/**
+ * Emit the edges of a coplanar overlap polygon as intersection segments
+ * through the shared vertex pool — the exact call pattern of
+ * bmsIntersect: both endpoints are registered for BOTH triangles, so the
+ * two folds share the SAME PoolVertex objects and the split conforms.
+ *
+ * The caller pushes the returned segments into its crossed sets.
+ *
+ * @param {Array<{x,y,z}>} polygon - Overlap polygon from {@link coplanarOverlap}
+ * @param {Object} pool - Shared vertex pool (createVertexPool)
+ * @param {{mesh: string, triIdx: number}} refA - Triangle ref for side A
+ * @param {{mesh: string, triIdx: number}} refB - Triangle ref for side B
+ * @returns {Array<{ p0: Object, p1: Object, idxA: number, idxB: number }>}
+ */
+function emitCoplanarSegments(polygon, pool, refA, refB) {
+	var segs = [];
+	var n = polygon.length;
+	for (var k = 0; k < n; k++) {
+		var a = polygon[k];
+		var b = polygon[(k + 1) % n];
+
+		var pv0 = pool.getOrCreate(a.x, a.y, a.z, refA);
+		pool.getOrCreate(a.x, a.y, a.z, refB);
+
+		var pv1 = pool.getOrCreate(b.x, b.y, b.z, refA);
+		pool.getOrCreate(b.x, b.y, b.z, refB);
+
+		// Pool dedup merged both endpoints — degenerate edge
+		if (pv0 === pv1) continue;
+
+		segs.push({ p0: pv0, p1: pv1, idxA: refA.triIdx, idxB: refB.triIdx });
+	}
+	return segs;
+}
+
+/**
+ * @module bms/bmsVertexPool
+ *
+ * Shared vertex pool with spatial hash deduplication.
+ * Points within tolerance get merged to the same object reference.
+ * Each pool vertex tracks which triangles from which mesh reference it.
+ *
+ * This is the foundation of the BMS pipeline — shared Steiner points
+ * between both meshes are guaranteed by identity (===), not by
+ * toFixed string matching.
+ */
+
+/**
+ * @typedef {Object} PoolVertex
+ * @property {number} x
+ * @property {number} y
+ * @property {number} z
+ * @property {number} id - Unique integer ID for adjacency maps
+ * @property {Array<{mesh: string, triIdx: number}>} triRefs - Which triangles reference this point
+ */
+
+/**
+ * Create a shared vertex pool with spatial hash deduplication.
+ *
+ * @param {number} tolerance - Points within this distance get merged
+ * @returns {{
+ *   getOrCreate: function(number, number, number, {mesh: string, triIdx: number}=): PoolVertex,
+ *   getAll: function(): PoolVertex[],
+ *   size: function(): number
+ * }}
+ */
+function createVertexPool(tolerance) {
+	var cellSize = tolerance * 2;
+	if (cellSize < 1e-12) cellSize = 1e-6;
+
+	/** @type {Object.<string, PoolVertex[]>} */
+	var grid = {};
+	var allVertices = [];
+	var nextId = 0;
+	var tolSq = tolerance * tolerance;
+
+	/**
+	 * Hash a point into a cell key.
+	 * @param {number} x
+	 * @param {number} y
+	 * @param {number} z
+	 * @returns {string}
+	 */
+	function cellKey(x, y, z) {
+		var cx = Math.floor(x / cellSize);
+		var cy = Math.floor(y / cellSize);
+		var cz = Math.floor(z / cellSize);
+		return cx + "," + cy + "," + cz;
+	}
+
+	/**
+	 * Search the 27 neighboring cells for the nearest existing vertex
+	 * within tolerance.
+	 * @param {number} x
+	 * @param {number} y
+	 * @param {number} z
+	 * @returns {PoolVertex|null}
+	 */
+	function findNearest(x, y, z) {
+		var cx = Math.floor(x / cellSize);
+		var cy = Math.floor(y / cellSize);
+		var cz = Math.floor(z / cellSize);
+
+		var bestDist = tolSq;
+		var bestVert = null;
+
+		for (var dx = -1; dx <= 1; dx++) {
+			for (var dy = -1; dy <= 1; dy++) {
+				for (var dz = -1; dz <= 1; dz++) {
+					var key = (cx + dx) + "," + (cy + dy) + "," + (cz + dz);
+					var bucket = grid[key];
+					if (!bucket) continue;
+					for (var i = 0; i < bucket.length; i++) {
+						var v = bucket[i];
+						var ex = v.x - x, ey = v.y - y, ez = v.z - z;
+						var d2 = ex * ex + ey * ey + ez * ez;
+						if (d2 < bestDist) {
+							bestDist = d2;
+							bestVert = v;
+						}
+					}
+				}
+			}
+		}
+
+		return bestVert;
+	}
+
+	/**
+	 * Look up or insert a point. If a point within tolerance exists,
+	 * return it (and optionally append the triRef). Otherwise create
+	 * a new pool vertex.
+	 *
+	 * @param {number} x
+	 * @param {number} y
+	 * @param {number} z
+	 * @param {{mesh: string, triIdx: number}} [triRef] - Optional triangle reference
+	 * @returns {PoolVertex}
+	 */
+	function getOrCreate(x, y, z, triRef) {
+		var existing = findNearest(x, y, z);
+		if (existing) {
+			if (triRef) {
+				// Don't add duplicate triRefs
+				var dominated = false;
+				for (var i = 0; i < existing.triRefs.length; i++) {
+					var r = existing.triRefs[i];
+					if (r.mesh === triRef.mesh && r.triIdx === triRef.triIdx) {
+						dominated = true;
+						break;
+					}
+				}
+				if (!dominated) {
+					existing.triRefs.push(triRef);
+				}
+			}
+			return existing;
+		}
+
+		// Create new pool vertex
+		var vertex = {
+			x: x,
+			y: y,
+			z: z,
+			id: nextId++,
+			triRefs: triRef ? [triRef] : []
+		};
+
+		// Insert into spatial hash
+		var key = cellKey(x, y, z);
+		if (!grid[key]) grid[key] = [];
+		grid[key].push(vertex);
+
+		allVertices.push(vertex);
+		return vertex;
+	}
+
+	/**
+	 * Return all pool vertices.
+	 * @returns {PoolVertex[]}
+	 */
+	function getAll() {
+		return allVertices;
+	}
+
+	/**
+	 * Return the number of unique vertices in the pool.
+	 * @returns {number}
+	 */
+	function size() {
+		return allVertices.length;
+	}
+
+	return {
+		getOrCreate: getOrCreate,
+		getAll: getAll,
+		size: size
+	};
+}
+
+/**
+ * @module bms/bmsIntersect
+ *
+ * Compute triangle-triangle intersections between two meshes with a
+ * shared vertex pool. Every intersection segment endpoint goes through
+ * the pool, so both meshes get the exact same PoolVertex object at
+ * each intersection location.
+ */
+
+
+/**
+ * Compute all intersection segments between two triangle meshes,
+ * registering every endpoint in a shared vertex pool.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisA
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB
+ * @param {Object} [options]
+ * @param {number} [options.tolerance] - Pool vertex merge tolerance
+ * @param {boolean} [options.coplanar=true] - Emit overlap-polygon segments for
+ *        exactly-coplanar A-vs-B pairs, which the Moller path cannot express
+ *        as a segment. Set false for the pre-0.6.6 behaviour.
+ * @param {number} [options.minAreaRatio] - Coplanar overlap area gate
+ * @returns {{
+ *   segments: Array<{ p0: PoolVertex, p1: PoolVertex, idxA: number, idxB: number }>,
+ *   crossedSetA: Object.<number, Array>,
+ *   crossedSetB: Object.<number, Array>,
+ *   pool: Object
+ * }}
+ */
+function bmsIntersect(trisA, trisB, options) {
+	var opts = options || {};
+
+	// Compute tolerance from average edge length if not provided
+	var avgEdgeA = estimateAvgEdge(trisA);
+	var avgEdgeB = estimateAvgEdge(trisB);
+	var avgEdge = (avgEdgeA + avgEdgeB) / 2;
+	var tolerance = opts.tolerance !== undefined ? opts.tolerance : avgEdge * 0.001;
+
+	// Create shared vertex pool
+	var pool = createVertexPool(tolerance);
+
+	// Build spatial grid on mesh B for acceleration
+	var cellSize = Math.max(avgEdgeB * 2, 0.1);
+	var gridB = buildSpatialGrid(trisB, cellSize);
+
+	var segments = [];
+	var crossedSetA = {};
+	var crossedSetB = {};
+
+	var doCoplanar = opts.coplanar !== false;
+	var copOpts = opts.minAreaRatio !== undefined ? { minAreaRatio: opts.minAreaRatio } : undefined;
+	var coplanarPairs = 0;
+
+	for (var i = 0; i < trisA.length; i++) {
+		var triA = trisA[i];
+		var bbA = triBBox(triA);
+		var candidates = queryGrid(gridB, bbA, cellSize);
+
+		for (var c = 0; c < candidates.length; c++) {
+			var j = candidates[c];
+			var triB = trisB[j];
+
+			var seg = triTriIntersection(triA, triB);
+
+			// ── Coplanar A-vs-B fallback ──
+			// Moller cannot return a segment for coplanar pairs (the
+			// intersection is a polygon, not a line), so it returns null.
+			// Before 0.6.6 that null was the end of it and two overlapping
+			// coplanar sheets produced NO barrier at all — bmsClassify then
+			// had nothing to partition against. Emit the overlap polygon's
+			// edges into the same pool instead, exactly as bmsSelfArrange
+			// already does for self-folds.
+			if (!seg && doCoplanar) {
+				var cop = coplanarOverlap(triA, triB, copOpts);
+				if (cop) {
+					var copSegs = emitCoplanarSegments(cop.polygon, pool,
+						{ mesh: "A", triIdx: i }, { mesh: "B", triIdx: j });
+					for (var cs = 0; cs < copSegs.length; cs++) {
+						var cseg = copSegs[cs];
+						segments.push(cseg);
+						if (!crossedSetA[i]) crossedSetA[i] = [];
+						crossedSetA[i].push(cseg);
+						if (!crossedSetB[j]) crossedSetB[j] = [];
+						crossedSetB[j].push(cseg);
+						coplanarPairs++;
+					}
+				}
+			}
+
+			if (!seg) continue;
+
+			// Register both endpoints in the shared pool.
+			// Each endpoint gets triRefs for BOTH the A triangle and B triangle
+			// that produced it.
+			var pv0 = pool.getOrCreate(seg.p0.x, seg.p0.y, seg.p0.z, { mesh: "A", triIdx: i });
+			pool.getOrCreate(seg.p0.x, seg.p0.y, seg.p0.z, { mesh: "B", triIdx: j });
+
+			var pv1 = pool.getOrCreate(seg.p1.x, seg.p1.y, seg.p1.z, { mesh: "A", triIdx: i });
+			pool.getOrCreate(seg.p1.x, seg.p1.y, seg.p1.z, { mesh: "B", triIdx: j });
+
+			// Skip zero-length segments (pool dedup merged both endpoints)
+			if (pv0 === pv1) continue;
+
+			var taggedSeg = { p0: pv0, p1: pv1, idxA: i, idxB: j };
+			segments.push(taggedSeg);
+
+			// Build crossed sets
+			if (!crossedSetA[i]) crossedSetA[i] = [];
+			crossedSetA[i].push(taggedSeg);
+
+			if (!crossedSetB[j]) crossedSetB[j] = [];
+			crossedSetB[j].push(taggedSeg);
+		}
+	}
+
+	return {
+		segments: segments,
+		crossedSetA: crossedSetA,
+		crossedSetB: crossedSetB,
+		pool: pool,
+		coplanarPairs: coplanarPairs
+	};
+}
+
+/**
+ * @module bms/bmsChain
+ *
+ * Chain intersection segments into ordered polylines using pool vertex
+ * identity (integer ID lookup). No distance threshold — two segments
+ * that share a pool vertex are connected by definition.
+ *
+ * At junction vertices (degree 3+), picks the smoothest continuation
+ * by comparing outgoing directions against the incoming direction.
+ */
+
+/**
+ * Chain intersection segments into ordered polylines.
+ *
+ * Uses pool vertex IDs for O(1) adjacency lookup. Two segments sharing
+ * the same PoolVertex are guaranteed to connect (same object reference).
+ *
+ * At junction vertices where multiple unused segments meet, the algorithm
+ * picks the segment whose direction is most aligned with the incoming
+ * direction (largest dot product), preventing U-turns and backtracks.
+ *
+ * @param {Array<{ p0: PoolVertex, p1: PoolVertex, idxA: number, idxB: number }>} segments
+ * @returns {Array<Array<PoolVertex>>} Array of polylines (each an array of pool vertices)
+ */
+function bmsChain(segments) {
+	if (segments.length === 0) return [];
+
+	// Build adjacency: poolVertex.id -> [{segIdx, otherEnd: PoolVertex}]
+	var adj = {};
+
+	for (var i = 0; i < segments.length; i++) {
+		var seg = segments[i];
+		var id0 = seg.p0.id;
+		var id1 = seg.p1.id;
+
+		if (!adj[id0]) adj[id0] = [];
+		adj[id0].push({ segIdx: i, otherEnd: seg.p1 });
+
+		if (!adj[id1]) adj[id1] = [];
+		adj[id1].push({ segIdx: i, otherEnd: seg.p0 });
+	}
+
+	var used = new Uint8Array(segments.length);
+
+	/**
+	 * Compute unit direction from prev to curr.
+	 * Returns null if the points are coincident.
+	 */
+	function direction(prev, curr) {
+		var dx = curr.x - prev.x;
+		var dy = curr.y - prev.y;
+		var dz = curr.z - prev.z;
+		var len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+		if (len < 1e-15) return null;
+		return { x: dx / len, y: dy / len, z: dz / len };
+	}
+
+	/**
+	 * Pick the best unused neighbor at `vert`. When `inDir` is provided
+	 * (junction resolution), pick the neighbor whose outgoing direction
+	 * has the largest dot product with inDir (smoothest continuation).
+	 * When inDir is null (first step), pick any unused neighbor.
+	 */
+	function pickBest(vert, inDir) {
+		var neighbors = adj[vert.id];
+		if (!neighbors) return null;
+
+		var best = null;
+		var bestDot = -Infinity;
+
+		for (var ni = 0; ni < neighbors.length; ni++) {
+			var nb = neighbors[ni];
+			if (used[nb.segIdx]) continue;
+
+			if (!inDir) {
+				// No incoming direction — return first available
+				return nb;
+			}
+
+			// Compute outgoing direction and score by alignment
+			var dx = nb.otherEnd.x - vert.x;
+			var dy = nb.otherEnd.y - vert.y;
+			var dz = nb.otherEnd.z - vert.z;
+			var len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+			if (len < 1e-15) {
+				// Degenerate segment — lowest priority
+				if (!best) { best = nb; bestDot = -Infinity; }
+				continue;
+			}
+
+			var dot = (dx * inDir.x + dy * inDir.y + dz * inDir.z) / len;
+			if (dot > bestDot) {
+				bestDot = dot;
+				best = nb;
+			}
+		}
+
+		return best;
+	}
+
+	var polylines = [];
+
+	for (var s = 0; s < segments.length; s++) {
+		if (used[s]) continue;
+		used[s] = 1;
+
+		// Seed: start with this segment
+		var tailChain = [segments[s].p0, segments[s].p1];
+		var headChain = [];
+
+		// Extend tail with angle-based junction resolution
+		while (true) {
+			var tailVert = tailChain[tailChain.length - 1];
+			var tailPrev = tailChain[tailChain.length - 2];
+			var inDir = direction(tailPrev, tailVert);
+			var nb = pickBest(tailVert, inDir);
+			if (!nb) break;
+
+			// Check if this would close the loop
+			var chainStart = headChain.length > 0 ? headChain[headChain.length - 1] : tailChain[0];
+			if (nb.otherEnd === chainStart) {
+				used[nb.segIdx] = 1;
+				tailChain.push(nb.otherEnd);
+				break; // Loop closed
+			}
+
+			used[nb.segIdx] = 1;
+			tailChain.push(nb.otherEnd);
+		}
+
+		// Extend head with angle-based junction resolution
+		while (true) {
+			var headVert, headPrev;
+			if (headChain.length >= 2) {
+				headVert = headChain[headChain.length - 1];
+				headPrev = headChain[headChain.length - 2];
+			} else if (headChain.length === 1) {
+				headVert = headChain[0];
+				headPrev = tailChain[0];
+			} else {
+				headVert = tailChain[0];
+				headPrev = tailChain[1];
+			}
+			var hDir = direction(headPrev, headVert);
+			var hNb = pickBest(headVert, hDir);
+			if (!hNb) break;
+
+			used[hNb.segIdx] = 1;
+			headChain.push(hNb.otherEnd);
+		}
+
+		// Combine: reverse headChain + tailChain
+		var chain;
+		if (headChain.length > 0) {
+			headChain.reverse();
+			chain = headChain.concat(tailChain);
+		} else {
+			chain = tailChain;
+		}
+
+		polylines.push(chain);
+	}
+
+	return polylines;
+}
+
+/**
+ * tiny-exact-math
+ * Minimal rational arithmetic library for exact geometric predicates.
+ */
+
+/**
+ * Compute the greatest common divisor of two BigInts using the Euclidean
+ * algorithm. The result is always non-negative.
+ *
+ * @param {bigint} a
+ * @param {bigint} b
+ * @returns {bigint}
+ */
+function gcd(a, b) {
+  a = a < 0n ? -a : a;
+  b = b < 0n ? -b : b;
+  while (b !== 0n) {
+    const t = b;
+    b = a % b;
+    a = t;
+  }
+  return a;
+}
+
+/**
+ * Convert a JavaScript number (integer or floating-point) to a Rational.
+ *
+ * Strategy: use `String(n)`, which produces the *shortest* decimal
+ * representation that round-trips back to the same IEEE 754 double (Grisu /
+ * Ryu algorithm in V8).  Parse the resulting decimal string into a
+ * numerator/denominator pair, handling the sign, fractional part, and
+ * optional scientific-notation exponent separately to avoid BigInt parsing
+ * errors (e.g. BigInt("-05") would throw).
+ *
+ * @param {number} n
+ * @returns {Rational}
+ */
+function fromNumber(n) {
+  if (!isFinite(n)) {
+    throw new RangeError("Cannot convert non-finite number to Rational");
+  }
+  if (n === 0) return new Rational(0n, 1n);
+
+  const str = String(n);
+  const negative = str.charCodeAt(0) === 45; // '-'
+  const abs = negative ? str.slice(1) : str;
+
+  // Handle scientific notation produced for very large / very small values
+  // e.g. "1.5e-7" or "1e+21"
+  const eIdx = abs.indexOf("e");
+  if (eIdx !== -1) {
+    const base = abs.slice(0, eIdx);
+    const exp = parseInt(abs.slice(eIdx + 1), 10);
+    const r = _parseDecimalString(base, negative);
+    const pow = 10n ** BigInt(Math.abs(exp));
+    return exp >= 0
+      ? new Rational(r.numerator * pow, r.denominator)
+      : new Rational(r.numerator, r.denominator * pow);
+  }
+
+  return _parseDecimalString(abs, negative);
+}
+
+/**
+ * Parse a plain decimal string (no sign, no exponent) into a Rational.
+ * @param {string} abs  – digits with optional "."
+ * @param {boolean} negative
+ * @returns {Rational}
+ */
+function _parseDecimalString(abs, negative) {
+  const dotIndex = abs.indexOf(".");
+  if (dotIndex === -1) {
+    const num = negative ? -BigInt(abs) : BigInt(abs);
+    return new Rational(num, 1n);
+  }
+
+  const intDigits = abs.slice(0, dotIndex) || "0";
+  const fracDigits = abs.slice(dotIndex + 1);
+  const combined = intDigits + fracDigits; // sign removed, safe for BigInt
+  const num = negative ? -BigInt(combined) : BigInt(combined);
+  const den = 10n ** BigInt(fracDigits.length);
+  return new Rational(num, den);
+}
+
+/**
+ * A rational number stored as two BigInts (numerator and denominator).
+ * The value is always kept in lowest terms with a non-negative denominator.
+ */
+class Rational {
+  /**
+   * @param {bigint|number} numerator
+   * @param {bigint|number} denominator
+   */
+  constructor(numerator, denominator = 1n) {
+    let num = BigInt(numerator);
+    let den = BigInt(denominator);
+
+    if (den === 0n) {
+      throw new RangeError("Denominator must not be zero");
+    }
+
+    // Normalise: keep denominator positive
+    if (den < 0n) {
+      num = -num;
+      den = -den;
+    }
+
+    const g = gcd(num < 0n ? -num : num, den);
+    this.numerator = num / g;
+    this.denominator = den / g;
+  }
+
+  // ── Arithmetic ────────────────────────────────────────────────────────────
+
+  /**
+   * Return a new Rational equal to this + other.
+   * @param {Rational} other
+   * @returns {Rational}
+   */
+  add(other) {
+    return new Rational(
+      this.numerator * other.denominator + other.numerator * this.denominator,
+      this.denominator * other.denominator
+    );
+  }
+
+  /**
+   * Return a new Rational equal to this - other.
+   * @param {Rational} other
+   * @returns {Rational}
+   */
+  subtract(other) {
+    return new Rational(
+      this.numerator * other.denominator - other.numerator * this.denominator,
+      this.denominator * other.denominator
+    );
+  }
+
+  /**
+   * Return a new Rational equal to this * other.
+   * @param {Rational} other
+   * @returns {Rational}
+   */
+  multiply(other) {
+    return new Rational(
+      this.numerator * other.numerator,
+      this.denominator * other.denominator
+    );
+  }
+
+  /**
+   * Return a new Rational equal to this / other.
+   * @param {Rational} other
+   * @returns {Rational}
+   */
+  divide(other) {
+    if (other.numerator === 0n) {
+      throw new RangeError("Division by zero");
+    }
+    return new Rational(
+      this.numerator * other.denominator,
+      this.denominator * other.numerator
+    );
+  }
+
+  // ── Comparison ────────────────────────────────────────────────────────────
+
+  /**
+   * Return the sign of this rational: -1, 0, or 1.
+   * @returns {number}
+   */
+  sign() {
+    if (this.numerator === 0n) return 0;
+    return this.numerator > 0n ? 1 : -1;
+  }
+
+  /**
+   * Return true if this rational equals zero.
+   * @returns {boolean}
+   */
+  isZero() {
+    return this.numerator === 0n;
+  }
+
+  /**
+   * Convert to a JavaScript number (may lose precision).
+   * @returns {number}
+   */
+  toNumber() {
+    return Number(this.numerator) / Number(this.denominator);
+  }
+
+  /**
+   * Human-readable string representation.
+   * @returns {string}
+   */
+  toString() {
+    if (this.denominator === 1n) return String(this.numerator);
+    return `${this.numerator}/${this.denominator}`;
+  }
+}
+
+// ── Geometric predicate ──────────────────────────────────────────────────────
+
+/**
+ * Compute the orientation (sign of the 2×2 determinant) of three 2-D points.
+ *
+ * Given points p1, p2, p3 each with numeric `x` and `y` properties, the
+ * determinant is:
+ *
+ *   | p2.x - p1.x   p3.x - p1.x |
+ *   | p2.y - p1.y   p3.y - p1.y |
+ *
+ * = (p2.x - p1.x)(p3.y - p1.y) - (p3.x - p1.x)(p2.y - p1.y)
+ *
+ * All coordinates are converted to exact Rationals before the computation so
+ * the result is free of floating-point rounding error.
+ *
+ * @param {{ x: number, y: number }} p1
+ * @param {{ x: number, y: number }} p2
+ * @param {{ x: number, y: number }} p3
+ * @returns {-1 | 0 | 1}  sign of the determinant
+ */
+function determinant(p1, p2, p3) {
+  const x1 = fromNumber(p1.x);
+  const y1 = fromNumber(p1.y);
+  const x2 = fromNumber(p2.x);
+  const y2 = fromNumber(p2.y);
+  const x3 = fromNumber(p3.x);
+  const y3 = fromNumber(p3.y);
+
+  const dx2 = x2.subtract(x1);
+  const dy2 = y2.subtract(y1);
+  const dx3 = x3.subtract(x1);
+  const dy3 = y3.subtract(y1);
+
+  // det = dx2*dy3 - dx3*dy2
+  const det = dx2.multiply(dy3).subtract(dx3.multiply(dy2));
+
+  return det.sign();
+}
+
+/**
+ * @module bms/bmsSplit
+ *
+ * Re-triangulate crossed triangles using shared pool vertices and produce
+ * a unified mega soup. Sub-triangle vertices that are Steiner points ARE
+ * the pool vertex objects (same reference), not copies.
+ */
+
+
+/**
+ * Re-triangulate a crossed triangle using pool vertices as Steiner points.
+ * The output sub-triangles reference pool vertex objects directly.
+ *
+ * @param {{ v0: Object, v1: Object, v2: Object }} tri - Parent triangle
+ * @param {Array<{ p0: PoolVertex, p1: PoolVertex }>} segments - Intersection segments with pool vertices
+ * @param {Array<{x,y,z}>} [extraPoints] - Additional interior Steiner points
+ *        (sliver guard lattice) — plain vertices, not pool vertices
+ * @param {Array<PoolVertex>} [edgePoolPoints] - Pool vertices that lie on THIS
+ *        triangle's EDGES, contributed by a NEIGHBOURING triangle's intersection
+ *        segments (conforming edge splits). Inserted as vertices with shared pool
+ *        identity, NOT as constraints — being present on the shared edge is enough
+ *        for the triangulation to split that edge at the SAME point on both sides,
+ *        eliminating the T-junction. (Self-intersection segments routinely END on
+ *        the mesh's own manifold edges; A-vs-B booleans never hit this.)
+ * @returns {Array<{ v0: Object, v1: Object, v2: Object }>} Sub-triangles
+ */
+function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
+	var hasEdgePts = edgePoolPoints && edgePoolPoints.length > 0;
+	if ((!segments || segments.length === 0) && !hasEdgePts) return [tri];
+	segments = segments || [];
+
+	// -- Step 1: Build local 2D coordinate frame on triangle plane --
+	var e1x = tri.v1.x - tri.v0.x;
+	var e1y = tri.v1.y - tri.v0.y;
+	var e1z = tri.v1.z - tri.v0.z;
+	var e2x = tri.v2.x - tri.v0.x;
+	var e2y = tri.v2.y - tri.v0.y;
+	var e2z = tri.v2.z - tri.v0.z;
+
+	var e1Len = Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+	if (e1Len < 1e-12) return [tri];
+	var lux = e1x / e1Len, luy = e1y / e1Len, luz = e1z / e1Len;
+
+	var lnx = e1y * e2z - e1z * e2y;
+	var lny = e1z * e2x - e1x * e2z;
+	var lnz = e1x * e2y - e1y * e2x;
+	var lnLen = Math.sqrt(lnx * lnx + lny * lny + lnz * lnz);
+	if (lnLen < 1e-12) return [tri];
+
+	var lvx = lny * luz - lnz * luy;
+	var lvy = lnz * lux - lnx * luz;
+	var lvz = lnx * luy - lny * lux;
+	var lvLen = Math.sqrt(lvx * lvx + lvy * lvy + lvz * lvz);
+	if (lvLen < 1e-12) return [tri];
+	lvx /= lvLen; lvy /= lvLen; lvz /= lvLen;
+
+	var lox = tri.v0.x, loy = tri.v0.y, loz = tri.v0.z;
+
+	function toLocal(p) {
+		var dx = p.x - lox, dy = p.y - loy, dz = p.z - loz;
+		return [dx * lux + dy * luy + dz * luz, dx * lvx + dy * lvy + dz * lvz];
+	}
+
+	var l0 = toLocal(tri.v0);
+	var l1 = toLocal(tri.v1);
+	var l2 = toLocal(tri.v2);
+
+	var baryD = (l1[1] - l2[1]) * (l0[0] - l2[0]) + (l2[0] - l1[0]) * (l0[1] - l2[1]);
+	if (Math.abs(baryD) < 1e-12) return [tri];
+
+	function baryCoords(pu, pv) {
+		var u = ((l1[1] - l2[1]) * (pu - l2[0]) + (l2[0] - l1[0]) * (pv - l2[1])) / baryD;
+		var v = ((l2[1] - l0[1]) * (pu - l2[0]) + (l0[0] - l2[0]) * (pv - l2[1])) / baryD;
+		return [u, v, 1 - u - v];
+	}
+
+	var triArea2D = Math.abs(baryD) * 0.5;
+	var MIN_AREA_RATIO = 1e-8;
+
+	// -- Step 2: Collect unique Steiner points from pool vertices --
+	// Use pool vertex id for deduplication (exact, no toFixed)
+	var seenIds = {};
+	var v0Key = vKey(tri.v0), v1Key = vKey(tri.v1), v2Key = vKey(tri.v2);
+
+	var validSteiner = []; // pool vertex objects
+
+	// pts array: indices 0,1,2 = original vertices, 3+ = pool vertices
+	var pts = [tri.v0, tri.v1, tri.v2];
+
+	// Map pool vertex id -> index in pts array (for constraint edges)
+	var idToIndex = {};
+
+	// Also map vertex keys for original verts
+	var keyToIndex = {};
+	keyToIndex[v0Key] = 0;
+	keyToIndex[v1Key] = 1;
+	keyToIndex[v2Key] = 2;
+
+	// Exact point-in-triangle test using rational arithmetic.
+	// Projects ORIGINAL 3D coordinates to the best-fit 2D plane (XY, XZ, or YZ)
+	// to avoid float errors from the toLocal projection.
+	var anx = Math.abs(lnx), any = Math.abs(lny), anz = Math.abs(lnz);
+	var projA, projB; // which axes to use for 2D projection
+	if (anx >= any && anx >= anz) {
+		// Normal dominated by X → project to YZ plane
+		projA = function(v) { return v.y; };
+		projB = function(v) { return v.z; };
+	} else if (any >= anz) {
+		// Normal dominated by Y → project to XZ plane
+		projA = function(v) { return v.x; };
+		projB = function(v) { return v.z; };
+	} else {
+		// Normal dominated by Z → project to XY plane
+		projA = function(v) { return v.x; };
+		projB = function(v) { return v.y; };
+	}
+	var tv0 = { x: projA(tri.v0), y: projB(tri.v0) };
+	var tv1 = { x: projA(tri.v1), y: projB(tri.v1) };
+	var tv2 = { x: projA(tri.v2), y: projB(tri.v2) };
+
+	function exactPointInTri3D(p) {
+		var pp = { x: projA(p), y: projB(p) };
+		var d0 = determinant(tv0, tv1, pp);
+		var d1 = determinant(tv1, tv2, pp);
+		var d2 = determinant(tv2, tv0, pp);
+		var hasNeg = (d0 < 0) || (d1 < 0) || (d2 < 0);
+		var hasPos = (d0 > 0) || (d1 > 0) || (d2 > 0);
+		return !(hasNeg && hasPos);
+	}
+	var BARY_TOL = -1e-4; // float fallback tolerance
+
+	for (var s = 0; s < segments.length; s++) {
+		var seg = segments[s];
+		var endpts = [seg.p0, seg.p1];
+		for (var e = 0; e < 2; e++) {
+			var p = endpts[e];
+
+			// Check if this pool vertex is an original vertex (by vKey match)
+			var pk = vKey(p);
+			if (pk === v0Key || pk === v1Key || pk === v2Key) {
+				// Map the pool vertex id to the original vertex index
+				if (p.id !== undefined) idToIndex[p.id] = keyToIndex[pk];
+				continue;
+			}
+
+			// Skip if already added (by pool id)
+			if (p.id !== undefined && seenIds[p.id]) continue;
+			if (p.id !== undefined) seenIds[p.id] = true;
+
+			// Validate: must be inside the triangle.
+			// Primary: exact rational test on original 3D coords (projected to best plane)
+			// Fallback: float barycentric with tolerance (handles near-edge Steiner points
+			// whose computed position drifted slightly outside due to float intersection math)
+			if (!exactPointInTri3D(p)) {
+				var lp = toLocal(p);
+				var bc = baryCoords(lp[0], lp[1]);
+				if (bc[0] < BARY_TOL || bc[1] < BARY_TOL || bc[2] < BARY_TOL) {
+					// Last chance: accept if the point is very close to an edge
+					// (within 1% of triangle size) — intersection drift
+					var minBC = Math.min(bc[0], bc[1], bc[2]);
+					if (minBC < -0.01) {
+						continue;
+					}
+				}
+			}
+
+			// Add pool vertex object directly (same reference!)
+			var idx = pts.length;
+			pts.push(p);
+			if (p.id !== undefined) idToIndex[p.id] = idx;
+			keyToIndex[pk] = idx;
+			validSteiner.push(p);
+		}
+	}
+
+	// -- Step 2b: Edge Steiner points from neighbouring triangles --
+	// Same identity handling as the segment Steiner points, but these come from
+	// a neighbour's segment endpoint that lands on one of THIS triangle's edges.
+	// Inserted as vertices only (no constraint) — the shared PoolVertex makes the
+	// edge split match the neighbour's exactly → conforming, no T-junction.
+	if (hasEdgePts) {
+		for (var ei = 0; ei < edgePoolPoints.length; ei++) {
+			var ep = edgePoolPoints[ei];
+			var epk = vKey(ep);
+			if (epk === v0Key || epk === v1Key || epk === v2Key) {
+				if (ep.id !== undefined) idToIndex[ep.id] = keyToIndex[epk];
+				continue;
+			}
+			if (ep.id !== undefined && seenIds[ep.id]) continue;
+			if (ep.id !== undefined) seenIds[ep.id] = true;
+
+			// Accept on-edge / inside points (on-edge passes exactPointInTri3D since
+			// one determinant is exactly 0 → not both-signs). Reject far-outside drift.
+			if (!exactPointInTri3D(ep)) {
+				var elp = toLocal(ep);
+				var ebc = baryCoords(elp[0], elp[1]);
+				if (Math.min(ebc[0], ebc[1], ebc[2]) < -0.01) continue;
+			}
+
+			var eidx = pts.length;
+			pts.push(ep);
+			if (ep.id !== undefined) idToIndex[ep.id] = eidx;
+			keyToIndex[epk] = eidx;
+			validSteiner.push(ep);
+		}
+	}
+
+	if (validSteiner.length === 0 && (!extraPoints || extraPoints.length === 0)) return [tri];
+
+	// Sliver guard lattice points: strictly interior, no pool identity needed
+	if (extraPoints) {
+		for (var xp = 0; xp < extraPoints.length; xp++) {
+			pts.push(extraPoints[xp]);
+		}
+	}
+
+	// -- Step 3: Project all to local 2D, run Delaunator --
+	var n = pts.length;
+	var coords = new Float64Array(n * 2);
+	for (var j = 0; j < n; j++) {
+		var lj = toLocal(pts[j]);
+		coords[j * 2] = lj[0];
+		coords[j * 2 + 1] = lj[1];
+	}
+
+	var del;
+	try {
+		del = new Delaunator(coords);
+	} catch (de) {
+		return [tri];
+	}
+
+	// Constrain segment edges
+	try {
+		var con = new Constrainautor(del);
+		for (var cs = 0; cs < segments.length; cs++) {
+			var cSeg = segments[cs];
+			var idx0, idx1;
+
+			// Look up by pool id first, then by vKey
+			if (cSeg.p0.id !== undefined && idToIndex[cSeg.p0.id] !== undefined) {
+				idx0 = idToIndex[cSeg.p0.id];
+			} else {
+				idx0 = keyToIndex[vKey(cSeg.p0)];
+			}
+
+			if (cSeg.p1.id !== undefined && idToIndex[cSeg.p1.id] !== undefined) {
+				idx1 = idToIndex[cSeg.p1.id];
+			} else {
+				idx1 = keyToIndex[vKey(cSeg.p1)];
+			}
+
+			if (idx0 !== undefined && idx1 !== undefined && idx0 !== idx1) {
+				try { con.constrainOne(idx0, idx1); } catch (ce2) { /* skip */ }
+			}
+		}
+	} catch (ce) {
+		// Constrainautor init failed -- unconstrained Delaunator still usable
+	}
+
+	// -- Step 4: Filter sub-triangles by barycentric centroid + area check --
+	// Output uses pts[] references directly — pool vertices stay as pool vertices
+	var origNx = lnx, origNy = lny, origNz = lnz;
+
+	var result = [];
+	var delTris = del.triangles;
+	for (var k = 0; k < delTris.length; k += 3) {
+		var a = delTris[k], b = delTris[k + 1], c = delTris[k + 2];
+
+		// Centroid in local 2D
+		var cx = (coords[a * 2] + coords[b * 2] + coords[c * 2]) / 3;
+		var cy = (coords[a * 2 + 1] + coords[b * 2 + 1] + coords[c * 2 + 1]) / 3;
+
+		var cBary = baryCoords(cx, cy);
+		if (cBary[0] < -1e-6 || cBary[1] < -1e-6 || cBary[2] < -1e-6) continue;
+
+		// Area check
+		var au = coords[a * 2], av = coords[a * 2 + 1];
+		var bu = coords[b * 2], bv = coords[b * 2 + 1];
+		var cu2 = coords[c * 2], cv = coords[c * 2 + 1];
+		var subArea = Math.abs((bu - au) * (cv - av) - (cu2 - au) * (bv - av)) * 0.5;
+		if (subArea < triArea2D * MIN_AREA_RATIO) continue;
+
+		// Check winding consistency with original triangle
+		var pa = pts[a], pb = pts[b], pc = pts[c];
+		var se1x = pb.x - pa.x, se1y = pb.y - pa.y, se1z = pb.z - pa.z;
+		var se2x = pc.x - pa.x, se2y = pc.y - pa.y, se2z = pc.z - pa.z;
+		var snx = se1y * se2z - se1z * se2y;
+		var sny = se1z * se2x - se1x * se2z;
+		var snz = se1x * se2y - se1y * se2x;
+		var dot = snx * origNx + sny * origNy + snz * origNz;
+
+		if (dot < 0) {
+			result.push({ v0: pa, v1: pc, v2: pb });
+		} else {
+			result.push({ v0: pa, v1: pb, v2: pc });
+		}
+	}
+
+	if (result.length === 0) return [tri];
+	return result;
+}
+
+/**
+ * Fan-based re-triangulation using pool vertices.
+ * Chains segments using bmsChain (identity-based), then fans from original
+ * vertices to consecutive chain points. GUARANTEES intersection segments
+ * appear as edges in the output — no CDT constraint needed.
+ *
+ * Falls back to bmsRetriangulate for multi-chain, same-edge entry/exit,
+ * or vertex-hit cases.
+ *
+ * @param {Array<PoolVertex>} [edgePoolPoints] - Edge Steiner points (see
+ *        bmsRetriangulate). When present, fan cannot place arbitrary edge points,
+ *        so re-triangulation goes straight to CDT (bmsRetriangulate).
+ */
+function bmsFanTriangulate(tri, segments, edgePoolPoints) {
+	// Fan can't honour arbitrary edge points — CDT them in with the segments.
+	if (edgePoolPoints && edgePoolPoints.length > 0) {
+		return bmsRetriangulate(tri, segments, undefined, edgePoolPoints);
+	}
+	if (!segments || segments.length === 0) return [tri];
+
+	// Step 1: Chain segments using identity-based chaining
+	var chains = bmsChain(segments);
+
+	if (chains.length !== 1 || chains[0].length < 2) {
+		return bmsRetriangulate(tri, segments);
+	}
+	var chain = chains[0];
+
+	// Sliver guard (KNOWN_ISSUES #21): a giant triangle against a dense chain
+	// would fan into needle slivers from the far corners to every chain point.
+	// Re-triangulate with chain-constrained CDT + interior Steiner lattice
+	// instead — bounded aspect ratio, no T-junctions (lattice is interior-only).
+	if (needsSliverGuard(tri, chain)) {
+		var lattice = interiorLatticePoints(tri, chain);
+		if (lattice.length > 0) {
+			return bmsRetriangulate(tri, segments, lattice);
+		}
+	}
+
+	// Step 2: Build local 2D frame for barycentric classification
+	var verts = [tri.v0, tri.v1, tri.v2];
+	var e1x = tri.v1.x - tri.v0.x, e1y = tri.v1.y - tri.v0.y, e1z = tri.v1.z - tri.v0.z;
+	var e2x = tri.v2.x - tri.v0.x, e2y = tri.v2.y - tri.v0.y, e2z = tri.v2.z - tri.v0.z;
+	var e1Len = Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+	if (e1Len < 1e-12) return bmsRetriangulate(tri, segments);
+	var lux = e1x / e1Len, luy = e1y / e1Len, luz = e1z / e1Len;
+	var lnx = e1y * e2z - e1z * e2y, lny = e1z * e2x - e1x * e2z, lnz = e1x * e2y - e1y * e2x;
+	var lnLen = Math.sqrt(lnx * lnx + lny * lny + lnz * lnz);
+	if (lnLen < 1e-12) return bmsRetriangulate(tri, segments);
+	var lvx = lny * luz - lnz * luy, lvy = lnz * lux - lnx * luz, lvz = lnx * luy - lny * lux;
+	var lvLen = Math.sqrt(lvx * lvx + lvy * lvy + lvz * lvz);
+	if (lvLen < 1e-12) return bmsRetriangulate(tri, segments);
+	lvx /= lvLen; lvy /= lvLen; lvz /= lvLen;
+
+	function toLocal(p) {
+		var ddx = p.x - tri.v0.x, ddy = p.y - tri.v0.y, ddz = p.z - tri.v0.z;
+		return [ddx * lux + ddy * luy + ddz * luz, ddx * lvx + ddy * lvy + ddz * lvz];
+	}
+	var l0 = toLocal(tri.v0), l1 = toLocal(tri.v1), l2 = toLocal(tri.v2);
+	var baryD = (l1[1] - l2[1]) * (l0[0] - l2[0]) + (l2[0] - l1[0]) * (l0[1] - l2[1]);
+	if (Math.abs(baryD) < 1e-12) return bmsRetriangulate(tri, segments);
+
+	function baryCoords(pu, pv) {
+		var u = ((l1[1] - l2[1]) * (pu - l2[0]) + (l2[0] - l1[0]) * (pv - l2[1])) / baryD;
+		var v = ((l2[1] - l0[1]) * (pu - l2[0]) + (l0[0] - l2[0]) * (pv - l2[1])) / baryD;
+		return [u, v, 1 - u - v];
+	}
+
+	// Step 3: Identify entry/exit edges
+	var EDGE_TOL = 0.02;
+	var VERTEX_TOL = 0.02;
+	var entryLocal = toLocal(chain[0]);
+	var exitLocal = toLocal(chain[chain.length - 1]);
+	var entryBary = baryCoords(entryLocal[0], entryLocal[1]);
+	var exitBary = baryCoords(exitLocal[0], exitLocal[1]);
+
+	function isAtVertex(bc) {
+		var nearZero = 0;
+		for (var bci = 0; bci < 3; bci++) { if (bc[bci] < VERTEX_TOL) nearZero++; }
+		return nearZero >= 2;
+	}
+	if (isAtVertex(entryBary) || isAtVertex(exitBary)) {
+		return bmsRetriangulate(tri, segments);
+	}
+
+	function edgeOf(bc) {
+		if (bc[0] < EDGE_TOL && bc[0] <= bc[1] && bc[0] <= bc[2]) return 0;
+		if (bc[1] < EDGE_TOL && bc[1] <= bc[0] && bc[1] <= bc[2]) return 1;
+		if (bc[2] < EDGE_TOL && bc[2] <= bc[0] && bc[2] <= bc[1]) return 2;
+		return -1;
+	}
+	var entryOpp = edgeOf(entryBary);
+	var exitOpp = edgeOf(exitBary);
+
+	if (entryOpp < 0 || exitOpp < 0 || entryOpp === exitOpp) {
+		return bmsRetriangulate(tri, segments);
+	}
+
+	// Step 4: Corner, vA, vB
+	var cornerIdx = -1;
+	for (var ci = 0; ci < 3; ci++) {
+		if (ci !== entryOpp && ci !== exitOpp) { cornerIdx = ci; break; }
+	}
+	if (cornerIdx < 0) return bmsRetriangulate(tri, segments);
+
+	var corner = verts[cornerIdx];
+	var vA = verts[exitOpp];
+	var vB = verts[entryOpp];
+
+	// Step 5: Winding consistency
+	var origNx = e1y * e2z - e1z * e2y;
+	var origNy = e1z * e2x - e1x * e2z;
+	var origNz = e1x * e2y - e1y * e2x;
+
+	function makeTri(a, b, c) {
+		var se1x = b.x - a.x, se1y = b.y - a.y, se1z = b.z - a.z;
+		var se2x = c.x - a.x, se2y = c.y - a.y, se2z = c.z - a.z;
+		var snx = se1y * se2z - se1z * se2y;
+		var sny = se1z * se2x - se1x * se2z;
+		var snz = se1x * se2y - se1y * se2x;
+		var dot = snx * origNx + sny * origNy + snz * origNz;
+		return dot < 0 ? { v0: a, v1: c, v2: b } : { v0: a, v1: b, v2: c };
+	}
+
+	// Step 6: Build fan triangles — chain points ARE pool vertices (shared references)
+	var result = [];
+
+	// Corner fan: corner to all consecutive chain point pairs
+	for (var fi = 0; fi < chain.length - 1; fi++) {
+		result.push(makeTri(corner, chain[fi], chain[fi + 1]));
+	}
+
+	// Split index K
+	var splitK = 0;
+	var bestRatio = Infinity;
+	for (var ki = 0; ki < chain.length; ki++) {
+		var dA = distSq3(vA, chain[ki]);
+		var dB = distSq3(vB, chain[ki]);
+		var ratio = (dA < 1e-20 || dB < 1e-20) ? Infinity : (dA < dB ? dA / dB : dB / dA);
+		var diff = Math.abs(1.0 - ratio);
+		if (diff < bestRatio) { bestRatio = diff; splitK = ki; }
+	}
+	if (splitK < 1) splitK = 1;
+	if (splitK > chain.length - 2) splitK = chain.length - 2;
+
+	// Fan from vA
+	for (var ai = 0; ai < splitK; ai++) {
+		result.push(makeTri(vA, chain[ai], chain[ai + 1]));
+	}
+
+	// Transition triangle
+	result.push(makeTri(vA, chain[splitK], vB));
+
+	// Fan from vB
+	for (var bi = splitK; bi < chain.length - 1; bi++) {
+		result.push(makeTri(vB, chain[bi], chain[bi + 1]));
+	}
+
+	// Step 7: Validate — remove degenerates
+	var triArea = lnLen * 0.5;
+	var MIN_AREA = triArea * 1e-8;
+	var validated = [];
+	for (var vli = 0; vli < result.length; vli++) {
+		var t = result[vli];
+		var te1x = t.v1.x - t.v0.x, te1y = t.v1.y - t.v0.y, te1z = t.v1.z - t.v0.z;
+		var te2x = t.v2.x - t.v0.x, te2y = t.v2.y - t.v0.y, te2z = t.v2.z - t.v0.z;
+		var tcx = te1y * te2z - te1z * te2y;
+		var tcy = te1z * te2x - te1x * te2z;
+		var tcz = te1x * te2y - te1y * te2x;
+		var subArea = Math.sqrt(tcx * tcx + tcy * tcy + tcz * tcz) * 0.5;
+		if (subArea > MIN_AREA) validated.push(t);
+	}
+
+	return validated.length > 0 ? validated : bmsRetriangulate(tri, segments);
+}
+
+/**
+ * Split both meshes and produce a unified mega soup where Steiner point
+ * vertices are shared pool vertex objects.
+ *
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisA
+ * @param {Array<{ v0: Object, v1: Object, v2: Object }>} trisB
+ * @param {{ segments: Array, crossedSetA: Object, crossedSetB: Object, pool: Object }} intersectResult
+ * @returns {Array<{ v0: Object, v1: Object, v2: Object, mesh: string, origIdx: number }>}
+ */
+function bmsSplit(trisA, trisB, intersectResult) {
+	var crossedSetA = intersectResult.crossedSetA;
+	var crossedSetB = intersectResult.crossedSetB;
+	// Optional edge-Steiner maps (conforming edge splits for self-intersection).
+	var edgePointsA = intersectResult.edgePointsA || {};
+	var edgePointsB = intersectResult.edgePointsB || {};
+	var megaSoup = [];
+
+	// Process mesh A
+	for (var i = 0; i < trisA.length; i++) {
+		var segsA = crossedSetA[i];
+		var epsA = edgePointsA[i];
+		if (!segsA && (!epsA || epsA.length === 0)) {
+			// Neither crossed nor carrying edge points: pass through directly
+			megaSoup.push({
+				v0: trisA[i].v0,
+				v1: trisA[i].v1,
+				v2: trisA[i].v2,
+				mesh: "A",
+				origIdx: i
+			});
+		} else {
+			// Crossed and/or edge-point-bearing: re-triangulate with pool vertices
+			var subTris = bmsFanTriangulate(trisA[i], segsA || [], epsA);
+			for (var si = 0; si < subTris.length; si++) {
+				megaSoup.push({
+					v0: subTris[si].v0,
+					v1: subTris[si].v1,
+					v2: subTris[si].v2,
+					mesh: "A",
+					origIdx: i
+				});
+			}
+		}
+	}
+
+	// Process mesh B
+	for (var j = 0; j < trisB.length; j++) {
+		var segsB = crossedSetB[j];
+		var epsB = edgePointsB[j];
+		if (!segsB && (!epsB || epsB.length === 0)) {
+			megaSoup.push({
+				v0: trisB[j].v0,
+				v1: trisB[j].v1,
+				v2: trisB[j].v2,
+				mesh: "B",
+				origIdx: j
+			});
+		} else {
+			var subTrisB = bmsFanTriangulate(trisB[j], segsB || [], epsB);
+			for (var sj = 0; sj < subTrisB.length; sj++) {
+				megaSoup.push({
+					v0: subTrisB[sj].v0,
+					v1: subTrisB[sj].v1,
+					v2: subTrisB[sj].v2,
+					mesh: "B",
+					origIdx: j
+				});
+			}
+		}
+	}
+
+	return megaSoup;
+}
+
+/**
+ * @module bms/bmsClose
+ *
+ * Build a single mesh edge polygon per mesh that connects ALL intersection
+ * polylines together via graph-walks and traces the mesh's open boundary.
+ *
+ * The mesh edge poly is ONE continuous closed polygon:
+ *   boundary(magenta) → graphWalk(magenta) → IL1(yellow) → graphWalk(magenta) →
+ *   IL2(yellow) → graphWalk(magenta) → boundary(magenta) → back to start
+ *
+ * This polygon divides the mesh into inside (enclosed by intersection lines)
+ * and outside (connected to the boundary).
+ */
+
+
+// ── Boundary extraction ──
+
+/**
+ * chainedOpenEdge — Walk the complete open boundary of a mesh as a CLOSED polygon.
+ *
+ * Uses a half-edge structure to correctly navigate bowtie (non-manifold)
+ * vertices. At each boundary vertex, the next boundary half-edge is found
+ * by walking the triangle fan around the vertex until the next boundary
+ * edge is reached.
+ *
+ * Returns the largest loop as an ordered array of {key, vertex},
+ * with the first vertex repeated at the end to close the polygon.
+ * Returns [] if the mesh has no open edges.
+ */
+function chainedOpenEdge(tris) {
+	// Step 1: Build half-edge structure
+	// Each directed half-edge is keyed as "fromKey|toKey"
+	var vertMap = {};     // vertKey → vertex object
+	var halfEdges = {};   // "from|to" → true (exists)
+	var heNextInTri = {}; // "from|to" → "to|next" (next half-edge in same triangle)
+
+	for (var i = 0; i < tris.length; i++) {
+		var tri = tris[i];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+
+		for (var e = 0; e < 3; e++) {
+			vertMap[ks[e]] = vs[e];
+			var ne = (e + 1) % 3;
+			var nne = (e + 2) % 3;
+			var heKey = ks[e] + "|" + ks[ne];
+			halfEdges[heKey] = true;
+			// Keep first occurrence — prevents non-manifold edges from
+			// overwriting with a different triangle's fan data
+			if (heNextInTri[heKey] === undefined) {
+				heNextInTri[heKey] = ks[ne] + "|" + ks[nne];
+			}
+		}
+	}
+
+	// Step 2: Find boundary half-edges (no twin exists)
+	var boundary = {};  // "from|to" → true
+	var bdryFromVert = {}; // vertKey → ["from|to", ...] (boundary half-edges starting from this vert)
+
+	for (var hk in halfEdges) {
+		var sep = hk.indexOf("|");
+		var fromK = hk.substring(0, sep);
+		var toK = hk.substring(sep + 1);
+		var twin = toK + "|" + fromK;
+		if (!halfEdges[twin]) {
+			boundary[hk] = true;
+			if (!bdryFromVert[fromK]) bdryFromVert[fromK] = [];
+			bdryFromVert[fromK].push(hk);
+		}
+	}
+
+	if (Object.keys(boundary).length === 0) return [];
+
+	// Step 3: Build "next boundary" map
+	// For boundary half-edge A→V, find the next boundary half-edge V→B
+	// by walking the triangle fan around V:
+	//   A→V is in some triangle → next in that triangle is V→C
+	//   if V→C is boundary → done (next = V→C)
+	//   if V→C is interior → find twin C→V → next in twin's triangle is V→D
+	//   repeat until we find a boundary half-edge
+	var nextBoundary = {}; // "A|V" → "V|B"
+
+	for (var bhk in boundary) {
+		var sep2 = bhk.indexOf("|");
+		bhk.substring(sep2 + 1);
+
+		// Walk the fan around V starting from the next half-edge in A→V's triangle
+		var cursor = heNextInTri[bhk]; // V→C in the same triangle as A→V
+		var visited = {};  // cycle detection
+		visited[bhk] = true;
+		var safety = 1000;
+
+		while (safety-- > 0) {
+			if (!cursor || visited[cursor]) break;
+			visited[cursor] = true;
+			if (boundary[cursor]) {
+				nextBoundary[bhk] = cursor;
+				break;
+			}
+			// cursor is interior V→D — find twin D→V, then get next in that triangle
+			var csep = cursor.indexOf("|");
+			var cFrom = cursor.substring(0, csep);
+			var cTo = cursor.substring(csep + 1);
+			var cTwin = cTo + "|" + cFrom;
+			if (!halfEdges[cTwin]) break; // broken mesh
+			cursor = heNextInTri[cTwin]; // next in twin's triangle = V→E
+		}
+	}
+
+	// Step 4: Walk boundary loops using nextBoundary
+	var used = {};
+	var bestLoop = null;
+
+	for (var startHE in boundary) {
+		if (used[startHE]) continue;
+
+		var loop = [];
+		var cur = startHE;
+		var safety2 = Object.keys(boundary).length + 2;
+
+		while (safety2-- > 0) {
+			if (used[cur]) {
+				// If we closed back to start, add closing vertex
+				if (cur === startHE && loop.length > 0) {
+					var csep2 = cur.indexOf("|");
+					var closingKey = cur.substring(0, csep2);
+					loop.push({ key: closingKey, vertex: vertMap[closingKey] });
+				}
+				break;
+			}
+			used[cur] = true;
+			var csep3 = cur.indexOf("|");
+			var curFrom = cur.substring(0, csep3);
+			loop.push({ key: curFrom, vertex: vertMap[curFrom] });
+
+			cur = nextBoundary[cur];
+			if (!cur) break;
+		}
+
+		if (!bestLoop || loop.length > bestLoop.length) bestLoop = loop;
+	}
+
+	return bestLoop || [];
+}
+
+// ── Graph walk (BFS with parent tracking) ──
+
+/**
+ * Build full mesh vertex adjacency for graph-walking.
+ * Optionally excludes barrier edges (intersection segments) so walks
+ * go AROUND intersections, not through them.
+ *
+ * @param {Array} tris - Triangle soup
+ * @param {Object} [barrierEdgeSet] - Set of edge keys to exclude
+ * @returns {{ adj, vertMap }}
+ */
+function buildMeshVertexAdj(tris, barrierEdgeSet) {
+	var adj = {};
+	var vertMap = {};
+	var seen = {};
+	for (var i = 0; i < tris.length; i++) {
+		var tri = tris[i];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var ek = edgeKey(ks[e], ks[ne]);
+			if (!seen[ek]) {
+				seen[ek] = true;
+				// Skip barrier edges — walks must go around intersections
+				if (barrierEdgeSet && barrierEdgeSet[ek]) {
+					// Still register the vertices in vertMap, just don't connect them
+					if (!vertMap[ks[e]]) vertMap[ks[e]] = vs[e];
+					if (!vertMap[ks[ne]]) vertMap[ks[ne]] = vs[ne];
+					continue;
+				}
+				if (!adj[ks[e]]) adj[ks[e]] = [];
+				if (!adj[ks[ne]]) adj[ks[ne]] = [];
+				adj[ks[e]].push(ks[ne]);
+				adj[ks[ne]].push(ks[e]);
+			}
+			if (!vertMap[ks[e]]) vertMap[ks[e]] = vs[e];
+			if (!vertMap[ks[ne]]) vertMap[ks[ne]] = vs[ne];
+		}
+	}
+	return { adj: adj, vertMap: vertMap };
+}
+
+/**
+ * BFS from startKey to the nearest key in targetSet.
+ * Returns {path: [...vertices], targetKey: key} or null.
+ */
+function graphWalkToSet(startKey, targetSet, meshAdj, meshVertMap, maxSteps) {
+	if (targetSet[startKey]) return { path: meshVertMap[startKey] ? [meshVertMap[startKey]] : [], targetKey: startKey };
+
+	var parent = {};
+	parent[startKey] = null;
+	var queue = [startKey];
+	var head = 0;
+	var found = null;
+
+	while (head < queue.length && head < maxSteps) {
+		var cur = queue[head++];
+		var nbrs = meshAdj[cur];
+		if (!nbrs) continue;
+		for (var ni = 0; ni < nbrs.length; ni++) {
+			var nk = nbrs[ni];
+			if (parent[nk] !== undefined) continue;
+			parent[nk] = cur;
+			if (targetSet[nk]) { found = nk; break; }
+			queue.push(nk);
+		}
+		if (found) break;
+	}
+
+	if (!found) return null;
+
+	var pathKeys = [];
+	var k = found;
+	while (k !== null) { pathKeys.push(k); k = parent[k]; }
+	pathKeys.reverse();
+
+	var path = [];
+	for (var pi = 0; pi < pathKeys.length; pi++) {
+		var v = meshVertMap[pathKeys[pi]];
+		if (v) path.push(v);
+	}
+	return { path: path, targetKey: found };
+}
+
+function bmsClosePolylines(polylines, trisA, trisB, megaSoup, segments) {
+	if (polylines.length === 0) {
+		return {
+			closedPolylines: [],
+			meshEdgePolys: {
+				A: { segments: [], closed: false },
+				B: { segments: [], closed: false }
+			}
+		};
+	}
+
+	// Build barrier edge set from intersection segments
+	var barrierEdgeSet = {};
+	if (segments) {
+		for (var si = 0; si < segments.length; si++) {
+			var seg = segments[si];
+			var sk0 = vKey(seg.p0);
+			var sk1 = vKey(seg.p1);
+			barrierEdgeSet[edgeKey(sk0, sk1)] = true;
+		}
+	}
+
+	// Extract mega soup triangles per mesh (includes pool vertices from splits)
+	var megaSoupA = [];
+	var megaSoupB = [];
+	if (megaSoup) {
+		for (var mi = 0; mi < megaSoup.length; mi++) {
+			if (megaSoup[mi].mesh === "A") megaSoupA.push(megaSoup[mi]);
+			else megaSoupB.push(megaSoup[mi]);
+		}
+	}
+
+	// Build mesh edge poly for each mesh
+	// Use mega soup (with pool vertices) for graph-walking, original tris for boundary
+	// Pass barrier edges so walks go AROUND intersections
+	var meshEpA = buildMeshEdgePoly(polylines, trisA, megaSoupA.length > 0 ? megaSoupA : trisA, barrierEdgeSet);
+	var meshEpB = buildMeshEdgePoly(polylines, trisB, megaSoupB.length > 0 ? megaSoupB : trisB, barrierEdgeSet);
+
+	// Build combined closed polylines from the mesh edge polys
+	var closedPolylines = [];
+	// The intersection chains themselves (for barrier purposes)
+	for (var pi = 0; pi < polylines.length; pi++) {
+		closedPolylines.push(polylines[pi]);
+	}
+
+	return {
+		closedPolylines: closedPolylines,
+		meshEdgePolys: {
+			A: meshEpA,
+			B: meshEpB
+		}
+	};
+}
+
+/**
+ * Build ONE mesh edge polygon for a single mesh.
+ *
+ * Connects all intersection chains via graph-walks and traces the
+ * mesh's open boundary. Returns an ordered list of segments, each
+ * tagged as "intersection" (yellow) or "walk" (magenta).
+ *
+ * @param {Array<Array<PoolVertex>>} chains - All intersection polylines
+ * @param {Array} meshTris - This mesh's triangles
+ * @returns {{ segments: Array<{verts: Array<Object>, type: string}>, closed: boolean }}
+ */
+function buildMeshEdgePoly(chains, meshTris, graphTris, barrierEdgeSet) {
+	if (chains.length === 0) return { segments: [], closed: false };
+
+	// Step 1: Trace open edges — complete closed boundary polygon
+	var boundaryLoop = chainedOpenEdge(meshTris);
+	var hasBoundary = boundaryLoop.length > 0;
+
+	if (!hasBoundary) {
+		// Closed mesh — just trace intersection(s)
+		var segs = [];
+		for (var ci = 0; ci < chains.length; ci++) {
+			segs.push({ verts: chains[ci].slice(), type: "intersection" });
+		}
+		var isClosed = chains.length > 0 && chains[0].length > 2 &&
+			chains[0][0] === chains[0][chains[0].length - 1];
+		return { segments: segs, closed: isClosed };
+	}
+
+	// Step 2: Build mesh vertex adjacency (barriers excluded — walks can't cross intersection)
+	var meshGraph = buildMeshVertexAdj(graphTris, barrierEdgeSet);
+
+	// Build boundary vertex set and index map
+	var bdryVertSet = {};
+	var bdryKeyToIdx = {};
+	for (var bi = 0; bi < boundaryLoop.length; bi++) {
+		bdryVertSet[boundaryLoop[bi].key] = true;
+		bdryKeyToIdx[boundaryLoop[bi].key] = bi;
+	}
+	var bdryLen = boundaryLoop.length - 1; // edges (loop is closed, first=last)
+
+	// Step 3: For EACH chain, find graph walks to boundary.
+	//
+	// Closed chains (loops): ONE graph walk — enter and exit at the same vertex.
+	// Open chains: TWO graph walks — enter at one endpoint, exit at the other.
+	//   gwIn:  boundary → chain entry point
+	//   gwOut: chain exit point → boundary
+	//
+	// connections[] stores: { chainIdx, gwIn, gwOut, bdryIdxIn, bdryIdxOut }
+	var connections = [];
+	var MAX_BFS = 50000;
+
+	for (var ci2 = 0; ci2 < chains.length; ci2++) {
+		var chain = chains[ci2];
+		var chainIsClosed = chain.length > 2 && chain[0] === chain[chain.length - 1];
+
+		if (chainIsClosed) {
+			// Closed loop: find shortest walk from ANY loop vertex to boundary
+			var bestGW = null;
+			var bestLen = MAX_BFS;
+			var bestVertIdx = -1;
+			for (var cvi = 0; cvi < chain.length; cvi++) {
+				var cvKey = vKey(chain[cvi]);
+				var gw = graphWalkToSet(cvKey, bdryVertSet, meshGraph.adj, meshGraph.vertMap, bestLen);
+				if (gw && gw.path.length < bestLen) {
+					bestLen = gw.path.length;
+					bestGW = gw;
+					bestVertIdx = cvi;
+				}
+			}
+			if (bestGW) {
+				var bIdx = bdryKeyToIdx[bestGW.targetKey];
+				connections.push({
+					chainIdx: ci2,
+					entryVertIdx: bestVertIdx,
+					gwIn: bestGW.path.slice().reverse(),   // boundary → intersection
+					gwOut: bestGW.path.slice(),             // intersection → boundary (same path)
+					bdryIdxIn: bIdx !== undefined ? bIdx : 0,
+					bdryIdxOut: bIdx !== undefined ? bIdx : 0
+				});
+			}
+		} else {
+			// Open chain: find walks from BOTH endpoints
+			var startKey = vKey(chain[0]);
+			var endKey = vKey(chain[chain.length - 1]);
+			var gwStart = graphWalkToSet(startKey, bdryVertSet, meshGraph.adj, meshGraph.vertMap, MAX_BFS);
+			var gwEnd = graphWalkToSet(endKey, bdryVertSet, meshGraph.adj, meshGraph.vertMap, MAX_BFS);
+
+			if (gwStart && gwEnd) {
+				// Enter at start, exit at end
+				var bIdxIn = bdryKeyToIdx[gwStart.targetKey];
+				var bIdxOut = bdryKeyToIdx[gwEnd.targetKey];
+				connections.push({
+					chainIdx: ci2,
+					entryVertIdx: 0,
+					gwIn: gwStart.path.slice().reverse(),  // boundary → chain[0]
+					gwOut: gwEnd.path.slice(),              // chain[last] → boundary
+					bdryIdxIn: bIdxIn !== undefined ? bIdxIn : 0,
+					bdryIdxOut: bIdxOut !== undefined ? bIdxOut : 0
+				});
+			} else if (gwStart) {
+				// Only start reached boundary — use same walk in/out
+				var bIdx2 = bdryKeyToIdx[gwStart.targetKey];
+				connections.push({
+					chainIdx: ci2,
+					entryVertIdx: 0,
+					gwIn: gwStart.path.slice().reverse(),
+					gwOut: gwStart.path.slice(),
+					bdryIdxIn: bIdx2 !== undefined ? bIdx2 : 0,
+					bdryIdxOut: bIdx2 !== undefined ? bIdx2 : 0
+				});
+			} else if (gwEnd) {
+				// Only end reached boundary — reverse chain direction
+				var bIdx3 = bdryKeyToIdx[gwEnd.targetKey];
+				connections.push({
+					chainIdx: ci2,
+					entryVertIdx: chain.length - 1,
+					gwIn: gwEnd.path.slice().reverse(),
+					gwOut: gwEnd.path.slice(),
+					bdryIdxIn: bIdx3 !== undefined ? bIdx3 : 0,
+					bdryIdxOut: bIdx3 !== undefined ? bIdx3 : 0
+				});
+			}
+			// If neither endpoint reached boundary, skip this chain
+		}
+	}
+
+	if (connections.length === 0) {
+		// No chain could reach the boundary — fallback
+		var fallbackSegs = [];
+		for (var fi = 0; fi < chains.length; fi++) {
+			fallbackSegs.push({ verts: chains[fi].slice(), type: "intersection" });
+		}
+		return { segments: fallbackSegs, closed: false };
+	}
+
+	// Step 4: Sort connections by boundary entry index (position around the loop).
+	// This ensures we visit intersections in order as we walk the boundary.
+	connections.sort(function (a, b) { return a.bdryIdxIn - b.bdryIdxIn; });
+
+	// Step 5: Build ONE continuous closed polygon.
+	//
+	// Algorithm (unidirectional, visits each intersection in boundary order):
+	//   START at first connection's entry boundary point
+	//   for each connection i:
+	//     walk boundary → to connection[i].bdryIdxIn
+	//     graph walk IN → from boundary to chain entry point
+	//     traverse chain (entry → exit)
+	//     graph walk OUT → from chain exit to boundary
+	//   walk remaining boundary → back to start
+	//   = CLOSED
+	var resultSegments = [];
+	var startBdryIdx = connections[0].bdryIdxIn;
+	// Track current position on boundary (index into boundaryLoop)
+	var curBdryIdx = startBdryIdx;
+
+	for (var ci3 = 0; ci3 < connections.length; ci3++) {
+		var conn = connections[ci3];
+
+		// 5a) Boundary segment: from current position to this connection's entry
+		if (ci3 > 0) {
+			var fromIdx = curBdryIdx;
+			var toIdx = conn.bdryIdxIn;
+			if (fromIdx !== toIdx) {
+				var bdrySegVerts = [];
+				if (toIdx > fromIdx) {
+					for (var bsi = fromIdx; bsi <= toIdx; bsi++) {
+						bdrySegVerts.push(boundaryLoop[bsi].vertex);
+					}
+				} else {
+					// Wrap around boundary
+					for (var bsi2 = fromIdx; bsi2 < bdryLen; bsi2++) {
+						bdrySegVerts.push(boundaryLoop[bsi2].vertex);
+					}
+					for (var bsi3 = 0; bsi3 <= toIdx; bsi3++) {
+						bdrySegVerts.push(boundaryLoop[bsi3].vertex);
+					}
+				}
+				if (bdrySegVerts.length >= 2) {
+					resultSegments.push({ verts: bdrySegVerts, type: "walk" });
+				}
+			}
+		}
+
+		// 5b) Graph walk IN: boundary → chain entry vertex
+		if (conn.gwIn.length >= 2) {
+			resultSegments.push({ verts: conn.gwIn, type: "walk" });
+		}
+
+		// 5c) Orient chain so entry vertex is at [0].
+		var chain = chains[conn.chainIdx].slice();
+		var chainIsClosed = chain.length > 2 && chain[0] === chain[chain.length - 1];
+		if (conn.entryVertIdx > 0) {
+			if (chainIsClosed) {
+				// Rotate closed loop: walk vertex at [0] and repeated at [end]
+				var rotChain = [];
+				for (var rci = conn.entryVertIdx; rci < chain.length - 1; rci++) {
+					rotChain.push(chain[rci]);
+				}
+				for (var rci2 = 0; rci2 <= conn.entryVertIdx; rci2++) {
+					rotChain.push(chain[rci2]);
+				}
+				chain = rotChain;
+			} else if (conn.entryVertIdx === chain.length - 1) {
+				// Open chain entered at last vertex — reverse to enter at [0]
+				chain.reverse();
+			}
+		}
+		resultSegments.push({ verts: chain, type: "intersection" });
+
+		// 5d) Graph walk OUT: chain exit vertex → boundary
+		if (conn.gwOut.length >= 2) {
+			resultSegments.push({ verts: conn.gwOut, type: "walk" });
+		}
+
+		// Update current boundary position to exit point
+		curBdryIdx = conn.bdryIdxOut;
+	}
+
+	// 5e) Final boundary segment: from last exit back to first entry (closing).
+	var closingVerts = [];
+	if (curBdryIdx !== startBdryIdx) {
+		// Walk forward from last exit to first entry (wrapping around)
+		for (var cbi = curBdryIdx; cbi < bdryLen; cbi++) {
+			closingVerts.push(boundaryLoop[cbi].vertex);
+		}
+		for (var cbi2 = 0; cbi2 <= startBdryIdx; cbi2++) {
+			closingVerts.push(boundaryLoop[cbi2].vertex);
+		}
+	} else {
+		// Same position — full boundary loop
+		for (var cbi3 = startBdryIdx; cbi3 < bdryLen; cbi3++) {
+			closingVerts.push(boundaryLoop[cbi3].vertex);
+		}
+		for (var cbi4 = 0; cbi4 <= startBdryIdx; cbi4++) {
+			closingVerts.push(boundaryLoop[cbi4].vertex);
+		}
+	}
+	if (closingVerts.length >= 2) {
+		resultSegments.push({ verts: closingVerts, type: "walk" });
+	}
+
+	return { segments: resultSegments, closed: true };
+}
+
+/**
+ * @module bms/bmsClassify
+ *
+ * Hybrid classification (v0.5.0):
+ * - Open meshes: boundary topology (touches mesh boundary = outside)
+ * - Closed meshes: barrier-normal dot product (other mesh's normal at barrier)
+ * Also extracts per-component boundary walks for visualization.
+ */
+
+
+// ── Mesh boundary detection ──
+
+/**
+ * Build a set of vertex keys that lie on the mesh's open boundary.
+ */
+function buildBoundaryVertexSet(tris) {
+	var edgeCount = {};
+	var edgeVerts = {};
+	for (var i = 0; i < tris.length; i++) {
+		var tri = tris[i];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var ek = ks[e] < ks[ne] ? ks[e] + "|" + ks[ne] : ks[ne] + "|" + ks[e];
+			if (!edgeCount[ek]) { edgeCount[ek] = 0; edgeVerts[ek] = [ks[e], ks[ne]]; }
+			edgeCount[ek]++;
+		}
+	}
+	var boundaryVerts = {};
+	for (var ek2 in edgeCount) {
+		if (edgeCount[ek2] === 1) {
+			var verts = edgeVerts[ek2];
+			boundaryVerts[verts[0]] = true;
+			boundaryVerts[verts[1]] = true;
+		}
+	}
+	return boundaryVerts;
+}
+
+// ── Boundary topology classification (open meshes) ──
+
+function classifyByBoundaryTopology(comp, megaSoup, boundaryVerts) {
+	for (var ti = 0; ti < comp.triIndices.length; ti++) {
+		var tri = megaSoup[comp.triIndices[ti]];
+		var ks = [vKey(tri.v0), vKey(tri.v1), vKey(tri.v2)];
+		for (var vi = 0; vi < 3; vi++) {
+			if (boundaryVerts[ks[vi]]) return false;
+		}
+	}
+	return true;
+}
+
+// ── Walk-direction classification (open meshes, interior components) ──
+
+/**
+ * Build a map of walk edge directions from meshEdgePolys segments.
+ * Returns { edgeKey → { dx, dy, dz, mx, my, mz } }
+ */
+function buildWalkEdgeDirMap(meshEp) {
+	if (!meshEp || !meshEp.segments) return {};
+	var dirMap = {};
+	var prevVert = null;
+	for (var si = 0; si < meshEp.segments.length; si++) {
+		var seg = meshEp.segments[si];
+		for (var vi = 0; vi < seg.verts.length; vi++) {
+			var v = seg.verts[vi];
+			if (prevVert) {
+				var k0 = vKey(prevVert), k1 = vKey(v);
+				if (k0 !== k1) {
+					var ek = edgeKey(k0, k1);
+					dirMap[ek] = {
+						dx: v.x - prevVert.x, dy: v.y - prevVert.y, dz: v.z - prevVert.z,
+						mx: (prevVert.x + v.x) * 0.5, my: (prevVert.y + v.y) * 0.5, mz: (prevVert.z + v.z) * 0.5
+					};
+				}
+			}
+			prevVert = v;
+		}
+	}
+	return dirMap;
+}
+
+// ── Barrier-normal classification (closed meshes) ──
+
+function classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris) {
+	var compMesh = comp.mesh;
+	var dotSum = 0;
+	var sampleCount = 0;
+	var seenEdges = {};
+
+	for (var ti = 0; ti < comp.triIndices.length; ti++) {
+		var triIdx = comp.triIndices[ti];
+		var tri = megaSoup[triIdx];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var ek = edgeKey(ks[e], ks[ne]);
+
+			if (!barrierEdges[ek]) continue;
+			if (seenEdges[ek]) continue;
+			seenEdges[ek] = true;
+
+			var otherIdx = 3 - e - ne;
+			var thirdVert = vs[otherIdx];
+			var edgeV0 = vs[e];
+			var edgeV1 = vs[ne];
+
+			var midX = (edgeV0.x + edgeV1.x) * 0.5;
+			var midY = (edgeV0.y + edgeV1.y) * 0.5;
+			var midZ = (edgeV0.z + edgeV1.z) * 0.5;
+			var intoX = thirdVert.x - midX;
+			var intoY = thirdVert.y - midY;
+			var intoZ = thirdVert.z - midZ;
+
+			var intoLen = Math.sqrt(intoX * intoX + intoY * intoY + intoZ * intoZ);
+			if (intoLen < 1e-12) continue;
+			intoX /= intoLen; intoY /= intoLen; intoZ /= intoLen;
+
+			var sharedTris = edgeToTris[ek];
+			if (!sharedTris) continue;
+
+			var otherNx = 0, otherNy = 0, otherNz = 0;
+			var foundOther = false;
+
+			for (var si = 0; si < sharedTris.length; si++) {
+				var sTri = megaSoup[sharedTris[si]];
+				if (sTri.mesh === compMesh) continue;
+				var e1x = sTri.v1.x - sTri.v0.x, e1y = sTri.v1.y - sTri.v0.y, e1z = sTri.v1.z - sTri.v0.z;
+				var e2x = sTri.v2.x - sTri.v0.x, e2y = sTri.v2.y - sTri.v0.y, e2z = sTri.v2.z - sTri.v0.z;
+				otherNx = e1y * e2z - e1z * e2y;
+				otherNy = e1z * e2x - e1x * e2z;
+				otherNz = e1x * e2y - e1y * e2x;
+				foundOther = true;
+				break;
+			}
+			if (!foundOther) continue;
+
+			var otherLen = Math.sqrt(otherNx * otherNx + otherNy * otherNy + otherNz * otherNz);
+			if (otherLen < 1e-12) continue;
+			otherNx /= otherLen; otherNy /= otherLen; otherNz /= otherLen;
+
+			dotSum += intoX * otherNx + intoY * otherNy + intoZ * otherNz;
+			sampleCount++;
+		}
+	}
+
+	if (sampleCount === 0) return false;
+	return (dotSum / sampleCount) < 0;
+}
+
+// ── Per-component boundary walk extraction ──
+
+/**
+ * Extract boundary walk segments for a component.
+ * Returns segments grouped by type: "intersection" (barrier) or "walk" (mesh boundary).
+ *
+ * @returns {Array<{ verts: Array<{x,y,z}>, type: string }>}
+ */
+function extractBoundaryWalk$1(comp, megaSoup, barrierEdges) {
+	// Collect directed boundary half-edges
+	var directedCount = {};
+	var directedVerts = {};
+
+	for (var i = 0; i < comp.triIndices.length; i++) {
+		var tri = megaSoup[comp.triIndices[i]];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var dk = ks[e] + "|" + ks[ne];
+			if (!directedCount[dk]) {
+				directedCount[dk] = 0;
+				directedVerts[dk] = { fromVert: vs[e], toVert: vs[ne] };
+			}
+			directedCount[dk]++;
+		}
+	}
+
+	// Collect boundary half-edges with type
+	var halfEdges = [];
+	for (var dk2 in directedCount) {
+		var parts = dk2.split("|");
+		var fromK = parts[0];
+		var toK = parts[1];
+		var reverseK = toK + "|" + fromK;
+		var ek = edgeKey(fromK, toK);
+
+		var isBarrier = !!barrierEdges[ek];
+		var reverseExists = !!directedCount[reverseK];
+
+		if (!reverseExists || isBarrier) {
+			var verts = directedVerts[dk2];
+			halfEdges.push({
+				from: fromK, to: toK,
+				fromVert: verts.fromVert, toVert: verts.toVert,
+				type: isBarrier ? "intersection" : "walk"
+			});
+		}
+	}
+
+	if (halfEdges.length === 0) return [];
+
+	// Build adjacency: fromVertex -> [halfEdge indices]
+	var outgoing = {};
+	for (var hi = 0; hi < halfEdges.length; hi++) {
+		var fk = halfEdges[hi].from;
+		if (!outgoing[fk]) outgoing[fk] = [];
+		outgoing[fk].push(hi);
+	}
+
+	// Chain into loops, grouping consecutive same-type edges into segments
+	var used = new Array(halfEdges.length);
+	for (var u = 0; u < used.length; u++) used[u] = false;
+
+	var allSegments = [];
+
+	for (var start = 0; start < halfEdges.length; start++) {
+		if (used[start]) continue;
+
+		// Walk this loop
+		var loopEdges = [];
+		var currIdx = start;
+		used[currIdx] = true;
+		loopEdges.push(currIdx);
+
+		var currVert = halfEdges[currIdx].to;
+		var maxIter = halfEdges.length + 1;
+		var iter = 0;
+
+		while (currVert !== halfEdges[start].from && iter < maxIter) {
+			iter++;
+			var candidates = outgoing[currVert];
+			if (!candidates || candidates.length === 0) break;
+
+			var bestIdx = -1;
+			for (var ci = 0; ci < candidates.length; ci++) {
+				if (!used[candidates[ci]]) { bestIdx = candidates[ci]; break; }
+			}
+			if (bestIdx === -1) break;
+
+			used[bestIdx] = true;
+			loopEdges.push(bestIdx);
+			currVert = halfEdges[bestIdx].to;
+		}
+
+		if (loopEdges.length < 2) continue;
+
+		// Group consecutive same-type edges into segments
+		var segType = halfEdges[loopEdges[0]].type;
+		var segVerts = [halfEdges[loopEdges[0]].fromVert, halfEdges[loopEdges[0]].toVert];
+
+		for (var li = 1; li < loopEdges.length; li++) {
+			var he = halfEdges[loopEdges[li]];
+			if (he.type === segType) {
+				segVerts.push(he.toVert);
+			} else {
+				allSegments.push({ verts: segVerts, type: segType });
+				segType = he.type;
+				segVerts = [he.fromVert, he.toVert];
+			}
+		}
+		allSegments.push({ verts: segVerts, type: segType });
+	}
+
+	return allSegments;
+}
+
+// ── Main classify ──
+
+/**
+ * Hybrid classification with per-component boundary walk extraction.
+ *
+ * @returns {{
+ *   aInside: Array, aOutside: Array, bInside: Array, bOutside: Array,
+ *   componentWalks: Array<{ mesh: string, side: string, triCount: number,
+ *     segments: Array<{ verts: Array, type: string }> }>
+ * }}
+ */
+function bmsClassify(megaSoup, closedPolylines, segments, trisA, trisB, meshEdgePolys) {
+	var n = megaSoup.length;
+
+	// ── Build barriers ──
+	var barrierEdges = {};
+	for (var si = 0; si < segments.length; si++) {
+		var seg = segments[si];
+		if (seg.p0 === seg.p1) continue;
+		var k0 = vKey(seg.p0), k1 = vKey(seg.p1);
+		if (k0 === k1) continue;
+		barrierEdges[edgeKey(k0, k1)] = true;
+	}
+
+	// ── Build edge adjacency ──
+	var edgeToTris = {};
+	for (var ei = 0; ei < n; ei++) {
+		var eTri = megaSoup[ei];
+		var eKs = [vKey(eTri.v0), vKey(eTri.v1), vKey(eTri.v2)];
+		for (var ee = 0; ee < 3; ee++) {
+			var ene = (ee + 1) % 3;
+			var eek = edgeKey(eKs[ee], eKs[ene]);
+			if (!edgeToTris[eek]) edgeToTris[eek] = [];
+			edgeToTris[eek].push(ei);
+		}
+	}
+
+	// ── Build neighbors excluding barriers ──
+	var neighbors = new Array(n);
+	for (var ni = 0; ni < n; ni++) neighbors[ni] = [];
+	for (var ek3 in edgeToTris) {
+		if (barrierEdges[ek3]) continue;
+		var triList = edgeToTris[ek3];
+		for (var a = 0; a < triList.length; a++) {
+			for (var b = a + 1; b < triList.length; b++) {
+				neighbors[triList[a]].push(triList[b]);
+				neighbors[triList[b]].push(triList[a]);
+			}
+		}
+	}
+
+	// ── Barrier flood fill ──
+	var componentId = new Int32Array(n);
+	for (var ci = 0; ci < n; ci++) componentId[ci] = -1;
+
+	var components = [];
+	var nextCompId = 0;
+
+	for (var seed = 0; seed < n; seed++) {
+		if (componentId[seed] >= 0) continue;
+		var meshTag = megaSoup[seed].mesh;
+
+		var compId = nextCompId++;
+		var triIndices = [];
+		var queue = [seed];
+		componentId[seed] = compId;
+		var head = 0;
+
+		while (head < queue.length) {
+			var curr = queue[head++];
+			triIndices.push(curr);
+			var nbrs = neighbors[curr];
+			for (var nbi = 0; nbi < nbrs.length; nbi++) {
+				var nb = nbrs[nbi];
+				if (componentId[nb] >= 0) continue;
+				if (megaSoup[nb].mesh !== meshTag) continue;
+				componentId[nb] = compId;
+				queue.push(nb);
+			}
+		}
+
+		components.push({ id: compId, mesh: meshTag, triIndices: triIndices, triCount: triIndices.length });
+	}
+
+	// ── Detect open/closed per mesh ──
+	var boundaryVertsA = buildBoundaryVertexSet(trisA);
+	var boundaryVertsB = buildBoundaryVertexSet(trisB);
+	var isOpenA = Object.keys(boundaryVertsA).length > 0;
+	var isOpenB = Object.keys(boundaryVertsB).length > 0;
+	if (meshEdgePolys) {
+		if (isOpenA && meshEdgePolys.A) buildWalkEdgeDirMap(meshEdgePolys.A);
+		if (isOpenB && meshEdgePolys.B) buildWalkEdgeDirMap(meshEdgePolys.B);
+	}
+
+	// ── Classify each component + extract boundary walks ──
+	var aInside = [], aOutside = [];
+	var bInside = [], bOutside = [];
+	var componentWalks = [];
+	var triSides = new Int8Array(n); // 1 = inside, -1 = outside (per megaSoup index)
+
+	for (var gi = 0; gi < components.length; gi++) {
+		var comp = components[gi];
+		var isInside;
+
+		if (comp.triCount === 0) continue;
+
+		var meshComps = 0;
+		for (var mc = 0; mc < components.length; mc++) {
+			if (components[mc].mesh === comp.mesh) meshComps++;
+		}
+
+		if (meshComps === 1) {
+			isInside = false;
+		} else {
+			var isOpen = comp.mesh === "A" ? isOpenA : isOpenB;
+			var bverts = comp.mesh === "A" ? boundaryVertsA : boundaryVertsB;
+
+			if (isOpen) {
+				// Open mesh: boundary touch = outside
+				// Interior components: barrier-normal (other mesh's normal at barrier)
+				var touchesBoundary = !classifyByBoundaryTopology(comp, megaSoup, bverts);
+				if (touchesBoundary) {
+					isInside = false;
+				} else {
+					// Interior component — use barrier-normal (works for both meshes
+					// because it checks the OTHER mesh's normal direction)
+					isInside = classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris);
+				}
+			} else {
+				isInside = classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris);
+			}
+		}
+
+		var side = isInside ? "inside" : "outside";
+
+		var insideArr = comp.mesh === "A" ? aInside : bInside;
+		var outsideArr = comp.mesh === "A" ? aOutside : bOutside;
+		var target = isInside ? insideArr : outsideArr;
+
+		for (var oi = 0; oi < comp.triIndices.length; oi++) {
+			var ot = megaSoup[comp.triIndices[oi]];
+			triSides[comp.triIndices[oi]] = isInside ? 1 : -1;
+			target.push({ v0: ot.v0, v1: ot.v1, v2: ot.v2 });
+		}
+
+		// Extract boundary walk for this component
+		var walkSegments = extractBoundaryWalk$1(comp, megaSoup, barrierEdges);
+		componentWalks.push({
+			mesh: comp.mesh,
+			side: side,
+			triCount: comp.triCount,
+			segments: walkSegments
+		});
+	}
+
+	console.log("[BMS] Classification (walk): A: " + aInside.length + " inside, " +
+		aOutside.length + " outside" + (isOpenA ? " (walk)" : " (dot)") +
+		". B: " + bInside.length + " inside, " +
+		bOutside.length + " outside" + (isOpenB ? " (walk)" : " (dot)") +
+		". Components: " + components.length + ".");
+
+	return {
+		aInside: aInside, aOutside: aOutside, bInside: bInside, bOutside: bOutside,
+		componentWalks: componentWalks,
+		triSides: triSides
+	};
+}
+
+/**
+ * @module bms/bmsVerify
+ *
+ * Post-condition verification for the hybrid BMS classification
+ * (KNOWN_ISSUES #20 — the v0.5.8 auto-classifier).
+ *
+ * The hybrid classifier's flood fill can leak through a gap in the
+ * intersection barrier and silently fail to partition a mesh (the
+ * 2026-06-11 failure: 3 components instead of 4, no error). These three
+ * cheap checks catch that class of failure so the caller can fall back
+ * to the heffalump classifier on the existing mega soup:
+ *
+ *   1. PARTITION — if intersection segments exist, BOTH meshes must have
+ *      non-empty inside AND outside groups. One line of counting catches
+ *      the exact silent failure above.
+ *   2. CHAIN CLOSURE — every intersection polyline must close on itself
+ *      or end on a mesh open boundary. A chain dying mid-mesh is a
+ *      guaranteed flood leak (or a missed near-coplanar intersection —
+ *      either way the hybrid's preconditions don't hold).
+ *   3. BARRIER CONSTRAINT — same-mesh triangles sharing a barrier edge
+ *      must classify to opposite sides. A leaked component violates this
+ *      along its entire barrier, so a small tolerance for numerical noise
+ *      still catches real leaks.
+ */
+
+
+/**
+ * Collect a mesh's open boundary edges (edges used by exactly one triangle).
+ * @returns {Array<{ v0: {x,y,z}, v1: {x,y,z} }>}
+ */
+function collectBoundaryEdges(tris) {
+	var edgeMap = {};
+	for (var i = 0; i < tris.length; i++) {
+		var tri = tris[i];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var ek = edgeKey(ks[e], ks[ne]);
+			if (!edgeMap[ek]) edgeMap[ek] = { count: 0, v0: vs[e], v1: vs[ne] };
+			edgeMap[ek].count++;
+		}
+	}
+	var edges = [];
+	for (var ek2 in edgeMap) {
+		if (edgeMap[ek2].count === 1) edges.push({ v0: edgeMap[ek2].v0, v1: edgeMap[ek2].v1 });
+	}
+	return edges;
+}
+
+/**
+ * 3D distance from a point to a segment.
+ */
+function pointSegDist(p, a, b) {
+	var abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+	var lenSq = abx * abx + aby * aby + abz * abz;
+	var t = lenSq < 1e-20 ? 0 : ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / lenSq;
+	if (t < 0) t = 0; else if (t > 1) t = 1;
+	var qx = a.x + t * abx - p.x;
+	var qy = a.y + t * aby - p.y;
+	var qz = a.z + t * abz - p.z;
+	return Math.sqrt(qx * qx + qy * qy + qz * qz);
+}
+
+function nearAnyBoundaryEdge(p, edges, tol) {
+	for (var i = 0; i < edges.length; i++) {
+		if (pointSegDist(p, edges[i].v0, edges[i].v1) <= tol) return true;
+	}
+	return false;
+}
+
+/**
+ * Verify the hybrid classification's post-conditions.
+ *
+ * @param {Array} megaSoup - Split triangles with mesh tags
+ * @param {Int8Array|Array<number>} triSides - Per-megaSoup-triangle side from
+ *        bmsClassify: 1 = inside, -1 = outside
+ * @param {Array} segments - Intersection segments (pool vertex endpoints)
+ * @param {Array<Array>} polylines - Raw chained polylines from bmsChain
+ * @param {Array} trisA - Original mesh A triangles
+ * @param {Array} trisB - Original mesh B triangles
+ * @returns {{
+ *   ok: boolean,
+ *   failures: Array<{ check: string, mesh: "A"|"B"|"both", detail: string }>,
+ *   counts: { A: { inside: number, outside: number }, B: { inside: number, outside: number } }
+ * }}
+ */
+function verifyBmsClassification(megaSoup, triSides, segments, polylines, trisA, trisB) {
+	var failures = [];
+
+	// ── Check 1: partition ──
+	var counts = { A: { inside: 0, outside: 0 }, B: { inside: 0, outside: 0 } };
+	for (var i = 0; i < megaSoup.length; i++) {
+		var bucket = counts[megaSoup[i].mesh];
+		if (!bucket) continue;
+		if (triSides[i] > 0) bucket.inside++;
+		else bucket.outside++;
+	}
+
+	if (segments && segments.length > 0) {
+		var meshKeys = ["A", "B"];
+		for (var mk = 0; mk < 2; mk++) {
+			var key = meshKeys[mk];
+			if (counts[key].inside === 0 || counts[key].outside === 0) {
+				failures.push({
+					check: "partition",
+					mesh: key,
+					detail: "mesh " + key + " did not partition: " + counts[key].inside +
+						" inside / " + counts[key].outside + " outside with " +
+						segments.length + " intersection segments"
+				});
+			}
+		}
+	}
+
+	// ── Check 2: chain closure ──
+	// An endpoint is fine if its chain closes on itself, it sits on a mesh
+	// open boundary, or ANOTHER chain's endpoint shares the same pool vertex
+	// (bmsChain splits sharp bends and junctions into separate polylines —
+	// the chain network continues there). Only a truly DANGLING endpoint
+	// (none of the above) indicates a barrier gap / missed intersection.
+	if (polylines && polylines.length > 0) {
+		var boundaryEdges = collectBoundaryEdges(trisA).concat(collectBoundaryEdges(trisB));
+		var avgEdge = Math.max(estimateAvgEdge(trisA), estimateAvgEdge(trisB));
+		var tol = Math.max(avgEdge * 0.01, 1e-9);
+
+		function endpointKey(p) {
+			return p.id !== undefined ? "id:" + p.id : vKey(p);
+		}
+
+		// Count how many chain endpoints land on each pool vertex
+		var endpointCount = {};
+		for (var ci2 = 0; ci2 < polylines.length; ci2++) {
+			var cpl = polylines[ci2];
+			if (!cpl || cpl.length < 2) continue;
+			var ka = endpointKey(cpl[0]);
+			var kb = endpointKey(cpl[cpl.length - 1]);
+			endpointCount[ka] = (endpointCount[ka] || 0) + 1;
+			endpointCount[kb] = (endpointCount[kb] || 0) + 1;
+		}
+
+		var dangling = 0;
+
+		for (var pi = 0; pi < polylines.length; pi++) {
+			var pl = polylines[pi];
+			if (!pl || pl.length < 2) continue;
+			var first = pl[0];
+			var last = pl[pl.length - 1];
+
+			var closed = first === last ||
+				(first.id !== undefined && first.id === last.id) ||
+				dist3(first, last) <= tol * 0.1;
+			if (closed) continue;
+
+			var ends = [first, last];
+			for (var ei2 = 0; ei2 < 2; ei2++) {
+				var ep = ends[ei2];
+				if (endpointCount[endpointKey(ep)] >= 2) continue; // joins another chain
+				if (nearAnyBoundaryEdge(ep, boundaryEdges, tol)) continue;
+				dangling++;
+			}
+		}
+
+		if (dangling > 0) {
+			failures.push({
+				check: "chainClosure",
+				mesh: "both",
+				detail: dangling + " dangling intersection chain endpoint(s) mid-mesh " +
+					"(not closed, not on a mesh boundary, not joining another chain)"
+			});
+		}
+	}
+
+	// ── Check 3: barrier constraint ──
+	if (segments && segments.length > 0) {
+		var barrierEdges = {};
+		for (var si = 0; si < segments.length; si++) {
+			var seg = segments[si];
+			if (seg.p0 === seg.p1) continue;
+			var k0 = vKey(seg.p0), k1 = vKey(seg.p1);
+			if (k0 === k1) continue;
+			barrierEdges[edgeKey(k0, k1)] = true;
+		}
+
+		// barrier edgeKey → per-mesh list of sides
+		var barrierSides = {};
+		for (var ti = 0; ti < megaSoup.length; ti++) {
+			var tri = megaSoup[ti];
+			var ks = [vKey(tri.v0), vKey(tri.v1), vKey(tri.v2)];
+			for (var e = 0; e < 3; e++) {
+				var ne = (e + 1) % 3;
+				var ek = edgeKey(ks[e], ks[ne]);
+				if (!barrierEdges[ek]) continue;
+				var entry = barrierSides[ek];
+				if (!entry) entry = barrierSides[ek] = { A: [], B: [] };
+				entry[tri.mesh].push(triSides[ti]);
+			}
+		}
+
+		var violations = { A: 0, B: 0 };
+		var checked = { A: 0, B: 0 };
+		for (var bek in barrierSides) {
+			var perMesh = barrierSides[bek];
+			for (var mi = 0; mi < 2; mi++) {
+				var mKey = mi === 0 ? "A" : "B";
+				var sides = perMesh[mKey];
+				if (sides.length < 2) continue;
+				checked[mKey]++;
+				var allSame = true;
+				for (var s2 = 1; s2 < sides.length; s2++) {
+					if (sides[s2] !== sides[0]) { allSame = false; break; }
+				}
+				if (allSame) violations[mKey]++;
+			}
+		}
+
+		for (var vm = 0; vm < 2; vm++) {
+			var vKey2 = vm === 0 ? "A" : "B";
+			if (checked[vKey2] === 0) continue;
+			// Tolerate numerical noise; a real flood leak violates the
+			// constraint along the leaked component's entire barrier.
+			var allowance = Math.max(2, checked[vKey2] * 0.01);
+			if (violations[vKey2] > allowance) {
+				failures.push({
+					check: "barrierConstraint",
+					mesh: vKey2,
+					detail: violations[vKey2] + " of " + checked[vKey2] +
+						" barrier edges on mesh " + vKey2 + " have same-side neighbours"
+				});
+			}
+		}
+	}
+
+	return { ok: failures.length === 0, failures: failures, counts: counts };
+}
+
+/**
+ * @module bms/heffalumpClassify
+ *
+ * "The Heffalump is elusive and hard to pin down, but once caught,
+ *  it turns out to be exactly what you needed."
+ *
+ * Barrier-only classification for meshes with defective topology
+ * (non-manifold edges, fragmented boundaries, cracks, holes).
+ *
+ * Instead of asking "does this component touch the boundary?" (which
+ * breaks when the boundary is fragmented into 411 pieces), the
+ * heffalump asks a simpler question:
+ *
+ *   "Does this component touch the intersection?"
+ *
+ *   YES → classify by barrier-normal (which side of the cut?)
+ *   NO  → outside (disconnected from the intersection = untouched)
+ *
+ * That's it. No boundary walk. No mesh edge polygon. No fan walk
+ * through non-manifold edges. Just barriers and normals.
+ * One bite at a time.
+ */
+
+
+// ── The Heffalump's trunk: ray casting for closed mesh classification ──
+//
+// When one mesh is a closed solid, we can definitively test if a point
+// is inside it by casting a ray and counting crossings. Odd = inside.
+// This works even when barriers don't form closed loops.
+
+/**
+ * Parity of a single axis-aligned ray against a closed mesh.
+ *
+ * Projects to the plane perpendicular to `axis`, counts triangles whose
+ * projection contains the point and whose surface lies on the positive side,
+ * and reports whether any of those hits landed suspiciously close to a
+ * projected triangle EDGE. An on-edge hit is counted by both adjacent
+ * triangles (or neither), which flips the parity — so the caller uses that
+ * flag to discard the axis rather than trust a coin toss.
+ *
+ * @returns {{ inside: boolean, shaky: boolean }}
+ */
+function parityAlongAxis(px, py, pz, tris, axis) {
+	// u,v = the projection plane; w = the ray direction.
+	var iu = axis === 0 ? 1 : 0;              // x-ray -> (y,z); else x is one axis
+	var iv = axis === 2 ? 1 : 2;              // z-ray -> (x,y); else z is the other
+	var P = [px, py, pz];
+	var pu = P[iu], pv = P[iv], pw = P[axis];
+
+	var crossings = 0;
+	var shaky = false;
+
+	for (var i = 0; i < tris.length; i++) {
+		var t = tris[i];
+		var A = [t.v0.x, t.v0.y, t.v0.z];
+		var B = [t.v1.x, t.v1.y, t.v1.z];
+		var C = [t.v2.x, t.v2.y, t.v2.z];
+
+		var au = A[iu], av = A[iv];
+		var bu = B[iu], bv = B[iv];
+		var cu = C[iu], cv = C[iv];
+
+		// Edge functions of the projected triangle.
+		var d1 = (pu - bu) * (av - bv) - (au - bu) * (pv - bv);
+		var d2 = (pu - cu) * (bv - cv) - (bu - cu) * (pv - cv);
+		var d3 = (pu - au) * (cv - av) - (cu - au) * (pv - av);
+
+		var hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+		var hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+		if (hasNeg && hasPos) continue; // outside the projected triangle
+
+		var det = (bv - cv) * (au - cu) + (cu - bu) * (av - cv);
+		if (Math.abs(det) < 1e-20) continue; // edge-on in this projection
+
+		// Scale-relative "is the point basically ON a projected edge?" test.
+		// |d| is twice the sub-triangle area, so |d| / |det| is a barycentric
+		// coordinate — comparing that to a small epsilon is scale-free.
+		var invAbsDet = 1 / Math.abs(det);
+		if (Math.abs(d1) * invAbsDet < 1e-9 ||
+			Math.abs(d2) * invAbsDet < 1e-9 ||
+			Math.abs(d3) * invAbsDet < 1e-9) {
+			shaky = true;
+		}
+
+		var invDet = 1.0 / det;
+		var u = ((bv - cv) * (pu - cu) + (cu - bu) * (pv - cv)) * invDet;
+		var v = ((cv - av) * (pu - cu) + (au - cu) * (pv - cv)) * invDet;
+		var w = 1.0 - u - v;
+		var hit = u * A[axis] + v * B[axis] + w * C[axis];
+
+		if (hit > pw) crossings++;
+	}
+
+	return { inside: (crossings % 2) === 1, shaky: shaky };
+}
+
+/**
+ * Is a point inside a CLOSED mesh?
+ *
+ * Three-axis majority vote, not a single +Z ray.
+ *
+ * A single axis-aligned parity ray is not robust: when it grazes an edge shared
+ * by two triangles the hit is counted twice or not at all, and the parity — and
+ * therefore the answer — flips. The classic path guards this with three
+ * deterministic jitters (see classifyTriangles.js JITTERS); this function had
+ * no guard at all, which made the heffalump's closed-mesh test less robust than
+ * the path it exists to back up.
+ *
+ * Each axis reports whether any of its hits landed on a projected edge. Shaky
+ * axes are discarded, and the surviving axes vote. If every axis is shaky the
+ * vote is taken anyway — a wrong answer beats no answer, and the caller's
+ * majority-snap pass can still correct a lone straggler.
+ */
+function isPointInsideClosedMesh(px, py, pz, tris) {
+	var inside = 0, total = 0;
+	var shakyInside = 0, shakyTotal = 0;
+
+	for (var axis = 0; axis < 3; axis++) {
+		var r = parityAlongAxis(px, py, pz, tris, axis);
+		if (r.inside) shakyInside++;
+		shakyTotal++;
+		if (r.shaky) continue;
+		if (r.inside) inside++;
+		total++;
+	}
+
+	if (total > 0) return inside * 2 > total;
+	return shakyInside * 2 > shakyTotal;
+}
+
+// ── The Heffalump's tail: nearest-surface classification for open meshes ──
+//
+// When the other mesh is OPEN, we can't ray cast (no closed volume).
+// Instead, find the nearest triangle on the open surface and check
+// which side the point is on. Normal direction = outside.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⚠️  AI-AGENT NOTE — UNVERIFIED CHANGE  (2026-06-19, Claude, Kirra dev session)
+//
+// AUDIENCE: a future AI coding agent (or human) debugging open-mesh classification.
+//
+// WHAT CHANGED: `isPointInsideOpenSurface()` (defined just below) — the test for
+// "which side of an OPEN surface is this point on?", used by the heffalump
+// classifier when the OTHER mesh is open (classification Method 11). The
+// nearest-triangle search was changed from CENTROID distance to TRUE
+// CLOSEST-POINT-ON-TRIANGLE distance (Ericson §5.1.5 — see `closestPointOnTriangle`
+// added directly below this note). `closestPointOnTriangle` is NEW code.
+//
+// BEFORE (original — centroid-nearest; restore this to revert):
+//     for each tri:
+//         c = centroid(tri)
+//         d = |point - c|^2
+//         if d < bestDist: bestDist = d; bestDot = (point - c) · triNormal
+//     return bestDot < 0
+//
+// NOW (closest-point-nearest):
+//     for each tri:
+//         q = closestPointOnTriangle(point, tri)
+//         d = |point - q|^2
+//         if d < bestDist: bestDist = d; bestDot = (point - q) · triNormal
+//     return bestDot < 0
+//
+// WHY: on an undulating open surface (terrain) the nearest CENTROID is often a
+// distant, differently-tilted triangle, which flips the side sign. Closest-point
+// finds the triangle the point is actually under/over.
+//
+// VERIFICATION STATUS:  ⚠ UNTESTED ON REAL GEOMETRY. Only synthetic unit tests
+// were run (closestPointOnTriangle math verified; side test correct on a few
+// synthetic open surfaces). It was NOT the fix for the symptom that prompted it
+// (a terrain mesh under-splitting against a below-surface extrusion — that turned
+// out to be the CLOSED-mesh ray-cast path `isPointInsideClosedMesh`, NOT this
+// function). This change was kept as a likely-correct improvement, not a proven one.
+//
+// IF YOU HIT AN OPEN-MESH CLASSIFICATION REGRESSION:  this is the most recent
+// UNPROVEN edit on that path — REASSESS / REVERT THIS FIRST. To revert: restore
+// the centroid loop shown in BEFORE, and delete `closestPointOnTriangle` if it is
+// unused elsewhere.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Closest point on triangle (a,b,c) to point p — Ericson, "Real-Time Collision
+// Detection" §5.1.5. Returns {x,y,z}. Used by the open-surface side test so the
+// "nearest triangle" is the one ACTUALLY under/over the point, not the one with
+// the nearest centroid (which an undulating surface throws off badly).
+function closestPointOnTriangle(px, py, pz, a, b, c) {
+	var abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+	var acx = c.x - a.x, acy = c.y - a.y, acz = c.z - a.z;
+	var apx = px - a.x, apy = py - a.y, apz = pz - a.z;
+	var d1 = abx * apx + aby * apy + abz * apz;
+	var d2 = acx * apx + acy * apy + acz * apz;
+	if (d1 <= 0 && d2 <= 0) return { x: a.x, y: a.y, z: a.z };
+
+	var bpx = px - b.x, bpy = py - b.y, bpz = pz - b.z;
+	var d3 = abx * bpx + aby * bpy + abz * bpz;
+	var d4 = acx * bpx + acy * bpy + acz * bpz;
+	if (d3 >= 0 && d4 <= d3) return { x: b.x, y: b.y, z: b.z };
+
+	var vc = d1 * d4 - d3 * d2;
+	if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+		var v = d1 / (d1 - d3);
+		return { x: a.x + v * abx, y: a.y + v * aby, z: a.z + v * abz };
+	}
+
+	var cpx = px - c.x, cpy = py - c.y, cpz = pz - c.z;
+	var d5 = abx * cpx + aby * cpy + abz * cpz;
+	var d6 = acx * cpx + acy * cpy + acz * cpz;
+	if (d6 >= 0 && d5 <= d6) return { x: c.x, y: c.y, z: c.z };
+
+	var vb = d5 * d2 - d1 * d6;
+	if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+		var w = d2 / (d2 - d6);
+		return { x: a.x + w * acx, y: a.y + w * acy, z: a.z + w * acz };
+	}
+
+	var va = d3 * d6 - d5 * d4;
+	if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+		var w2 = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+		return { x: b.x + w2 * (c.x - b.x), y: b.y + w2 * (c.y - b.y), z: b.z + w2 * (c.z - b.z) };
+	}
+
+	// Inside the face region — barycentric combination.
+	var denom = 1 / (va + vb + vc);
+	var vv = vb * denom, ww = vc * denom;
+	return { x: a.x + abx * vv + acx * ww, y: a.y + aby * vv + acy * ww, z: a.z + abz * vv + acz * ww };
+}
+
+function isPointInsideOpenSurface(px, py, pz, tris) {
+	var bestDist = Infinity;
+	var bestDot = 0;
+
+	for (var i = 0; i < tris.length; i++) {
+		var tri = tris[i];
+		// Use the TRUE closest point on the triangle, not the centroid. On an
+		// undulating open surface (terrain) the nearest centroid is frequently a
+		// distant, differently-tilted triangle, which flips the side test and
+		// misclassifies an extrusion sitting below/grazing the surface.
+		var cp = closestPointOnTriangle(px, py, pz, tri.v0, tri.v1, tri.v2);
+		var dx = px - cp.x, dy = py - cp.y, dz = pz - cp.z;
+		var d = dx * dx + dy * dy + dz * dz;
+
+		if (d < bestDist) {
+			bestDist = d;
+			// Triangle normal (unnormalized is fine — we only care about sign)
+			var e1x = tri.v1.x - tri.v0.x, e1y = tri.v1.y - tri.v0.y, e1z = tri.v1.z - tri.v0.z;
+			var e2x = tri.v2.x - tri.v0.x, e2y = tri.v2.y - tri.v0.y, e2z = tri.v2.z - tri.v0.z;
+			var nx = e1y * e2z - e1z * e2y;
+			var ny = e1z * e2x - e1x * e2z;
+			var nz = e1x * e2y - e1y * e2x;
+			// Side from the closest point: in the face interior this is the true
+			// perpendicular side; on an edge/vertex it is the nearest-feature side.
+			bestDot = dx * nx + dy * ny + dz * nz;
+		}
+	}
+	// Opposite to normal direction = inside (below the surface)
+	return bestDot < 0;
+}
+
+// ── The Heffalump's feet: per-component boundary walk extraction ──
+
+function extractBoundaryWalk(comp, megaSoup, barrierEdges) {
+	var directedCount = {};
+	var directedVerts = {};
+
+	for (var i = 0; i < comp.triIndices.length; i++) {
+		var tri = megaSoup[comp.triIndices[i]];
+		var vs = [tri.v0, tri.v1, tri.v2];
+		var ks = [vKey(vs[0]), vKey(vs[1]), vKey(vs[2])];
+
+		for (var e = 0; e < 3; e++) {
+			var ne = (e + 1) % 3;
+			var dk = ks[e] + "|" + ks[ne];
+			if (!directedCount[dk]) {
+				directedCount[dk] = 0;
+				directedVerts[dk] = { fromVert: vs[e], toVert: vs[ne] };
+			}
+			directedCount[dk]++;
+		}
+	}
+
+	var halfEdges = [];
+	for (var dk2 in directedCount) {
+		var parts = dk2.split("|");
+		var fromK = parts[0];
+		var toK = parts[1];
+		var reverseK = toK + "|" + fromK;
+		var ek = edgeKey(fromK, toK);
+
+		var isBarrier = !!barrierEdges[ek];
+		var reverseExists = !!directedCount[reverseK];
+
+		if (!reverseExists || isBarrier) {
+			var verts = directedVerts[dk2];
+			halfEdges.push({
+				from: fromK, to: toK,
+				fromVert: verts.fromVert, toVert: verts.toVert,
+				type: isBarrier ? "intersection" : "walk"
+			});
+		}
+	}
+
+	if (halfEdges.length === 0) return [];
+
+	var outgoing = {};
+	for (var hi = 0; hi < halfEdges.length; hi++) {
+		var fk = halfEdges[hi].from;
+		if (!outgoing[fk]) outgoing[fk] = [];
+		outgoing[fk].push(hi);
+	}
+
+	var used = new Array(halfEdges.length);
+	for (var u = 0; u < used.length; u++) used[u] = false;
+
+	var allSegments = [];
+
+	for (var start = 0; start < halfEdges.length; start++) {
+		if (used[start]) continue;
+
+		var loopEdges = [];
+		var currIdx = start;
+		used[currIdx] = true;
+		loopEdges.push(currIdx);
+
+		var currVert = halfEdges[currIdx].to;
+		var maxIter = halfEdges.length + 1;
+		var iter = 0;
+
+		while (currVert !== halfEdges[start].from && iter < maxIter) {
+			iter++;
+			var candidates = outgoing[currVert];
+			if (!candidates || candidates.length === 0) break;
+
+			var bestIdx = -1;
+			for (var ci = 0; ci < candidates.length; ci++) {
+				if (!used[candidates[ci]]) { bestIdx = candidates[ci]; break; }
+			}
+			if (bestIdx === -1) break;
+
+			used[bestIdx] = true;
+			loopEdges.push(bestIdx);
+			currVert = halfEdges[bestIdx].to;
+		}
+
+		if (loopEdges.length < 2) continue;
+
+		var segType = halfEdges[loopEdges[0]].type;
+		var segVerts = [halfEdges[loopEdges[0]].fromVert, halfEdges[loopEdges[0]].toVert];
+
+		for (var li = 1; li < loopEdges.length; li++) {
+			var he = halfEdges[loopEdges[li]];
+			if (he.type === segType) {
+				segVerts.push(he.toVert);
+			} else {
+				allSegments.push({ verts: segVerts, type: segType });
+				segType = he.type;
+				segVerts = [he.fromVert, he.toVert];
+			}
+		}
+		allSegments.push({ verts: segVerts, type: segType });
+	}
+
+	return allSegments;
+}
+
+// ── The Heffalump itself ──
+
+/**
+ * Barrier-only classification for meshes with defective topology.
+ *
+ * @param {Array} megaSoup - Split triangles with mesh tags
+ * @param {Array} segments - Intersection segments with pool vertex endpoints
+ * @param {Array} trisA - Original mesh A triangles (unused — heffalump doesn't need boundaries)
+ * @param {Array} trisB - Original mesh B triangles (unused — heffalump doesn't need boundaries)
+ * @returns {{
+ *   aInside: Array, aOutside: Array, bInside: Array, bOutside: Array,
+ *   componentWalks: Array
+ * }}
+ */
+function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
+	var n = megaSoup.length;
+
+	// ── Step 1: Build barrier edges from intersection segments ──
+	var barrierEdges = {};
+	for (var si = 0; si < segments.length; si++) {
+		var seg = segments[si];
+		if (seg.p0 === seg.p1) continue;
+		var k0 = vKey(seg.p0), k1 = vKey(seg.p1);
+		if (k0 === k1) continue;
+		barrierEdges[edgeKey(k0, k1)] = true;
+	}
+
+	// ── Step 2: Build edge adjacency ──
+	var edgeToTris = {};
+	for (var ei = 0; ei < n; ei++) {
+		var eTri = megaSoup[ei];
+		var eKs = [vKey(eTri.v0), vKey(eTri.v1), vKey(eTri.v2)];
+		for (var ee = 0; ee < 3; ee++) {
+			var ene = (ee + 1) % 3;
+			var eek = edgeKey(eKs[ee], eKs[ene]);
+			if (!edgeToTris[eek]) edgeToTris[eek] = [];
+			edgeToTris[eek].push(ei);
+		}
+	}
+
+	// ── Step 3: Build neighbors excluding barriers ──
+	var neighbors = new Array(n);
+	for (var ni = 0; ni < n; ni++) neighbors[ni] = [];
+	for (var ek3 in edgeToTris) {
+		if (barrierEdges[ek3]) continue;
+		var triList = edgeToTris[ek3];
+		for (var a = 0; a < triList.length; a++) {
+			for (var b = a + 1; b < triList.length; b++) {
+				neighbors[triList[a]].push(triList[b]);
+				neighbors[triList[b]].push(triList[a]);
+			}
+		}
+	}
+
+	// ── Step 4: Flood fill components ──
+	var componentId = new Int32Array(n);
+	for (var ci = 0; ci < n; ci++) componentId[ci] = -1;
+
+	var components = [];
+	var nextCompId = 0;
+
+	for (var seed = 0; seed < n; seed++) {
+		if (componentId[seed] >= 0) continue;
+		var meshTag = megaSoup[seed].mesh;
+
+		var compId = nextCompId++;
+		var triIndices = [];
+		var queue = [seed];
+		componentId[seed] = compId;
+		var head = 0;
+
+		while (head < queue.length) {
+			var curr = queue[head++];
+			triIndices.push(curr);
+			var nbrs = neighbors[curr];
+			for (var nbi = 0; nbi < nbrs.length; nbi++) {
+				var nb = nbrs[nbi];
+				if (componentId[nb] >= 0) continue;
+				if (megaSoup[nb].mesh !== meshTag) continue;
+				componentId[nb] = compId;
+				queue.push(nb);
+			}
+		}
+
+		components.push({ id: compId, mesh: meshTag, triIndices: triIndices, triCount: triIndices.length });
+	}
+
+	// ── Step 5: Detect open/closed per mesh ──
+	// Use a practical "closed enough" threshold — meshes with a few
+	// defect edges are still functionally closed for ray casting.
+	var statsA = countOpenEdges(trisA);
+	var statsB = countOpenEdges(trisB);
+	var isClosedA = statsA.openEdges < Math.max(10, statsA.total * 0.02);
+	var isClosedB = statsB.openEdges < Math.max(10, statsB.total * 0.02);
+
+	// ── Step 6: The Heffalump's question — one bite at a time ──
+	//
+	// When the other mesh is CLOSED, classify each triangle individually
+	// by ray casting. When the other mesh is OPEN, use the per-triangle
+	// nearest-surface test.
+	//
+	// COMPONENT-MAJORITY SNAP (v0.5.8): per-triangle tests are coin-flip
+	// for needle/tall sub-triangles whose centroids hug the other surface —
+	// lone flipped triangles survive as visible "spurs" (KNOWN_ISSUES #21).
+	// After voting, if ≥ snapThreshold of a component agrees, the stragglers
+	// snap to the majority. Genuinely mixed components (e.g. a flood-fill
+	// component spanning a barrier gap — the very case the heffalump exists
+	// for) stay per-triangle, because their vote is nowhere near unanimous.
+
+	var snapThreshold = 0.9;
+	// Max absolute minority the majority-snap is allowed to collapse. The snap
+	// exists to erase a FEW spur stragglers; it must never bulldoze a real region.
+	var maxSnapStragglers = 8;
+
+	var aInside = [], aOutside = [];
+	var bInside = [], bOutside = [];
+	var componentWalks = [];
+
+	for (var gi = 0; gi < components.length; gi++) {
+		var comp = components[gi];
+		if (comp.triCount === 0) continue;
+
+		var otherIsClosed = comp.mesh === "A" ? isClosedB : isClosedA;
+		var otherTris = comp.mesh === "A" ? trisB : trisA;
+		var insideArr = comp.mesh === "A" ? aInside : bInside;
+		var outsideArr = comp.mesh === "A" ? aOutside : bOutside;
+
+		// Per-triangle vote — trunk (ray cast) or tail (nearest surface)
+		var flags = new Uint8Array(comp.triIndices.length);
+		var insideVotes = 0;
+		for (var ri = 0; ri < comp.triIndices.length; ri++) {
+			var rt = megaSoup[comp.triIndices[ri]];
+			var px = (rt.v0.x + rt.v1.x + rt.v2.x) / 3;
+			var py = (rt.v0.y + rt.v1.y + rt.v2.y) / 3;
+			var pz = (rt.v0.z + rt.v1.z + rt.v2.z) / 3;
+			var isIn = otherIsClosed
+				? isPointInsideClosedMesh(px, py, pz, otherTris)
+				: isPointInsideOpenSurface(px, py, pz, otherTris);
+			if (isIn) { flags[ri] = 1; insideVotes++; }
+		}
+
+		// Majority snap — only collapse a TINY absolute minority (genuine spur
+		// stragglers, the case this was added for in v0.5.8). NEVER snap away a
+		// LARGE minority: a legitimate region (e.g. 1200+ terrain tris inside a
+		// prism) that is flood-fill-connected to the outside reads as a low ratio,
+		// and an ungated snap bulldozes the whole region to one side. Gate on the
+		// absolute count, not the ratio alone. (Confirmed on real data 2026-06-19:
+		// ungated → 0 terrain tris inside; gated → 1204, matching manual classify.)
+		var minority = Math.min(insideVotes, comp.triIndices.length - insideVotes);
+		var ratio = insideVotes / comp.triIndices.length;
+		var snapTo = -1; // -1 = keep per-triangle results
+		if (minority <= maxSnapStragglers) {
+			if (ratio >= snapThreshold) snapTo = 1;
+			else if (ratio <= 1 - snapThreshold) snapTo = 0;
+		}
+
+		for (var pi = 0; pi < comp.triIndices.length; pi++) {
+			var pt = megaSoup[comp.triIndices[pi]];
+			var finalIn = snapTo === -1 ? flags[pi] === 1 : snapTo === 1;
+			if (finalIn) {
+				insideArr.push({ v0: pt.v0, v1: pt.v1, v2: pt.v2 });
+			} else {
+				outsideArr.push({ v0: pt.v0, v1: pt.v1, v2: pt.v2 });
+			}
+		}
+
+		// Component walk — still useful for visualization
+		var walkSegs1 = extractBoundaryWalk(comp, megaSoup, barrierEdges);
+		componentWalks.push({
+			mesh: comp.mesh, side: "mixed", triCount: comp.triCount,
+			segments: walkSegs1
+		});
+	}
+
+	console.log("[heffalump] Classification: A: " + aInside.length + " inside, " +
+		aOutside.length + " outside. B: " + bInside.length + " inside, " +
+		bOutside.length + " outside. Components: " + components.length + ".");
+
+	return {
+		aInside: aInside, aOutside: aOutside, bInside: bInside, bOutside: bOutside,
+		componentWalks: componentWalks
+	};
+}
+
+// ── Decision tree: should we send the heffalump? ──
+
+/**
+ * Detect whether a mesh pair needs the heffalump classifier.
+ * Non-manifold edges = defective boundary = heffalump territory.
+ *
+ * @param {Array} trisA
+ * @param {Array} trisB
+ * @returns {boolean}
+ */
+function shouldUseHeffalump(trisA, trisB) {
+	var statsA = countOpenEdges(trisA);
+	var statsB = countOpenEdges(trisB);
+	return statsA.overShared > 0 || statsB.overShared > 0;
+}
+
+/**
+ * @module repair/neighbourhoodPool
+ *
+ * Neighbourhood-weld vertex identity pool.
+ *
+ * A robust replacement for toFixed()-string vertex keys when you need "are these
+ * two vertices the same point (within eps)?" identity. Plain grid quantisation
+ * (round(x/eps)) MISSES welds when two near-coincident points straddle a cell
+ * boundary; toFixed() has the same boundary bug (1.0000004 -> "1.000000" but
+ * 1.0000006 -> "1.000001"). This pool buckets by cell but, before minting a new
+ * id, searches the 27 neighbouring cells for an existing vertex within eps — so
+ * boundary-straddling points still resolve to one id.
+ *
+ * Identity only. The pool stores the first coordinate seen for each id and never
+ * moves geometry; callers decide whether to emit original or representative coords.
+ *
+ * NOTE: this is a tolerance-weld, deliberately NOT exact-rational identity — two
+ * floats that should be one vertex are almost never bit-identical, so exact
+ * equality would split them. Use exact predicates (orient3d/determinant3) for
+ * orientation SIGNS, not for fuzzy identity.
+ */
+
+/**
+ * @param {number} eps - Weld radius in metres. Two vertices within eps collapse to one id.
+ * @returns {{ id: (x:number,y:number,z:number)=>number, points: Array<{x,y,z}>, size: ()=>number }}
+ */
+function makeWeldPool(eps) {
+	var cell = eps > 0 ? eps : 1e-6; // bucket size == weld radius; ±1 cell search covers the eps ball
+	var inv = 1 / cell;
+	var grid = new Map(); // "gx,gy,gz" -> array of vertex ids
+	var pts = [];
+	var eps2 = cell * cell;
+
+	function id(x, y, z) {
+		var gx = Math.floor(x * inv), gy = Math.floor(y * inv), gz = Math.floor(z * inv);
+		for (var dx = -1; dx <= 1; dx++) {
+			for (var dy = -1; dy <= 1; dy++) {
+				for (var dz = -1; dz <= 1; dz++) {
+					var arr = grid.get((gx + dx) + "," + (gy + dy) + "," + (gz + dz));
+					if (!arr) continue;
+					for (var i = 0; i < arr.length; i++) {
+						var p = pts[arr[i]];
+						var ddx = p.x - x, ddy = p.y - y, ddz = p.z - z;
+						if (ddx * ddx + ddy * ddy + ddz * ddz <= eps2) return arr[i];
+					}
+				}
+			}
+		}
+		var nid = pts.length;
+		pts.push({ x: x, y: y, z: z });
+		var hk = gx + "," + gy + "," + gz;
+		var b = grid.get(hk);
+		if (!b) { b = []; grid.set(hk, b); }
+		b.push(nid);
+		return nid;
+	}
+
+	return { id: id, points: pts, size: function () { return pts.length; } };
+}
+
+/**
+ * Estimate a sensible weld epsilon from a soup's mean edge length (~1e-6 of it),
+ * for callers that don't supply their own tolerance. Sampled over the first N tris.
+ *
+ * @param {Array<{ v0, v1, v2 }>} soup
+ * @returns {number} A small positive epsilon in metres.
+ */
+function estimateWeldEps(soup) {
+	if (!soup || soup.length === 0) return 1e-6;
+	var n = Math.min(soup.length, 200);
+	var sum = 0, cnt = 0;
+	for (var i = 0; i < n; i++) {
+		var t = soup[i];
+		sum += edgeLen(t.v0, t.v1) + edgeLen(t.v1, t.v2) + edgeLen(t.v2, t.v0);
+		cnt += 3;
+	}
+	var avg = cnt > 0 ? sum / cnt : 1;
+	var eps = avg * 1e-6;
+	return eps > 0 ? eps : 1e-6;
+}
+
+function edgeLen(a, b) {
+	var dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+	return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/**
+ * @module repair/resolveTJunctionsHoleFree
+ *
+ * Hole-free T-junction resolution.
+ *
+ * A T-junction is a vertex that lies on the interior of another triangle's edge
+ * without splitting it — a crack that breaks watertightness and z-fights on render.
+ *
+ * The existing resolveTJunctions() keys vertices with toFixed(6) STRINGS and samples
+ * each edge independently, so two triangles sharing an edge can disagree about that
+ * edge's split points and the mesh tears open. This variant is HOLE-FREE by
+ * construction:
+ *
+ *   1. Weld the soup to a shared neighbourhood-pool integer identity. Now an edge
+ *      (a,b) is the SAME pair of ids for both triangles that share it.
+ *   2. For every triangle, collect the interior vertices that lie on its three edges
+ *      (from the single shared vertex set). Both triangles across a shared edge find
+ *      the IDENTICAL set on that edge -> they split it the same way -> no crack.
+ *   3. Re-triangulate each affected triangle with those on-edge vertices via a
+ *      local-frame Delaunay triangulation (never a corner fan, which would emit
+ *      collinear zero-area slivers), keeping only sub-triangles inside the parent
+ *      and re-orienting each to the source normal.
+ *
+ * Only EXISTING vertices are inserted (no new points are minted), so the pass
+ * converges in a couple of iterations; a small bounded loop mops up the rare case
+ * where a fresh interior diagonal itself grazes a vertex.
+ *
+ * Identity is a neighbourhood weld, not toFixed and not exact rationals — welding is
+ * a tolerance operation. The on-edge test is a distance-to-segment tolerance test;
+ * exact rationals do not apply to "close enough to be a T-junction".
+ */
+
+
+/**
+ * @param {Array<{ v0:{x,y,z}, v1:{x,y,z}, v2:{x,y,z} }>} soup - Triangle soup
+ * @param {number} [tolerance=1e-4] - Weld + on-edge tolerance in metres. Pass the
+ *                                    caller's own weld epsilon for predictable results.
+ * @param {number} [maxPasses=4] - Safety bound on the convergence loop.
+ * @returns {Array<{ v0:{x,y,z}, v1:{x,y,z}, v2:{x,y,z} }>} New soup, T-junctions resolved.
+ */
+function resolveTJunctionsHoleFree(soup, tolerance, maxPasses) {
+	if (!soup || soup.length === 0) return soup;
+	var tol = tolerance > 0 ? tolerance : 1e-4;
+	var passes = maxPasses > 0 ? maxPasses : 4;
+	var tol2 = tol * tol;
+
+	var work = soup;
+	for (var pass = 0; pass < passes; pass++) {
+		// (1) shared identity
+		var pool = makeWeldPool(tol);
+		var F = new Array(work.length);
+		for (var i = 0; i < work.length; i++) {
+			var t = work[i];
+			F[i] = [
+				pool.id(t.v0.x, t.v0.y, t.v0.z),
+				pool.id(t.v1.x, t.v1.y, t.v1.z),
+				pool.id(t.v2.x, t.v2.y, t.v2.z)
+			];
+		}
+		var V = pool.points;
+
+		// Vertex grid for on-edge queries. The cell MUST be sized to the mean edge
+		// length, NOT the tolerance: interiorOnEdge walks along each edge in steps of
+		// one cell, so a tol-sized cell (e.g. 0.016 m) makes a 50 m edge take ~3000
+		// steps (measured 25 s on an 876-tri piece). A mean-edge cell keeps it to a
+		// handful of steps per edge while still bucketing ~1 vertex per cell.
+		var eSum = 0, eCnt = 0, nSamp = Math.min(work.length, 300);
+		for (var es = 0; es < nSamp; es++) {
+			var et = work[es];
+			eSum += edist(et.v0, et.v1) + edist(et.v1, et.v2) + edist(et.v2, et.v0);
+			eCnt += 3;
+		}
+		var avgEdge = eCnt > 0 ? eSum / eCnt : 1;
+		var gcell = Math.max(avgEdge, tol * 4, 1e-6);
+		var ginv = 1 / gcell;
+		var vgrid = new Map();
+		for (var vi = 0; vi < V.length; vi++) {
+			var gk = Math.floor(V[vi].x * ginv) + "," + Math.floor(V[vi].y * ginv) + "," + Math.floor(V[vi].z * ginv);
+			var gb = vgrid.get(gk);
+			if (!gb) { gb = []; vgrid.set(gk, gb); }
+			gb.push(vi);
+		}
+
+		function interiorOnEdge(a, b) {
+			var A = V[a], B = V[b];
+			var dx = B.x - A.x, dy = B.y - A.y, dz = B.z - A.z;
+			var L2 = dx * dx + dy * dy + dz * dz;
+			if (L2 < 1e-20) return null;
+			var hits = null;
+			// Walk ALONG the segment (spacing <= one grid cell) and test the 27-cell
+			// neighbourhood of each sample. This is O(length/cell), not O(bbox area) —
+			// a long diagonal edge would otherwise sweep hundreds of thousands of cells.
+			var L = Math.sqrt(L2);
+			var steps = Math.ceil(L * ginv) + 1;
+			var seen = null; // lazily allocated Set of vertex ids already tested
+			for (var st = 0; st <= steps; st++) {
+				var f = st / steps;
+				var sx = A.x + f * dx, sy = A.y + f * dy, sz = A.z + f * dz;
+				var bx = Math.floor(sx * ginv), by = Math.floor(sy * ginv), bz = Math.floor(sz * ginv);
+				for (var ox = -1; ox <= 1; ox++) {
+					for (var oy = -1; oy <= 1; oy++) {
+						for (var oz = -1; oz <= 1; oz++) {
+							var arr = vgrid.get((bx + ox) + "," + (by + oy) + "," + (bz + oz));
+							if (!arr) continue;
+							for (var k = 0; k < arr.length; k++) {
+								var v = arr[k];
+								if (v === a || v === b) continue;
+								if (seen && seen.has(v)) continue;
+								if (!seen) seen = new Set();
+								seen.add(v);
+								var P = V[v];
+								var s = ((P.x - A.x) * dx + (P.y - A.y) * dy + (P.z - A.z) * dz) / L2;
+								if (s <= 1e-9 || s >= 1 - 1e-9) continue; // strictly interior
+								var px = A.x + s * dx, py = A.y + s * dy, pz = A.z + s * dz;
+								var ex = P.x - px, ey = P.y - py, ez = P.z - pz;
+								if (ex * ex + ey * ey + ez * ez > tol2) continue;
+								if (!hits) hits = [];
+								// Keep the perpendicular projection (px,py,pz) — the point EXACTLY on
+								// this edge. collect() inserts that, not the neighbour's raw vertex.
+								hits.push({ v: v, s: s, sx: px, sy: py, sz: pz });
+							}
+						}
+					}
+				}
+			}
+			if (hits) hits.sort(function (p, q) { return p.s - q.s; });
+			return hits;
+		}
+
+		// (2)+(3)
+		var out = [];
+		var splits = 0;
+		for (var fi = 0; fi < F.length; fi++) {
+			var f = F[fi];
+			if (f[0] === f[1] || f[1] === f[2] || f[2] === f[0]) continue; // drop welded-degenerate
+			var e01 = interiorOnEdge(f[0], f[1]);
+			var e12 = interiorOnEdge(f[1], f[2]);
+			var e20 = interiorOnEdge(f[2], f[0]);
+			if (!e01 && !e12 && !e20) {
+				out.push({ v0: V[f[0]], v1: V[f[1]], v2: V[f[2]] });
+				continue;
+			}
+			var steiner = [];
+			collect(e01, V, steiner);
+			collect(e12, V, steiner);
+			collect(e20, V, steiner);
+			var sub = retriangulate(V[f[0]], V[f[1]], V[f[2]], steiner);
+			for (var si = 0; si < sub.length; si++) out.push(sub[si]);
+			splits++;
+		}
+
+		work = out;
+		if (splits === 0) break;
+	}
+	return work;
+}
+
+function edist(a, b) {
+	var dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+	return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function collect(hits, V, into) {
+	if (!hits) return;
+	// Insert each on-edge hit SNAPPED exactly onto the host edge (its perpendicular
+	// projection sx,sy,sz), NOT the neighbour's raw vertex. A hanging vertex a fraction
+	// off the edge — the norm for boolean/clip seams, where the neighbour's vertex lands
+	// within tolerance of but not ON the edge — would otherwise leave the re-triangulated
+	// fan non-conforming: near-collinear points make Delaunay emit slivers, some fall just
+	// outside the parent and get dropped (holes), and the point stays a T-junction on the
+	// new sub-edges. Snapping puts it dead on the edge so the fan tiles the parent exactly.
+	// The snap moves the point by ≤ tol, so the next pass's weld pool re-merges it with the
+	// neighbour's vertex → hole-free. Shared-edge case stays consistent: both incident
+	// triangles project the same neighbour vertex to the same segment point.
+	for (var i = 0; i < hits.length; i++) into.push({ x: hits[i].sx, y: hits[i].sy, z: hits[i].sz });
+}
+
+/**
+ * Re-triangulate one triangle with points that lie on its edges, via a local-frame
+ * Delaunay triangulation. Keeps sub-triangles whose centroid is inside the parent,
+ * drops sub-tolerance slivers, and orients each sub-triangle to the source normal.
+ */
+function retriangulate(v0, v1, v2, steiner) {
+	if (!steiner || steiner.length === 0) return [{ v0: v0, v1: v1, v2: v2 }];
+
+	var e1x = v1.x - v0.x, e1y = v1.y - v0.y, e1z = v1.z - v0.z;
+	var e2x = v2.x - v0.x, e2y = v2.y - v0.y, e2z = v2.z - v0.z;
+	var e1L = Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+	if (e1L < 1e-12) return [{ v0: v0, v1: v1, v2: v2 }];
+	var ux = e1x / e1L, uy = e1y / e1L, uz = e1z / e1L;
+
+	// source normal (unnormalised) for orientation
+	var snx = e1y * e2z - e1z * e2y;
+	var sny = e1z * e2x - e1x * e2z;
+	var snz = e1x * e2y - e1y * e2x;
+	var nL = Math.sqrt(snx * snx + sny * sny + snz * snz);
+	if (nL < 1e-12) return [{ v0: v0, v1: v1, v2: v2 }];
+
+	var vx = sny * uz - snz * uy, vy = snz * ux - snx * uz, vz = snx * uy - sny * ux;
+	var vL = Math.sqrt(vx * vx + vy * vy + vz * vz);
+	if (vL < 1e-12) return [{ v0: v0, v1: v1, v2: v2 }];
+	vx /= vL; vy /= vL; vz /= vL;
+
+	function toLocal(p) {
+		var dx = p.x - v0.x, dy = p.y - v0.y, dz = p.z - v0.z;
+		return [dx * ux + dy * uy + dz * uz, dx * vx + dy * vy + dz * vz];
+	}
+	var l0 = toLocal(v0), l1 = toLocal(v1), l2 = toLocal(v2);
+	var baryD = (l1[1] - l2[1]) * (l0[0] - l2[0]) + (l2[0] - l1[0]) * (l0[1] - l2[1]);
+	if (Math.abs(baryD) < 1e-12) return [{ v0: v0, v1: v1, v2: v2 }];
+	function bary(pu, pv) {
+		var a = ((l1[1] - l2[1]) * (pu - l2[0]) + (l2[0] - l1[0]) * (pv - l2[1])) / baryD;
+		var b = ((l2[1] - l0[1]) * (pu - l2[0]) + (l0[0] - l2[0]) * (pv - l2[1])) / baryD;
+		return [a, b, 1 - a - b];
+	}
+	var triArea = Math.abs(baryD) * 0.5;
+
+	var pts = [v0, v1, v2];
+	for (var s = 0; s < steiner.length; s++) pts.push(steiner[s]);
+	var n = pts.length;
+	var coords = new Float64Array(n * 2);
+	for (var j = 0; j < n; j++) {
+		var lj = toLocal(pts[j]);
+		coords[j * 2] = lj[0];
+		coords[j * 2 + 1] = lj[1];
+	}
+
+	var del;
+	try { del = new Delaunator(coords); }
+	catch (e) { return [{ v0: v0, v1: v1, v2: v2 }]; }
+
+	var res = [];
+	var dt = del.triangles;
+	for (var k = 0; k < dt.length; k += 3) {
+		var a = dt[k], b = dt[k + 1], c = dt[k + 2];
+		var cu = (coords[a * 2] + coords[b * 2] + coords[c * 2]) / 3;
+		var cv = (coords[a * 2 + 1] + coords[b * 2 + 1] + coords[c * 2 + 1]) / 3;
+		var cb = bary(cu, cv);
+		if (cb[0] < -1e-6 || cb[1] < -1e-6 || cb[2] < -1e-6) continue; // outside parent
+		var au = coords[a * 2], av = coords[a * 2 + 1];
+		var bu = coords[b * 2], bv = coords[b * 2 + 1];
+		var cuu = coords[c * 2], cvv = coords[c * 2 + 1];
+		var subArea = Math.abs((bu - au) * (cvv - av) - (cuu - au) * (bv - av)) * 0.5;
+		if (subArea < triArea * 1e-8) continue; // sliver
+		res.push(orientToNormal(pts[a], pts[b], pts[c], snx, sny, snz));
+	}
+	return res.length ? res : [{ v0: v0, v1: v1, v2: v2 }];
+}
+
+// Coplanar fragment -> match the source outward normal (a sign flip is a v1<->v2 swap).
+function orientToNormal(a, b, c, snx, sny, snz) {
+	var fx = (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y);
+	var fy = (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z);
+	var fz = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+	if (fx * snx + fy * sny + fz * snz < 0) return { v0: a, v1: c, v2: b };
+	return { v0: a, v1: b, v2: c };
+}
+
+/**
+ * @module util/indexGroups
+ *
+ * Convert the boolean split GROUPS ({v0,v1,v2} object soup) into a compact INDEXED
+ * representation: one shared vertex pool + per-group triangles as [i,j,k] index
+ * triples into that pool.
+ *
+ * Why: the soup form stores every triangle's three vertices as separate objects
+ * (~5-10x heavier than indexed), so consumers that need to render/persist a
+ * multi-million-triangle result are forced to re-dedupe it themselves — or run out
+ * of memory. This returns the indexed twin ONCE, cheaply, sharing the pool ACROSS
+ * all four groups so the seam between aInside/aOutside welds automatically.
+ *
+ * Back-compatible: this is additive. The soup `groups` are unchanged; callers opt
+ * in (bmsBooleanOp `{ indexed: true }`) or call this directly on any soup groups.
+ */
+
+/**
+ * @param {{ aInside?: Array, aOutside?: Array, bInside?: Array, bOutside?: Array }} groups
+ *        soup groups ({ v0, v1, v2 } triangles)
+ * @param {number} [tolerance=1e-4] - vertex-weld quantization (world units)
+ * @returns {{
+ *   points: Array<{x:number,y:number,z:number}>,
+ *   groups: { aInside: number[][], aOutside: number[][], bInside: number[][], bOutside: number[][] }
+ * }}
+ */
+function indexGroups(groups, tolerance) {
+	tolerance = tolerance || 1e-4;
+	var inv = 1 / tolerance;
+	var points = [];
+	var map = new Map();
+
+	function id(v) {
+		// Quantized coordinate key. The groups are already seam-deduplicated upstream,
+		// so value-identical vertices map to one index; genuinely distinct stay apart.
+		var key = Math.round(v.x * inv) + "," + Math.round(v.y * inv) + "," + Math.round(v.z * inv);
+		var i = map.get(key);
+		if (i === undefined) { i = points.length; points.push({ x: v.x, y: v.y, z: v.z }); map.set(key, i); }
+		return i;
+	}
+
+	var names = ["aInside", "aOutside", "bInside", "bOutside"];
+	var out = { points: points, groups: { aInside: [], aOutside: [], bInside: [], bOutside: [] } };
+	for (var g = 0; g < names.length; g++) {
+		var arr = groups[names[g]] || [];
+		var tris = out.groups[names[g]];
+		for (var i = 0; i < arr.length; i++) {
+			var t = arr[i];
+			tris.push([id(t.v0), id(t.v1), id(t.v2)]);
+		}
+	}
+	return out;
+}
+
+/**
+ * @module bms/bmsBooleanOp
+ *
+ * Main entry point for the BMS (Brent's Mega Soup) boolean pipeline.
+ *
+ * Pipeline:
+ *   1. bmsIntersect  — shared vertex pool + spatial grid
+ *   2. bmsSplit      — CDT with pool vertices → mega soup
+ *   3. bmsChain      — identity-based segment chaining
+ *   4. bmsClose      — close polylines along boundary edges
+ *   5. bmsClassify   — per-region boundary walk, winding = inside/outside
+ */
+
+
+/**
+ * Axis-aligned bounding box of a triangle soup, or null when empty.
+ */
+function soupBBox(soup) {
+	if (!soup || soup.length === 0) return null;
+	var minX = Infinity, minY = Infinity, minZ = Infinity;
+	var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+	for (var i = 0; i < soup.length; i++) {
+		var t = soup[i];
+		var vs = [t.v0, t.v1, t.v2];
+		for (var k = 0; k < 3; k++) {
+			var v = vs[k];
+			if (v.x < minX) minX = v.x;
+			if (v.y < minY) minY = v.y;
+			if (v.z < minZ) minZ = v.z;
+			if (v.x > maxX) maxX = v.x;
+			if (v.y > maxY) maxY = v.y;
+			if (v.z > maxZ) maxZ = v.z;
+		}
+	}
+	return { minX: minX, minY: minY, minZ: minZ, maxX: maxX, maxY: maxY, maxZ: maxZ };
+}
+
+/**
+ * Do the two bounding boxes genuinely interpenetrate?
+ *
+ * Deliberately NOT a plain slack-inset AABB test. Two cases must stay apart:
+ *
+ *  - Shells that merely ABUT (face-to-face contact) have ~zero overlap on one
+ *    axis while both boxes have real extent there. That is a legitimate
+ *    zero-segment result, so it must not be flagged.
+ *  - Coplanar SHEETS are degenerate (zero extent) on the shared-plane axis.
+ *    Insetting that axis would judge every flat sheet "apart" and defeat the
+ *    check entirely — which is precisely the geometry it exists to catch.
+ *
+ * So an axis only vetoes when it has real extent AND the overlap collapses.
+ */
+function bboxesOverlap(a, b) {
+	var span = Math.max(
+		a.maxX - a.minX, a.maxY - a.minY, a.maxZ - a.minZ,
+		b.maxX - b.minX, b.maxY - b.minY, b.maxZ - b.minZ
+	);
+	var eps = span > 0 ? span * 1e-9 : 1e-12;
+
+	var axes = [
+		[a.minX, a.maxX, b.minX, b.maxX],
+		[a.minY, a.maxY, b.minY, b.maxY],
+		[a.minZ, a.maxZ, b.minZ, b.maxZ]
+	];
+	for (var i = 0; i < 3; i++) {
+		var aMin = axes[i][0], aMax = axes[i][1], bMin = axes[i][2], bMax = axes[i][3];
+		var overlap = Math.min(aMax, bMax) - Math.max(aMin, bMin);
+		if (overlap < -eps) return false; // separated on this axis
+		var degenerate = (aMax - aMin) <= eps && (bMax - bMin) <= eps;
+		if (!degenerate && overlap <= eps) return false; // touching, not crossing
+	}
+	return true;
+}
+
+/**
+ * Flip the winding order of all triangles in a soup.
+ * @param {Array} tris
+ * @returns {Array}
+ */
+function flipSoup(tris) {
+	var result = [];
+	for (var i = 0; i < tris.length; i++) {
+		var t = tris[i];
+		result.push({
+			v0: { x: t.v0.x, y: t.v0.y, z: t.v0.z },
+			v1: { x: t.v2.x, y: t.v2.y, z: t.v2.z },
+			v2: { x: t.v1.x, y: t.v1.y, z: t.v1.z }
+		});
+	}
+	return result;
+}
+
+/**
+ * Run the full BMS boolean pipeline.
+ *
+ * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soupA
+ * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soupB
+ * @param {"subtract"|"union"|"intersect"} [operation] - If omitted, returns split groups only
+ * @param {Object} [options]
+ * @param {"auto"|"hybrid"|"heffalump"} [options.classifier="auto"] - Classification strategy.
+ *        "auto" (default): census the inputs (messy → heffalump + auto pre-repair),
+ *        run the hybrid classifier, verify partition / chain-closure / barrier
+ *        post-conditions, and on any failure re-run ONLY the classification stage
+ *        with the heffalump on the existing mega soup (milliseconds, no re-split).
+ *        "hybrid": always hybrid, no verification (legacy behaviour).
+ *        "heffalump": always heffalump.
+ * @param {boolean} [options.forceHeffalump] - Deprecated alias for classifier: "heffalump"
+ * @param {boolean} [options.preRepair] - Resolve T-junctions + weld boundary before
+ *        splitting. Default: auto-enabled when classifier is "auto" and the census
+ *        finds non-manifold edges.
+ * @param {number} [options.tolerance] - Vertex pool tolerance
+ * @param {boolean} [options.coplanar=true] - Emit barrier segments for
+ *        exactly-coplanar A-vs-B triangle pairs (coincident sheets /
+ *        shared faces). Set false for the pre-0.6.6 behaviour.
+ * @param {number} [options.minAreaRatio] - Coplanar overlap area gate
+ * @param {boolean} [options.indexed] - Also attach `result.indexed` — a compact
+ *        indexed twin of the groups (shared points pool + per-group [i,j,k] triples).
+ *        Back-compatible: the soup `groups` are unchanged; this is additive + opt-in.
+ * @returns {{
+ *   groups: { aInside: Array, aOutside: Array, bInside: Array, bOutside: Array },
+ *   segments: Array,
+ *   polylines: Array,
+ *   megaSoup: Array,
+ *   pool: Object,
+ *   classifier: { A: string, B: string },
+ *   verification: { ok: boolean, failures: Array }|null
+ * }|null}
+ */
+function bmsBooleanOp(soupA, soupB, operation, options) {
+	if (!soupA || !soupB || soupA.length === 0 || soupB.length === 0) {
+		return null;
+	}
+
+	var opts = options || {};
+	var classifierMode = opts.classifier || (opts.forceHeffalump ? "heffalump" : "auto");
+
+	// Step 0) Translate to origin for floating-point precision (UTM, mine coords)
+	var centroid = soupCentroid(soupA, soupB);
+	var cx = centroid.x, cy = centroid.y, cz = centroid.z;
+	soupA = translateSoup(soupA, -cx, -cy, -cz);
+	soupB = translateSoup(soupB, -cx, -cy, -cz);
+
+	// Census: messy inputs (non-manifold edges) go straight to the heffalump,
+	// and in auto mode they also get pre-repair unless the caller said otherwise.
+	var censusMessy = classifierMode !== "hybrid" && shouldUseHeffalump(soupA, soupB);
+	var doPreRepair = opts.preRepair !== undefined
+		? !!opts.preRepair
+		: (classifierMode === "auto" && censusMessy);
+
+	// Step 1) Pre-repair (explicit, or auto-enabled by the census)
+	if (doPreRepair) {
+		var tolA = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupA) * 0.01;
+		var tolB = opts.tolerance !== undefined ? opts.tolerance : estimateAvgEdge(soupB) * 0.01;
+		// Hole-free variant: the legacy pass tears shared edges apart (independent
+		// per-edge sampling on toFixed keys) and does not preserve winding, both
+		// of which poison the barrier-normal classification downstream.
+		soupA = resolveTJunctionsHoleFree(soupA, tolA, 3);
+		soupA = weldBoundaryVertices(soupA, tolA);
+		soupB = resolveTJunctionsHoleFree(soupB, tolB, 3);
+		soupB = weldBoundaryVertices(soupB, tolB);
+	}
+
+	// Step 2) Intersect with shared vertex pool
+	var isect = bmsIntersect(soupA, soupB, {
+		tolerance: opts.tolerance,
+		coplanar: opts.coplanar,
+		minAreaRatio: opts.minAreaRatio
+	});
+
+	if (isect.segments.length === 0) {
+		// No segments. Usually that genuinely means "these meshes are apart",
+		// but it is ALSO exactly what a MISSED intersection looks like, and the
+		// two used to be indistinguishable: this path returned verification:null
+		// and a confident "no intersection", so a silent miss was reported as a
+		// clean result. bmsVerify cannot help here — its partition check is
+		// gated on segments.length > 0 and never runs.
+		//
+		// So: if the bounding boxes do not overlap, the meshes are provably
+		// apart and the empty result is correct. If they DO overlap and we
+		// still found nothing, say so rather than claim success.
+		var bbA = soupBBox(soupA);
+		var bbB = soupBBox(soupB);
+		var apart = bbA === null || bbB === null || !bboxesOverlap(bbA, bbB);
+
+		return {
+			groups: {
+				aInside: [],
+				aOutside: translateSoup(soupA, cx, cy, cz),
+				bInside: [],
+				bOutside: translateSoup(soupB, cx, cy, cz)
+			},
+			segments: [],
+			polylines: [],
+			megaSoup: null,
+			pool: isect.pool,
+			classifier: { A: "none (no intersection)", B: "none (no intersection)" },
+			verification: apart ? null : {
+				ok: false,
+				failures: [{
+					check: "no-segments-but-bboxes-overlap",
+					mesh: "both",
+					detail: "bounding boxes overlap but tri-tri intersection found 0 " +
+						"segments; the meshes may intersect in a configuration the " +
+						"intersector missed (grazing, coplanar, or below tolerance). " +
+						"This empty result is unverified, not confirmed."
+				}],
+				counts: {
+					A: { inside: 0, outside: soupA.length },
+					B: { inside: 0, outside: soupB.length }
+				}
+			}
+		};
+	}
+
+	// Step 3) Split both meshes into mega soup
+	var megaSoup = bmsSplit(soupA, soupB, isect);
+
+	// Step 4) Chain intersection segments
+	var polylines = bmsChain(isect.segments);
+
+	// Step 5) Choose classification path.
+	// Clean meshes → ige walk (boundary topology + barrier-normal hybrid)
+	// Defective meshes → heffalump (barrier-only, no boundary needed)
+	// Auto mode runs hybrid, verifies post-conditions, and falls back to the
+	// heffalump on the EXISTING mega soup if any check fails — intersection,
+	// pool, and split are classifier-independent, so this is cheap.
+	var useHeffalump = classifierMode === "heffalump" ||
+		(classifierMode === "auto" && censusMessy);
+
+	var classifierReport = { A: "hybrid", B: "hybrid" };
+	var verification = null;
+	var closedPolylines, meshEdgePolys, classifyResult;
+
+	// meshEdgePolys built from raw chains — used by the heffalump path (it
+	// doesn't need boundary walks, but visualization toggles still work).
+	function buildHeffalumpEdgePolys() {
+		var hefEpA = { segments: [], closed: false };
+		var hefEpB = { segments: [], closed: false };
+		for (var hpi = 0; hpi < polylines.length; hpi++) {
+			hefEpA.segments.push({ verts: polylines[hpi].slice(), type: "intersection" });
+			hefEpB.segments.push({ verts: polylines[hpi].slice(), type: "intersection" });
+		}
+		return { A: hefEpA, B: hefEpB };
+	}
+
+	if (useHeffalump) {
+		var hefReason = classifierMode === "heffalump"
+			? "heffalump (forced)"
+			: "heffalump (census: non-manifold edges)";
+		classifierReport.A = hefReason;
+		classifierReport.B = hefReason;
+		closedPolylines = polylines;
+		meshEdgePolys = buildHeffalumpEdgePolys();
+		classifyResult = heffalumpClassify(megaSoup, isect.segments, soupA, soupB);
+	} else {
+		// Clean mesh path — close polylines along boundary + ige walk classification
+		var closeResult = bmsClosePolylines(polylines, soupA, soupB, megaSoup, isect.segments);
+		closedPolylines = closeResult.closedPolylines;
+		meshEdgePolys = closeResult.meshEdgePolys;
+		classifyResult = bmsClassify(megaSoup, closedPolylines, isect.segments, soupA, soupB, meshEdgePolys);
+
+		// Auto mode: verify the hybrid's post-conditions
+		if (classifierMode === "auto") {
+			verification = verifyBmsClassification(
+				megaSoup, classifyResult.triSides, isect.segments, polylines, soupA, soupB);
+
+			if (!verification.ok) {
+				// Decide which meshes need the fallback
+				var fallbackA = false, fallbackB = false;
+				var reasonsA = [], reasonsB = [];
+				for (var fi = 0; fi < verification.failures.length; fi++) {
+					var f = verification.failures[fi];
+					if (f.mesh === "A" || f.mesh === "both") { fallbackA = true; reasonsA.push(f.check); }
+					if (f.mesh === "B" || f.mesh === "both") { fallbackB = true; reasonsB.push(f.check); }
+				}
+
+				// Re-run ONLY the classification stage on the existing mega soup
+				var hefResult = heffalumpClassify(megaSoup, isect.segments, soupA, soupB);
+
+				var mergedWalks = [];
+				var cwi2;
+				if (fallbackA) {
+					classifyResult.aInside = hefResult.aInside;
+					classifyResult.aOutside = hefResult.aOutside;
+					classifierReport.A = "heffalump (" + reasonsA.join(", ") + ")";
+				}
+				if (fallbackB) {
+					classifyResult.bInside = hefResult.bInside;
+					classifyResult.bOutside = hefResult.bOutside;
+					classifierReport.B = "heffalump (" + reasonsB.join(", ") + ")";
+				}
+				// Component walks: take each mesh's walks from the classifier that won
+				for (cwi2 = 0; cwi2 < classifyResult.componentWalks.length; cwi2++) {
+					var hw = classifyResult.componentWalks[cwi2];
+					if ((hw.mesh === "A" && !fallbackA) || (hw.mesh === "B" && !fallbackB)) mergedWalks.push(hw);
+				}
+				for (cwi2 = 0; cwi2 < hefResult.componentWalks.length; cwi2++) {
+					var fw = hefResult.componentWalks[cwi2];
+					if ((fw.mesh === "A" && fallbackA) || (fw.mesh === "B" && fallbackB)) mergedWalks.push(fw);
+				}
+				classifyResult.componentWalks = mergedWalks;
+			}
+		}
+	}
+
+	var groups = {
+		aInside: classifyResult.aInside,
+		aOutside: classifyResult.aOutside,
+		bInside: classifyResult.bInside,
+		bOutside: classifyResult.bOutside
+	};
+
+	// Step 7) Deduplicate seam vertices, then translate back to original coordinates
+	if (groups.aInside.length > 0) groups.aInside = translateSoup(deduplicateSeamVertices(groups.aInside, 1e-4), cx, cy, cz);
+	if (groups.aOutside.length > 0) groups.aOutside = translateSoup(deduplicateSeamVertices(groups.aOutside, 1e-4), cx, cy, cz);
+	if (groups.bInside.length > 0) groups.bInside = translateSoup(deduplicateSeamVertices(groups.bInside, 1e-4), cx, cy, cz);
+	if (groups.bOutside.length > 0) groups.bOutside = translateSoup(deduplicateSeamVertices(groups.bOutside, 1e-4), cx, cy, cz);
+
+	// Translate meshEdgePolys and componentWalks verts back to original coordinates
+	function translatePolyVerts(meshEps) {
+		if (!meshEps) return;
+		var keys = ["A", "B"];
+		for (var ki = 0; ki < keys.length; ki++) {
+			var ep = meshEps[keys[ki]];
+			if (!ep || !ep.segments) continue;
+			for (var si2 = 0; si2 < ep.segments.length; si2++) {
+				var vs = ep.segments[si2].verts;
+				if (!vs) continue;
+				for (var vi = 0; vi < vs.length; vi++) {
+					vs[vi] = { x: vs[vi].x + cx, y: vs[vi].y + cy, z: vs[vi].z + cz };
+				}
+			}
+		}
+	}
+	translatePolyVerts(meshEdgePolys);
+
+	// Translate componentWalk verts back
+	if (classifyResult.componentWalks) {
+		for (var cwi = 0; cwi < classifyResult.componentWalks.length; cwi++) {
+			var segs = classifyResult.componentWalks[cwi].segments;
+			for (var csi = 0; csi < segs.length; csi++) {
+				var cvs = segs[csi].verts;
+				if (!cvs) continue;
+				for (var cvi = 0; cvi < cvs.length; cvi++) {
+					cvs[cvi] = { x: cvs[cvi].x + cx, y: cvs[cvi].y + cy, z: cvs[cvi].z + cz };
+				}
+			}
+		}
+	}
+
+	// Translate intersection segments and polylines back to original coordinates
+	for (var tsi = 0; tsi < isect.segments.length; tsi++) {
+		var tseg = isect.segments[tsi];
+		tseg.p0 = { x: tseg.p0.x + cx, y: tseg.p0.y + cy, z: tseg.p0.z + cz, id: tseg.p0.id };
+		tseg.p1 = { x: tseg.p1.x + cx, y: tseg.p1.y + cy, z: tseg.p1.z + cz, id: tseg.p1.id };
+	}
+	if (polylines) {
+		for (var tpi = 0; tpi < polylines.length; tpi++) {
+			var tpl = polylines[tpi];
+			for (var tpj = 0; tpj < tpl.length; tpj++) {
+				tpl[tpj] = { x: tpl[tpj].x + cx, y: tpl[tpj].y + cy, z: tpl[tpj].z + cz, id: tpl[tpj].id };
+			}
+		}
+	}
+
+	var result = {
+		groups: groups,
+		segments: isect.segments,
+		polylines: closedPolylines,
+		rawPolylines: polylines,
+		meshEdgePolys: meshEdgePolys,
+		componentWalks: classifyResult.componentWalks,
+		megaSoup: megaSoup,
+		pool: isect.pool,
+		classifier: classifierReport,
+		verification: verification
+	};
+
+	// Opt-in INDEXED twin of the groups (back-compatible; soup `groups` unchanged).
+	// One shared vertex pool + per-group [i,j,k] triples — ~5-10x lighter than soup,
+	// so consumers can render/persist a multi-million-triangle result without
+	// re-deduping it themselves (which is where large booleans OOM).
+	if (opts.indexed) {
+		result.indexed = indexGroups(groups, opts.tolerance !== undefined ? opts.tolerance : 1e-4);
+	}
+
+	// Step 8) If operation specified, combine groups
+	if (operation) {
+		var combined = [];
+
+		if (operation === "subtract") {
+			combined = groups.aOutside.concat(flipSoup(groups.bInside));
+		} else if (operation === "union") {
+			combined = groups.aOutside.concat(groups.bOutside);
+		} else if (operation === "intersect") {
+			combined = groups.aInside.concat(groups.bInside);
+		}
+
+		if (combined.length > 0) {
+			var welded = weldVertices(combined, 1e-4);
+			result.result = {
+				soup: combined,
+				points: welded.points,
+				triangles: welded.triangles
+			};
+		} else {
+			result.result = null;
+		}
+	}
+
+	return result;
+}
+
+/**
+ * @module verify/verifyOutput
+ *
+ * Read-only invariant check on a finished triangle soup.
+ *
+ * This is the output-side twin of {@link module:bms/bmsVerify}. That one asks
+ * "did the CLASSIFICATION hold together?"; this one asks "is the GEOMETRY I am
+ * about to hand back actually valid?".
+ *
+ * Why it exists: the gate that decides whether to pre-repair (`censusMessy`)
+ * inspects the INPUT and guesses. On the real Kirra surfaces that guess is
+ * wrong — it reports clean while the meshes demonstrably contain T-junctions.
+ * A check that measures the OUTPUT cannot be fooled that way. Guessing the
+ * input is a heuristic; measuring the output is a fact.
+ *
+ * It mutates nothing and repairs nothing. It reports, so a caller (or the
+ * finisher) can decide what to do.
+ *
+ * Identity is a neighbourhood weld (shared integer ids), not toFixed strings:
+ * quantised keys put two vertices a nanometre apart into different buckets
+ * depending on which side of a grid boundary they land, which is exactly the
+ * failure mode these checks are meant to catch.
+ */
+
+
+/**
+ * @typedef {Object} OutputCheck
+ * @property {string} check - Invariant name
+ * @property {boolean} ok - Did it hold?
+ * @property {number} count - Number of violations (0 when ok)
+ * @property {string} detail - Human-readable summary
+ */
+
+/**
+ * Verify the invariants of a finished triangle soup.
+ *
+ * @param {Array<{v0:Object, v1:Object, v2:Object}>} soup
+ * @param {Object} [options]
+ * @param {number} [options.tolerance] - Weld epsilon. Default: estimateWeldEps(soup).
+ * @param {boolean} [options.expectClosed] - Require a closed solid (no open
+ *        edges). Omit to accept an open surface, which is the normal case for
+ *        terrain and DTM work.
+ * @param {number} [options.minArea] - Area below which a triangle counts as
+ *        degenerate. Default: (tolerance^2) / 2.
+ * @returns {{
+ *   ok: boolean,
+ *   checks: Array<OutputCheck>,
+ *   stats: { triangles: number, vertices: number, openEdges: number,
+ *            nonManifoldEdges: number, area: number, components: number,
+ *            volume: number }
+ * }}
+ */
+function verifyOutput(soup, options) {
+	var opts = options || {};
+	var checks = [];
+	var i;
+
+	if (!soup || soup.length === 0) {
+		return {
+			ok: false,
+			checks: [{ check: "nonEmpty", ok: false, count: 0, detail: "soup is empty" }],
+			stats: { triangles: 0, vertices: 0, openEdges: 0, nonManifoldEdges: 0, area: 0, components: 0, volume: 0 }
+		};
+	}
+
+	var tol = opts.tolerance !== undefined ? opts.tolerance : estimateWeldEps(soup);
+	if (!(tol > 0)) tol = 1e-6;
+
+	// Shared integer identity for every vertex.
+	var pool = makeWeldPool(tol);
+	var F = new Array(soup.length);
+	for (i = 0; i < soup.length; i++) {
+		var t = soup[i];
+		F[i] = [
+			pool.id(t.v0.x, t.v0.y, t.v0.z),
+			pool.id(t.v1.x, t.v1.y, t.v1.z),
+			pool.id(t.v2.x, t.v2.y, t.v2.z)
+		];
+	}
+
+	// Areas and degenerates.
+	var minArea = opts.minArea !== undefined ? opts.minArea : (tol * tol) / 2;
+	var degenerate = 0;
+	var totalArea = 0;
+	for (i = 0; i < soup.length; i++) {
+		var a = triArea(soup[i]);
+		totalArea += a;
+		// A repeated pooled id means the triangle collapsed under the weld.
+		var collapsed = F[i][0] === F[i][1] || F[i][1] === F[i][2] || F[i][0] === F[i][2];
+		if (a <= minArea || collapsed) degenerate++;
+	}
+	checks.push(mk("noDegenerateTriangles", degenerate,
+		degenerate + " triangle(s) at or below " + minArea.toExponential(2) +
+		" area, or with repeated vertices"));
+
+	// Duplicate triangles: same vertex set, either winding.
+	var seen = Object.create(null);
+	var duplicates = 0;
+	for (i = 0; i < soup.length; i++) {
+		var srt = F[i].slice().sort(function (x, y) { return x - y; });
+		var key = srt[0] + "," + srt[1] + "," + srt[2];
+		if (seen[key]) duplicates++; else seen[key] = 1;
+	}
+	checks.push(mk("noDuplicateTriangles", duplicates, duplicates + " duplicate triangle(s)"));
+
+	// Edge census: open, non-manifold, and winding consistency.
+	// For each undirected edge, record how many triangles traverse it each way.
+	// A consistently wound 2-manifold edge is used exactly once in each
+	// direction; twice the SAME way means the two neighbours disagree.
+	var edges = Object.create(null);
+	for (i = 0; i < soup.length; i++) {
+		var f = F[i];
+		for (var e = 0; e < 3; e++) {
+			var u = f[e], v = f[(e + 1) % 3];
+			if (u === v) continue; // degenerate edge, already counted above
+			var lo = u < v ? u : v, hi = u < v ? v : u;
+			var ek = lo + "_" + hi;
+			var rec = edges[ek];
+			if (!rec) rec = edges[ek] = { fwd: 0, rev: 0, tris: [] };
+			rec.tris.push(i);
+			if (u === lo) rec.fwd++; else rec.rev++;
+		}
+	}
+
+	var openEdges = 0, nonManifold = 0, windingConflicts = 0;
+	for (var k in edges) {
+		var r = edges[k];
+		var uses = r.fwd + r.rev;
+		if (uses === 1) { openEdges++; continue; }
+		if (uses > 2) { nonManifold++; continue; }
+		if (r.fwd !== 1 || r.rev !== 1) windingConflicts++;
+	}
+
+	checks.push(mk("consistentWinding", windingConflicts,
+		windingConflicts + " shared edge(s) traversed the same way by both triangles"));
+	checks.push(mk("manifoldEdges", nonManifold,
+		nonManifold + " edge(s) shared by more than two triangles"));
+
+	if (opts.expectClosed) {
+		checks.push(mk("closed", openEdges,
+			openEdges + " open edge(s) on a mesh required to be closed"));
+	}
+
+	// T-junctions: a vertex lying on the interior of an edge it does not belong
+	// to. These are the "open sleeves" — the mesh looks joined but cracks.
+	var tjunctions = countTJunctions(pool.points, edges, tol);
+	checks.push(mk("noTJunctions", tjunctions, tjunctions + " vertex/edge T-junction(s)"));
+
+	var ok = true;
+	for (i = 0; i < checks.length; i++) if (!checks[i].ok) ok = false;
+
+	return {
+		ok: ok,
+		checks: checks,
+		stats: {
+			triangles: soup.length,
+			vertices: pool.points.length,
+			openEdges: openEdges,
+			nonManifoldEdges: nonManifold,
+			area: totalArea,
+			components: countComponents(soup.length, edges),
+			volume: signedVolume(soup)
+		}
+	};
+}
+
+/** Edge-connected component count over the pooled adjacency. */
+function countComponents(n, edges) {
+	if (n === 0) return 0;
+	var adj = new Array(n);
+	for (var k in edges) {
+		var tris = edges[k].tris;
+		for (var a = 0; a < tris.length; a++) {
+			for (var b = a + 1; b < tris.length; b++) {
+				(adj[tris[a]] || (adj[tris[a]] = [])).push(tris[b]);
+				(adj[tris[b]] || (adj[tris[b]] = [])).push(tris[a]);
+			}
+		}
+	}
+	var seen = new Uint8Array(n);
+	var comps = 0;
+	for (var i = 0; i < n; i++) {
+		if (seen[i]) continue;
+		comps++;
+		var stack = [i];
+		seen[i] = 1;
+		while (stack.length) {
+			var cur = stack.pop();
+			var nb = adj[cur];
+			if (!nb) continue;
+			for (var j = 0; j < nb.length; j++) if (!seen[nb[j]]) { seen[nb[j]] = 1; stack.push(nb[j]); }
+		}
+	}
+	return comps;
+}
+
+/**
+ * Signed volume, TRANSLATED TO THE CENTROID FIRST.
+ *
+ * At UTM scale the raw sum is catastrophic cancellation and returns garbage —
+ * measured in Kirra as 89,000,000 m3 for a 55,000 m3 solid. The same reason
+ * bmsBooleanOp centroid-shifts before intersecting.
+ *
+ * Only meaningful for a sound closed mesh; see assessRepair, which refuses to
+ * judge volume against a baseline that is already open or non-manifold.
+ */
+function signedVolume(soup) {
+	var cx = 0, cy = 0, cz = 0, n = 0, i;
+	for (i = 0; i < soup.length; i++) {
+		var t = soup[i];
+		cx += t.v0.x + t.v1.x + t.v2.x;
+		cy += t.v0.y + t.v1.y + t.v2.y;
+		cz += t.v0.z + t.v1.z + t.v2.z;
+		n += 3;
+	}
+	if (n === 0) return 0;
+	cx /= n; cy /= n; cz /= n;
+
+	var vol = 0;
+	for (i = 0; i < soup.length; i++) {
+		var q = soup[i];
+		var ax = q.v0.x - cx, ay = q.v0.y - cy, az = q.v0.z - cz;
+		var bx = q.v1.x - cx, by = q.v1.y - cy, bz = q.v1.z - cz;
+		var dx = q.v2.x - cx, dy = q.v2.y - cy, dz = q.v2.z - cz;
+		vol += (ax * (by * dz - dy * bz) - ay * (bx * dz - dx * bz) + az * (bx * dy - dx * by)) / 6;
+	}
+	return Math.abs(vol);
+}
+
+function mk(name, count, detail) {
+	return { check: name, ok: count === 0, count: count, detail: count === 0 ? "ok" : detail };
+}
+
+function triArea(t) {
+	var ax = t.v1.x - t.v0.x, ay = t.v1.y - t.v0.y, az = t.v1.z - t.v0.z;
+	var bx = t.v2.x - t.v0.x, by = t.v2.y - t.v0.y, bz = t.v2.z - t.v0.z;
+	var cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx;
+	return 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+}
+
+/**
+ * Count vertices sitting on the interior of an edge they do not belong to.
+ *
+ * Grid-bucketed by MEAN EDGE LENGTH, for the same reason
+ * resolveTJunctionsHoleFree sizes its grid that way: a tolerance-sized cell
+ * makes a long edge take thousands of steps to walk.
+ */
+function countTJunctions(points, edges, tol) {
+	var keys = Object.keys(edges);
+	if (keys.length === 0 || points.length === 0) return 0;
+
+	var parsed = new Array(keys.length);
+	var lenSum = 0;
+	var i;
+	for (i = 0; i < keys.length; i++) {
+		var parts = keys[i].split("_");
+		var ia = +parts[0], ib = +parts[1];
+		var A = points[ia], B = points[ib];
+		parsed[i] = [ia, ib, A, B];
+		lenSum += Math.sqrt(
+			(A.x - B.x) * (A.x - B.x) + (A.y - B.y) * (A.y - B.y) + (A.z - B.z) * (A.z - B.z)
+		);
+	}
+	var cell = Math.max(lenSum / keys.length, tol * 4);
+
+	var grid = Object.create(null);
+	for (i = 0; i < points.length; i++) {
+		var p = points[i];
+		var ck = Math.floor(p.x / cell) + "," + Math.floor(p.y / cell) + "," + Math.floor(p.z / cell);
+		(grid[ck] || (grid[ck] = [])).push(i);
+	}
+
+	var tol2 = tol * tol;
+	var hits = 0;
+	for (i = 0; i < parsed.length; i++) {
+		var ea = parsed[i][0], eb = parsed[i][1], P0 = parsed[i][2], P1 = parsed[i][3];
+		var dx = P1.x - P0.x, dy = P1.y - P0.y, dz = P1.z - P0.z;
+		var len2 = dx * dx + dy * dy + dz * dz;
+		if (len2 <= tol2) continue;
+
+		var steps = Math.max(1, Math.ceil(Math.sqrt(len2) / cell));
+		var seenV = Object.create(null);
+		for (var s = 0; s <= steps; s++) {
+			var fr = s / steps;
+			var sx = P0.x + dx * fr, sy = P0.y + dy * fr, sz = P0.z + dz * fr;
+			var bx = Math.floor(sx / cell), by = Math.floor(sy / cell), bz = Math.floor(sz / cell);
+			for (var ox = -1; ox <= 1; ox++) {
+				for (var oy = -1; oy <= 1; oy++) {
+					for (var oz = -1; oz <= 1; oz++) {
+						var bucket = grid[(bx + ox) + "," + (by + oy) + "," + (bz + oz)];
+						if (!bucket) continue;
+						for (var bi = 0; bi < bucket.length; bi++) {
+							var vi = bucket[bi];
+							if (vi === ea || vi === eb || seenV[vi]) continue;
+							seenV[vi] = 1;
+							var V = points[vi];
+							var tt = ((V.x - P0.x) * dx + (V.y - P0.y) * dy + (V.z - P0.z) * dz) / len2;
+							if (tt <= 0 || tt >= 1) continue; // strictly interior only
+							var qx = P0.x + dx * tt - V.x;
+							var qy = P0.y + dy * tt - V.y;
+							var qz = P0.z + dz * tt - V.z;
+							if (qx * qx + qy * qy + qz * qz <= tol2) hits++;
+						}
+					}
+				}
+			}
+		}
+	}
+	return hits;
+}
+
+/**
+ * @module verify/assessRepair
+ *
+ * Run a repair on a COPY, measure it, and report benefit or damage.
+ *
+ * Repairs do not all behave alike, and the destructive ones look exactly like
+ * the free ones from the outside. Measured in Kirra on a real solid (25,566
+ * triangles, clean: 0 open / 0 non-manifold), 2026-07-16:
+ *
+ *   Weld @ 0.001 (the default) ....... removes 0 triangles. Does nothing.
+ *   Weld @ 0.0012 .................... removes 126. 0 open. Volume identical. FREE.
+ *   Weld @ 0.002 ..................... removes 354. 0 open. Volume identical. FREE.
+ *   Weld @ 0.005 ..................... 2 non-manifold edges appear. HARM.
+ *   Remove zero-area degenerates ..... removes 75  -> 221 OPEN EDGES. DESTRUCTIVE.
+ *   ...with sliverRatio 0.01 ......... removes 1827 -> 3567 open, 90 components. RUIN.
+ *
+ * The rule that encodes: DELETING geometry that is stitched into a mesh tears it
+ * open; WELDING dissolves the same junk for free. Prefer weld.
+ *
+ * That last row matters here, because `repairMesh` defaults to
+ * `sliverRatio: 0.01` — the setting measured as ruinous. Assess before trusting it.
+ *
+ * This module is the general form: diff two {@link module:verify/verifyOutput}
+ * reports and say whether the change helped. It is the gate a finisher needs,
+ * because "repair" is not always an improvement — measured on the real Kirra
+ * shell x presplit-a boolean, hole-free T-junction resolution turns 4 violations
+ * into 6 by trading T-junctions for degenerates and non-manifold edges.
+ *
+ * Ported from Kirra's helpers/MeshRepairAssessment.js, which carries the original
+ * measurements. Rebuilt on verifyOutput so there is one measurement path, and so
+ * winding and T-junction violations count too (the original tracked only open
+ * edges, non-manifold edges, components and volume).
+ */
+
+
+/**
+ * Total invariant violations in a verifyOutput report.
+ * @param {Object} report - from verifyOutput
+ * @returns {number}
+ */
+function violationCount(report) {
+	if (!report || !report.checks) return 0;
+	var n = 0;
+	for (var i = 0; i < report.checks.length; i++) n += report.checks[i].count || 0;
+	return n;
+}
+
+function byName(report) {
+	var m = Object.create(null);
+	for (var i = 0; i < report.checks.length; i++) m[report.checks[i].check] = report.checks[i].count || 0;
+	return m;
+}
+
+/**
+ * Assess a candidate repair by diffing BEFORE against AFTER.
+ *
+ * Run the repair on a copy, pass both soups here, and use `harmful` /
+ * `recommend` to decide whether to keep the result.
+ *
+ * @param {Array} before - the current soup
+ * @param {Array} after - what the repair WOULD produce
+ * @param {Object} [options]
+ * @param {number} [options.volumeTolPct=0.5] - volume drift beyond this counts as damage
+ * @param {number} [options.tolerance] - weld epsilon, passed to verifyOutput for BOTH
+ *        soups so the two measurements are comparable
+ * @param {boolean} [options.expectClosed] - require closure, passed through
+ * @returns {{
+ *   harmful: boolean,
+ *   recommend: "keep"|"discard",
+ *   benefits: Array<string>,
+ *   damage: Array<string>,
+ *   before: Object, after: Object,
+ *   violationsBefore: number, violationsAfter: number,
+ *   trisDelta: number, volumeDeltaPct: number
+ * }}
+ */
+function assessRepair(before, after, options) {
+	var opts = options || {};
+	var volTol = opts.volumeTolPct != null ? opts.volumeTolPct : 0.5;
+
+	// Measure BOTH at the same tolerance, or the comparison is meaningless.
+	var vopts = {
+		tolerance: opts.tolerance,
+		expectClosed: opts.expectClosed,
+		minArea: opts.minArea
+	};
+	var b = verifyOutput(before || [], vopts);
+	var a = verifyOutput(after || [], vopts);
+
+	var bs = b.stats, as = a.stats;
+	var bc = byName(b), ac = byName(a);
+
+	var volDeltaPct = bs.volume > 0 ? (100 * (as.volume - bs.volume) / bs.volume) : 0;
+
+	var damage = [];
+	var benefits = [];
+
+	// ── Damage: the signals that mean "this tore the mesh" ──
+	if (as.openEdges > bs.openEdges) {
+		damage.push("Opens the mesh: open edges " + bs.openEdges + " -> " + as.openEdges);
+	}
+	if (as.components > bs.components) {
+		damage.push("Breaks it apart: " + bs.components + " -> " + as.components + " components");
+	}
+	var names = Object.keys(ac);
+	for (var i = 0; i < names.length; i++) {
+		var n = names[i];
+		var wasCount = bc[n] || 0;
+		if (ac[n] > wasCount) {
+			damage.push("Worsens " + n + ": " + wasCount + " -> " + ac[n]);
+		}
+	}
+
+	// Volume is only MEANINGFUL between two sound meshes. Against a baseline that
+	// is already open or non-manifold the figure is garbage — Kirra measured Clean
+	// Mesh confidently reporting 57,630 m3 for a non-orientable band whose true
+	// volume was 55,226. Junk geometry also contributes its own signed volume, so
+	// deleting a duplicate face moves the number while the real volume is untouched.
+	var baselineIsSound = bs.openEdges === 0 && bs.nonManifoldEdges === 0;
+	if (baselineIsSound && Math.abs(volDeltaPct) > volTol) {
+		damage.push("Changes the volume by " + volDeltaPct.toFixed(2) + "% (" +
+			Math.round(bs.volume) + " -> " + Math.round(as.volume) + ")");
+	}
+
+	// ── Benefit: what it actually buys ──
+	if (as.openEdges < bs.openEdges) {
+		benefits.push("Closes open edges: " + bs.openEdges + " -> " + as.openEdges);
+	}
+	if (as.components < bs.components) {
+		benefits.push("Merges components: " + bs.components + " -> " + as.components);
+	}
+	for (i = 0; i < names.length; i++) {
+		var nn = names[i];
+		var had = bc[nn] || 0;
+		if (ac[nn] < had) benefits.push("Fixes " + nn + ": " + had + " -> " + ac[nn]);
+	}
+	if (as.triangles < bs.triangles) {
+		benefits.push("Removes " + (bs.triangles - as.triangles) + " junk triangle(s)");
+	}
+	if (baselineIsSound && Math.abs(volDeltaPct) <= volTol) {
+		benefits.push("Volume unchanged (" + Math.round(as.volume) + ")");
+	}
+
+	var vb = violationCount(b), va = violationCount(a);
+
+	return {
+		harmful: damage.length > 0,
+		// A repair earns its place only by reducing the total. A trade that swaps
+		// one violation class for another nets zero and is not worth the churn.
+		recommend: va < vb ? "keep" : "discard",
+		benefits: benefits,
+		damage: damage,
+		before: b,
+		after: a,
+		violationsBefore: vb,
+		violationsAfter: va,
+		trisDelta: as.triangles - bs.triangles,
+		volumeDeltaPct: volDeltaPct
+	};
+}
+
+/**
+ * @module classify/coincidentDedup
+ *
+ * Coincident-sheet deduplication — the last stage of the self-intersection
+ * fold resolver.
+ *
+ * When a fold's sheets are EXACTLY coincident (the target pathology:
+ * coplanar coincident overlaps), the winding number steps across the
+ * WHOLE coincident stack at once, so every sheet of the stack passes the
+ * keep test — the result would carry the boundary 2x or 3x. Zhou et al.
+ * (Mesh Arrangements, 2016) merge coincident facets into a single
+ * arrangement cell; this module is the practical equivalent:
+ *
+ *  1. Exact duplicates (same three vertex keys) → keep ONE per group.
+ *  2. Residual coplanar-overlapping pairs (different tessellations of the
+ *     same region — Delaunay tie-breaks can differ between sheets) →
+ *     union-find them into clusters and re-CDT each cluster ONCE with the
+ *     union of all member edges as constraints; emit each region once.
+ *
+ * All kept triangles arrive ALREADY oriented outward by the winding
+ * extraction, so a cluster's members agree in orientation; the re-CDT
+ * output copies the orientation of the first member.
+ */
+
+
+/**
+ * Remove coincident duplicate sheets from a triangle soup.
+ *
+ * @param {Array<{ v0, v1, v2 }>} tris - Kept, outward-oriented soup
+ * @param {Object} [options]
+ * @param {number} [options.minAreaRatio=1e-4] - Overlap gate for residual
+ *        pair detection (fraction of the smaller triangle's area)
+ * @returns {{
+ *   soup: Array,
+ *   duplicateGroups: number,
+ *   duplicatesRemoved: number,
+ *   clusters: number,
+ *   clusterTrisIn: number,
+ *   clusterTrisOut: number
+ * }}
+ */
+function dedupCoincidentTriangles(tris, options) {
+	var opts = {};
+
+	// ── Pass 1: exact duplicates by sorted vertex-key triple ──
+	var groupsByKey = {};
+	var order = [];
+	for (var i = 0; i < tris.length; i++) {
+		var t = tris[i];
+		var ks = [vKey(t.v0), vKey(t.v1), vKey(t.v2)].sort();
+		var gk = ks[0] + "#" + ks[1] + "#" + ks[2];
+		if (!groupsByKey[gk]) { groupsByKey[gk] = []; order.push(gk); }
+		groupsByKey[gk].push(i);
+	}
+
+	var afterExact = [];
+	var duplicateGroups = 0;
+	var duplicatesRemoved = 0;
+	for (var g = 0; g < order.length; g++) {
+		var members = groupsByKey[order[g]];
+		afterExact.push(tris[members[0]]); // keep first (all outward already)
+		if (members.length > 1) {
+			duplicateGroups++;
+			duplicatesRemoved += members.length - 1;
+		}
+	}
+
+	// ── Pass 2: residual coplanar-overlapping pairs → clusters ──
+	var n = afterExact.length;
+	if (n === 0) {
+		return { soup: afterExact, duplicateGroups: duplicateGroups, duplicatesRemoved: duplicatesRemoved, clusters: 0, clusterTrisIn: 0, clusterTrisOut: 0 };
+	}
+
+	var avgEdge = estimateAvgEdge(afterExact);
+	var cellSize = Math.max(avgEdge * 2, 0.1);
+	var grid = buildSpatialGrid(afterExact, cellSize);
+
+	var minAreaRatio = opts.minAreaRatio !== undefined ? opts.minAreaRatio : 1e-4;
+
+	// Union-find
+	var parent = new Int32Array(n);
+	for (var pi = 0; pi < n; pi++) parent[pi] = pi;
+	function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+	function union(a, b) { var ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; }
+
+	var anyOverlap = false;
+	for (var ia = 0; ia < n; ia++) {
+		var bbA = triBBox(afterExact[ia]);
+		var cands = queryGrid(grid, bbA, cellSize);
+		for (var ci = 0; ci < cands.length; ci++) {
+			var ib = cands[ci];
+			if (ib <= ia) continue;
+			if (!bboxOverlap(bbA, triBBox(afterExact[ib]))) continue;
+			var cop = coplanarOverlap(afterExact[ia], afterExact[ib], { minAreaRatio: minAreaRatio });
+			if (cop) { union(ia, ib); anyOverlap = true; }
+		}
+	}
+
+	if (!anyOverlap) {
+		return { soup: afterExact, duplicateGroups: duplicateGroups, duplicatesRemoved: duplicatesRemoved, clusters: 0, clusterTrisIn: 0, clusterTrisOut: 0 };
+	}
+
+	// Gather clusters (size >= 2)
+	var clusterMap = {};
+	for (var mi = 0; mi < n; mi++) {
+		var root = find(mi);
+		if (!clusterMap[root]) clusterMap[root] = [];
+		clusterMap[root].push(mi);
+	}
+
+	var inCluster = new Uint8Array(n);
+	var clusterList = [];
+	for (var rk in clusterMap) {
+		if (clusterMap[rk].length >= 2) {
+			clusterList.push(clusterMap[rk]);
+			for (var cm = 0; cm < clusterMap[rk].length; cm++) inCluster[clusterMap[rk][cm]] = 1;
+		}
+	}
+
+	var out = [];
+	for (var oi = 0; oi < n; oi++) {
+		if (!inCluster[oi]) out.push(afterExact[oi]);
+	}
+
+	var clusterTrisIn = 0, clusterTrisOut = 0;
+	for (var cl = 0; cl < clusterList.length; cl++) {
+		var memberIdx = clusterList[cl];
+		var memberTris = [];
+		for (var mt = 0; mt < memberIdx.length; mt++) memberTris.push(afterExact[memberIdx[mt]]);
+		clusterTrisIn += memberTris.length;
+
+		var replaced = retessellateCluster(memberTris);
+		clusterTrisOut += replaced.length;
+		for (var rt = 0; rt < replaced.length; rt++) out.push(replaced[rt]);
+	}
+
+	return {
+		soup: out,
+		duplicateGroups: duplicateGroups,
+		duplicatesRemoved: duplicatesRemoved,
+		clusters: clusterList.length,
+		clusterTrisIn: clusterTrisIn,
+		clusterTrisOut: clusterTrisOut
+	};
+}
+
+/**
+ * Re-tessellate one coincident cluster: CDT of the union of all member
+ * vertices with the union of all member edges as constraints, keeping
+ * each output region ONCE (centroid covered by >= 1 member).
+ *
+ * @param {Array<{ v0, v1, v2 }>} memberTris - Coplanar, mutually overlapping
+ * @returns {Array<{ v0, v1, v2 }>}
+ */
+function retessellateCluster(memberTris) {
+	var refTri = memberTris[0];
+	var nRef = triNormal(refTri);
+
+	// Local 2D frame on the cluster plane
+	var e1x = refTri.v1.x - refTri.v0.x, e1y = refTri.v1.y - refTri.v0.y, e1z = refTri.v1.z - refTri.v0.z;
+	var e1Len = Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+	if (e1Len < 1e-12) return memberTris;
+	var ux = e1x / e1Len, uy = e1y / e1Len, uz = e1z / e1Len;
+	var vx = nRef.y * uz - nRef.z * uy;
+	var vy = nRef.z * ux - nRef.x * uz;
+	var vz = nRef.x * uy - nRef.y * ux;
+	var ox = refTri.v0.x, oy = refTri.v0.y, oz = refTri.v0.z;
+
+	function toLocal(p) {
+		var dx = p.x - ox, dy = p.y - oy, dz = p.z - oz;
+		return [dx * ux + dy * uy + dz * uz, dx * vx + dy * vy + dz * vz];
+	}
+
+	// Unique vertices by vKey — keep FIRST object reference
+	var keyToIdx = {};
+	var pts = [];
+	var constraints = {};
+
+	function addVert(p) {
+		var k = vKey(p);
+		var idx = keyToIdx[k];
+		if (idx === undefined) {
+			idx = pts.length;
+			keyToIdx[k] = idx;
+			pts.push(p);
+		}
+		return idx;
+	}
+
+	var memberIdxTriples = [];
+	for (var m = 0; m < memberTris.length; m++) {
+		var mt = memberTris[m];
+		var i0 = addVert(mt.v0), i1 = addVert(mt.v1), i2 = addVert(mt.v2);
+		memberIdxTriples.push([i0, i1, i2]);
+		var edges = [[i0, i1], [i1, i2], [i2, i0]];
+		for (var e = 0; e < 3; e++) {
+			var a = edges[e][0], b = edges[e][1];
+			if (a === b) continue;
+			var ek = a < b ? a + "|" + b : b + "|" + a;
+			constraints[ek] = [a, b];
+		}
+	}
+
+	var np = pts.length;
+	var coords = new Float64Array(np * 2);
+	var local = new Array(np);
+	for (var p = 0; p < np; p++) {
+		var lp = toLocal(pts[p]);
+		local[p] = lp;
+		coords[p * 2] = lp[0];
+		coords[p * 2 + 1] = lp[1];
+	}
+
+	var del;
+	try {
+		del = new Delaunator(coords);
+	} catch (de) {
+		return [memberTris[0]]; // degenerate — best effort: keep one sheet
+	}
+
+	try {
+		var con = new Constrainautor(del);
+		for (var ck in constraints) {
+			try { con.constrainOne(constraints[ck][0], constraints[ck][1]); } catch (ce) { /* skip */ }
+		}
+	} catch (ce2) { /* unconstrained still usable */ }
+
+	// Coverage test: keep an output triangle once if its centroid lies
+	// inside at least one member (2D barycentric, small tolerance).
+	function insideMember(cx, cy, triple) {
+		var a = local[triple[0]], b = local[triple[1]], c = local[triple[2]];
+		var d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+		if (Math.abs(d) < 1e-30) return false;
+		var w0 = ((b[1] - c[1]) * (cx - c[0]) + (c[0] - b[0]) * (cy - c[1])) / d;
+		var w1 = ((c[1] - a[1]) * (cx - c[0]) + (a[0] - c[0]) * (cy - c[1])) / d;
+		var w2 = 1 - w0 - w1;
+		var tol = -1e-9;
+		return w0 >= tol && w1 >= tol && w2 >= tol;
+	}
+
+	var result = [];
+	var delTris = del.triangles;
+	for (var k = 0; k < delTris.length; k += 3) {
+		var ta = delTris[k], tb = delTris[k + 1], tc = delTris[k + 2];
+		var ccx = (coords[ta * 2] + coords[tb * 2] + coords[tc * 2]) / 3;
+		var ccy = (coords[ta * 2 + 1] + coords[tb * 2 + 1] + coords[tc * 2 + 1]) / 3;
+
+		var covered = false;
+		for (var mi = 0; mi < memberIdxTriples.length; mi++) {
+			if (insideMember(ccx, ccy, memberIdxTriples[mi])) { covered = true; break; }
+		}
+		if (!covered) continue;
+
+		// Orient to the cluster normal (members are all outward already)
+		var pa = pts[ta], pb = pts[tb], pc = pts[tc];
+		var s1x = pb.x - pa.x, s1y = pb.y - pa.y, s1z = pb.z - pa.z;
+		var s2x = pc.x - pa.x, s2y = pc.y - pa.y, s2z = pc.z - pa.z;
+		var snx = s1y * s2z - s1z * s2y;
+		var sny = s1z * s2x - s1x * s2z;
+		var snz = s1x * s2y - s1y * s2x;
+		var dot = snx * nRef.x + sny * nRef.y + snz * nRef.z;
+
+		if (dot < 0) {
+			result.push({ v0: pa, v1: pc, v2: pb });
+		} else {
+			result.push({ v0: pa, v1: pb, v2: pc });
+		}
+	}
+
+	return result.length > 0 ? result : [memberTris[0]];
+}
+
+/**
+ * @module normals/orientSolid
+ *
+ * Topological solid orientation — the two-step fix for "mixed normals":
+ *
+ *   Step 1 (COHERENCE): flood-fill across shared manifold edges, flipping each
+ *   neighbour so that adjacent triangles traverse their shared edge in opposite
+ *   directions. Pure topology — no centroid rays, no Z-up guessing. After this
+ *   every triangle in a connected component agrees: all-out or all-in.
+ *
+ *   Step 2 (DIRECTION): one global decision per component via signed volume —
+ *   negative volume means the coherent family points inward, so flip the whole
+ *   component. Exact for closed components; open sheets are left as-coherent
+ *   (their signed volume is reported but not acted on).
+ *
+ * Born 2026-06-11: a boolean result built from a survey DXF (3DFACE entities
+ * carry no winding convention) was watertight but had 16k+ winding violations —
+ * a checkerboard of flipped patches. Every volume tool reported a different
+ * wrong number, and per-triangle In/Out heuristics could not fix it.
+ *
+ * Propagation deliberately does NOT cross non-manifold edges (3+ triangles):
+ * orientation is ambiguous there; each fan side is handled by whichever
+ * manifold path reaches it first.
+ */
+
+
+/**
+ * Orient a triangle soup so each connected component is winding-coherent and
+ * (for closed components) outward-facing.
+ *
+ * Does not mutate the input soup; flipped triangles are new objects, untouched
+ * triangles are passed through by reference.
+ *
+ * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soup - Triangle soup
+ * @param {Object} [options]
+ * @param {boolean} [options.outward=true] - Closed components face outward
+ *        (positive signed volume). Set false for inward.
+ * @returns {{
+ *   soup: Array,
+ *   diagnostics: {
+ *     components: number,
+ *     flippedForCoherence: number,
+ *     componentsFlippedForDirection: number,
+ *     windingViolationsBefore: number,
+ *     windingViolationsAfter: number,
+ *     signedVolume: number,
+ *     closedComponents: number,
+ *     openComponents: number
+ *   }
+ * }}
+ */
+function orientSolid(soup, options) {
+	var opts = options || {};
+	var outward = opts.outward !== false;
+	var n = soup.length;
+
+	// ── Build adjacency over undirected edges ──
+	// edgeKey -> [{ tri: index, dir: "ab"|"ba" }] where dir records whether the
+	// triangle traverses the edge from the lexically smaller key to the larger.
+	var edgeMap = {};
+	var triKeys = new Array(n);
+
+	function edgeId(a, b) { return a < b ? a + "|" + b : b + "|" + a; }
+
+	for (var i = 0; i < n; i++) {
+		var t = soup[i];
+		var ks = [vKey(t.v0), vKey(t.v1), vKey(t.v2)];
+		triKeys[i] = ks;
+		for (var e = 0; e < 3; e++) {
+			var a = ks[e], b = ks[(e + 1) % 3];
+			var id = edgeId(a, b);
+			(edgeMap[id] = edgeMap[id] || []).push({ tri: i, dir: a < b ? "ab" : "ba" });
+		}
+	}
+
+	function countViolations(flippedArr) {
+		// Two manifold neighbours are coherent when they traverse the shared
+		// edge in OPPOSITE directions (after accounting for flips).
+		var v = 0;
+		for (var id in edgeMap) {
+			var users = edgeMap[id];
+			if (users.length !== 2) continue;
+			var d0 = users[0].dir === "ab" ? 1 : -1;
+			var d1 = users[1].dir === "ab" ? 1 : -1;
+			if (flippedArr) {
+				if (flippedArr[users[0].tri]) d0 = -d0;
+				if (flippedArr[users[1].tri]) d1 = -d1;
+			}
+			if (d0 === d1) v++;
+		}
+		return v;
+	}
+
+	var violationsBefore = countViolations(null);
+
+	// ── Step 1: coherence flood fill (manifold edges only) ──
+	var flipped = new Uint8Array(n);
+	var visited = new Uint8Array(n);
+	var componentOf = new Int32Array(n);
+	var componentCount = 0;
+	var flippedForCoherence = 0;
+
+	for (var seed = 0; seed < n; seed++) {
+		if (visited[seed]) continue;
+		var queue = [seed];
+		visited[seed] = 1;
+		componentOf[seed] = componentCount;
+
+		var head = 0;
+		while (head < queue.length) {
+			var cur = queue[head++];
+			var ks2 = triKeys[cur];
+			for (var e2 = 0; e2 < 3; e2++) {
+				var a2 = ks2[e2], b2 = ks2[(e2 + 1) % 3];
+				var users2 = edgeMap[edgeId(a2, b2)];
+				if (!users2 || users2.length !== 2) continue; // boundary or non-manifold: don't propagate
+				var other = users2[0].tri === cur ? users2[1] : users2[0];
+				if (visited[other.tri]) continue;
+				var self = users2[0].tri === cur ? users2[0] : users2[1];
+
+				// Effective directions after current flip states
+				var dSelf = (self.dir === "ab" ? 1 : -1) * (flipped[cur] ? -1 : 1);
+				var dOther = (other.dir === "ab" ? 1 : -1);
+				// Coherent neighbours traverse opposite: if same, the neighbour
+				// must be flipped.
+				if (dSelf === dOther) {
+					flipped[other.tri] = 1;
+					flippedForCoherence++;
+				}
+				visited[other.tri] = 1;
+				componentOf[other.tri] = componentCount;
+				queue.push(other.tri);
+			}
+		}
+		componentCount++;
+	}
+
+	// ── Coherence-only early exit (preOrient for the winding-number field) ──
+	// Materialise the soup with ONLY the coherence flips (no per-component
+	// direction decision). Used to make a self-intersecting, non-orientable
+	// mesh's per-patch winding CONSISTENT before generalized-winding-number
+	// queries — the direction step is meaningless (and volume undefined) for
+	// such input, so it is skipped. windingViolationsAfter here reports the
+	// residual non-orientable seam (0 for orientable input).
+	if (opts.coherenceOnly) {
+		var cohSoup = new Array(n);
+		for (var chi = 0; chi < n; chi++) {
+			if (flipped[chi]) {
+				var cs = soup[chi];
+				cohSoup[chi] = { v0: cs.v0, v1: cs.v2, v2: cs.v1 };
+			} else {
+				cohSoup[chi] = soup[chi];
+			}
+		}
+		return {
+			soup: cohSoup,
+			diagnostics: {
+				components: componentCount,
+				flippedForCoherence: flippedForCoherence,
+				componentsFlippedForDirection: 0,
+				windingViolationsBefore: violationsBefore,
+				windingViolationsAfter: countViolations(flipped),
+				signedVolume: null,
+				closedComponents: 0,
+				openComponents: 0,
+				coherenceOnly: true
+			}
+		};
+	}
+
+	// ── Step 2: per-component signed volume → global direction ──
+	// Local origin (first vertex of first triangle of each component) keeps the
+	// determinant well-conditioned at UTM scale.
+	var compVol = new Float64Array(componentCount);
+	var compOrigin = new Array(componentCount);
+	var compOpenEdges = new Uint32Array(componentCount);
+
+	for (var id2 in edgeMap) {
+		var users3 = edgeMap[id2];
+		if (users3.length === 1) compOpenEdges[componentOf[users3[0].tri]]++;
+	}
+
+	for (var ti = 0; ti < n; ti++) {
+		var comp = componentOf[ti];
+		var tt = soup[ti];
+		if (!compOrigin[comp]) compOrigin[comp] = { x: tt.v0.x, y: tt.v0.y, z: tt.v0.z };
+		var o = compOrigin[comp];
+		var p0 = tt.v0, p1 = flipped[ti] ? tt.v2 : tt.v1, p2 = flipped[ti] ? tt.v1 : tt.v2;
+		var ax = p0.x - o.x, ay = p0.y - o.y, az = p0.z - o.z;
+		var bx = p1.x - o.x, by = p1.y - o.y, bz = p1.z - o.z;
+		var cx = p2.x - o.x, cy = p2.y - o.y, cz = p2.z - o.z;
+		compVol[comp] += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
+	}
+
+	var componentsFlippedForDirection = 0;
+	var closedComponents = 0;
+	var openComponents = 0;
+	var totalSignedVolume = 0;
+
+	var flipComponent = new Uint8Array(componentCount);
+	for (var c = 0; c < componentCount; c++) {
+		var vol = compVol[c] / 6;
+		var isClosed = compOpenEdges[c] === 0;
+		if (isClosed) closedComponents++; else openComponents++;
+		if (isClosed && ((outward && vol < 0) || (!outward && vol > 0))) {
+			flipComponent[c] = 1;
+			componentsFlippedForDirection++;
+			vol = -vol;
+		}
+		totalSignedVolume += vol;
+	}
+
+	// ── Materialise the result soup ──
+	var outSoup = new Array(n);
+	for (var oi = 0; oi < n; oi++) {
+		var doFlip = (flipped[oi] === 1) !== (flipComponent[componentOf[oi]] === 1);
+		if (doFlip) {
+			var st = soup[oi];
+			outSoup[oi] = { v0: st.v0, v1: st.v2, v2: st.v1 };
+		} else {
+			outSoup[oi] = soup[oi];
+		}
+	}
+
+	// Recount violations on the final orientation
+	var finalFlip = new Uint8Array(n);
+	for (var fi = 0; fi < n; fi++) {
+		finalFlip[fi] = (flipped[fi] === 1) !== (flipComponent[componentOf[fi]] === 1) ? 1 : 0;
+	}
+	var violationsAfter = countViolations(finalFlip);
+
+	return {
+		soup: outSoup,
+		diagnostics: {
+			components: componentCount,
+			flippedForCoherence: flippedForCoherence,
+			componentsFlippedForDirection: componentsFlippedForDirection,
+			windingViolationsBefore: violationsBefore,
+			windingViolationsAfter: violationsAfter,
+			signedVolume: totalSignedVolume,
+			closedComponents: closedComponents,
+			openComponents: openComponents
+		}
+	};
+}
+
+/**
+ * @module verify/finishMesh
+ *
+ * Bring a boolean result up to the output contract — or leave it alone and say why.
+ *
+ * The contract: no duplicate triangles, no degenerate slivers, consistent winding
+ * across shared edges, no T-junctions leaving open sleeves. Those are invariants,
+ * not options: a switch that turns off "correctly wound" is a mode that produces
+ * invalid output, so this exposes no flags for them.
+ *
+ * WHY EVERY STAGE IS GATED. "Repair" is not always an improvement. Measured on
+ * the real Kirra surfaces:
+ *
+ *   terrain x cylinder    consistentWinding:40                  -> clean
+ *   terrain x cup         consistentWinding:46                  -> clean
+ *   terrain x convoluted  consistentWinding:107 noTJunctions:1  -> manifoldEdges:1
+ *   shell x presplit-a    noTJunctions:4                        -> 6 violations. WORSE.
+ *
+ * That last row is the whole reason this module measures instead of assuming. On
+ * a badly defective input (shell carries 1186 open edges and 18 non-manifold
+ * edges at source) hole-free T-junction resolution trades 4 T-junctions for 2
+ * degenerates, 3 non-manifold edges and 1 remaining T-junction. An ungated
+ * pipeline would ship that as "repaired".
+ *
+ * So each stage runs on a copy, is measured with {@link module:verify/assessRepair},
+ * and is kept only if it reduces the total violation count. A stage that trades
+ * one violation class for another nets zero and is discarded.
+ *
+ * Stage order does not matter — verified across all three permutations on four
+ * real pairs, identical results — so the order here is simply cheapest first.
+ */
+
+
+function asSoup(x, fallback) {
+	if (!x) return fallback;
+	if (Array.isArray(x)) return x;
+	if (Array.isArray(x.soup)) return x.soup;
+	if (Array.isArray(x.triangles)) return x.triangles;
+	return fallback;
+}
+
+/**
+ * The default stages. Each is { name, run(soup, ctx) -> soup }.
+ *
+ * Deliberately all NON-DELETING except the dedup, which removes exact coincident
+ * duplicates only. Kirra measured that deleting geometry stitched into a mesh
+ * tears it open (removing 1827 slivers produced 3567 open edges and 90
+ * components), while welding dissolves the same junk for free — so no
+ * sliver-removal stage is included here. See assessRepair for the numbers.
+ */
+var DEFAULT_STAGES = [
+	{
+		name: "dedupCoincident",
+		run: function (soup) {
+			return asSoup(dedupCoincidentTriangles(soup), soup);
+		}
+	},
+	{
+		// Named for what it RUNS, not the family it belongs to. The legacy
+		// resolveTJunctions corrupts winding (see 0.6.7) and is deliberately
+		// not used anywhere in this pipeline.
+		name: "resolveTJunctionsHoleFree",
+		run: function (soup, ctx) {
+			return asSoup(resolveTJunctionsHoleFree(soup, ctx.tolerance, 4), soup);
+		}
+	},
+	{
+		name: "orientWinding",
+		run: function (soup) {
+			return asSoup(orientSolid(soup, { coherenceOnly: true }), soup);
+		}
+	}
+];
+
+/**
+ * Finish a triangle soup: apply each repair stage only where it measurably helps.
+ *
+ * @param {Array<{v0:Object, v1:Object, v2:Object}>} soup
+ * @param {Object} [options]
+ * @param {number} [options.tolerance] - Weld epsilon. Default: estimateWeldEps(soup).
+ *        Used for every measurement AND every stage, so they agree.
+ * @param {boolean} [options.expectClosed] - Require a closed solid in the report.
+ * @param {Array} [options.stages] - Override the stage list (advanced).
+ * @param {boolean} [options.force] - Apply every stage without gating. For
+ *        debugging only: this is how you reproduce the shell x presplit-a
+ *        regression documented above.
+ * @returns {{
+ *   soup: Array,
+ *   ok: boolean,
+ *   before: Object,
+ *   after: Object,
+ *   applied: Array<string>,
+ *   skipped: Array<{ stage: string, reason: string, violations: string }>,
+ *   stages: Array<Object>
+ * }}
+ */
+function finishMesh(soup, options) {
+	var opts = options || {};
+	if (!soup || soup.length === 0) {
+		var empty = verifyOutput(soup || [], opts);
+		return { soup: soup || [], ok: false, before: empty, after: empty, applied: [], skipped: [], stages: [] };
+	}
+
+	var tolerance = opts.tolerance !== undefined ? opts.tolerance : estimateWeldEps(soup);
+	if (!(tolerance > 0)) tolerance = 1e-6;
+
+	var vopts = { tolerance: tolerance, expectClosed: opts.expectClosed, minArea: opts.minArea };
+	var before = verifyOutput(soup, vopts);
+
+	var stages = opts.stages || DEFAULT_STAGES;
+	var ctx = { tolerance: tolerance, options: opts };
+
+	var current = soup;
+	var applied = [];
+	var skipped = [];
+	var reports = [];
+
+	for (var i = 0; i < stages.length; i++) {
+		var stage = stages[i];
+		var candidate;
+		try {
+			candidate = stage.run(current, ctx);
+		} catch (e) {
+			skipped.push({ stage: stage.name, reason: "threw", violations: e.message });
+			continue;
+		}
+		if (!candidate || candidate.length === 0) {
+			skipped.push({ stage: stage.name, reason: "produced nothing", violations: "" });
+			continue;
+		}
+
+		// Measure on a copy before committing — the whole point of the gate.
+		var assessment = assessRepair(current, candidate, {
+			tolerance: tolerance,
+			expectClosed: opts.expectClosed,
+			minArea: opts.minArea,
+			volumeTolPct: opts.volumeTolPct
+		});
+		reports.push({ stage: stage.name, assessment: assessment });
+
+		if (opts.force || assessment.recommend === "keep") {
+			current = candidate;
+			applied.push(stage.name);
+		} else {
+			skipped.push({
+				stage: stage.name,
+				reason: assessment.harmful ? "would damage the mesh" : "no net improvement",
+				violations: assessment.violationsBefore + " -> " + assessment.violationsAfter
+			});
+		}
+	}
+
+	var after = verifyOutput(current, vopts);
+
+	return {
+		soup: current,
+		ok: after.ok,
+		before: before,
+		after: after,
+		applied: applied,
+		skipped: skipped,
+		stages: reports
+	};
+}
+
+/**
+ * @module booleanAuto
+ *
+ * One call: pick the inputs and the output type, get valid geometry back.
+ *
+ * `bmsBooleanOp` exposes every stage of the pipeline, which is the right shape
+ * for tooling that wants to inspect or re-classify the splits. Most callers
+ * want none of that — they want A minus B, correctly wound, with no duplicate
+ * triangles and no T-junctions leaving open sleeves. This is that path:
+ *
+ *     booleanAuto(terrain, cutter, "subtract")   ->  { soup, ok, report }
+ *
+ * The quality properties are INVARIANTS, not options. There is no flag to turn
+ * off "correctly wound", because a mode that emits invalid geometry is not a
+ * feature. What IS exposed is `quality`, which chooses how hard to work:
+ *
+ *   "strict" (default)  run the finisher, gated — never returns geometry worse
+ *                       than the raw boolean, because every stage is measured
+ *                       before it is kept.
+ *   "raw"               skip finishing entirely. The pre-0.7.1 result, for
+ *                       debugging or when the caller finishes it themselves.
+ *
+ * Additive: `bmsBooleanOp` is unchanged and remains the full-control entry point.
+ */
+
+
+/**
+ * Run a boolean and return finished, valid geometry.
+ *
+ * @param {Array<{v0:Object,v1:Object,v2:Object}>} soupA
+ * @param {Array<{v0:Object,v1:Object,v2:Object}>} soupB
+ * @param {"subtract"|"union"|"intersect"} operation
+ * @param {Object} [options]
+ * @param {"strict"|"raw"} [options.quality="strict"] - How hard to work on the
+ *        output. "strict" runs the gated finisher; "raw" returns the merged
+ *        boolean untouched.
+ * @param {"auto"|"hybrid"|"heffalump"} [options.classifier="auto"]
+ * @param {number} [options.tolerance] - Shared by the boolean AND the finisher,
+ *        so the two never disagree about what counts as the same vertex.
+ * @param {boolean} [options.preRepair]
+ * @param {boolean} [options.coplanar]
+ * @param {boolean} [options.expectClosed] - Report closure in the verification.
+ * @returns {{
+ *   soup: Array,
+ *   ok: boolean,
+ *   operation: string,
+ *   report: Object|null,
+ *   verification: Object|null,
+ *   classifier: Object|null,
+ *   boolean: Object|null
+ * }|null} Null when the boolean itself could not run.
+ */
+function booleanAuto(soupA, soupB, operation, options) {
+	var opts = options || {};
+	var quality = opts.quality || "strict";
+
+	if (!operation) {
+		throw new Error(
+			"booleanAuto requires an operation (\"subtract\", \"union\" or \"intersect\"). " +
+			"To get the split groups without merging, call bmsBooleanOp directly."
+		);
+	}
+
+	var res = bmsBooleanOp(soupA, soupB, operation, {
+		classifier: opts.classifier,
+		tolerance: opts.tolerance,
+		preRepair: opts.preRepair,
+		coplanar: opts.coplanar,
+		minAreaRatio: opts.minAreaRatio
+	});
+	if (!res) return null;
+
+	var merged = mergeSplitGroups(res.groups, operation);
+	// A genuinely empty result (the meshes do not overlap, or the operation
+	// selects nothing) is not an error — hand back an empty soup and let the
+	// verification explain. res.verification already distinguishes "provably
+	// apart" (null) from "suspiciously found nothing" (a failure).
+	var soup = merged && merged.soup ? merged.soup : [];
+
+	if (quality === "raw" || soup.length === 0) {
+		return {
+			soup: soup,
+			ok: soup.length > 0 && verifyOutput(soup, { tolerance: opts.tolerance, expectClosed: opts.expectClosed }).ok,
+			operation: operation,
+			report: null,
+			verification: res.verification,
+			classifier: res.classifier,
+			boolean: res
+		};
+	}
+
+	var finished = finishMesh(soup, {
+		tolerance: opts.tolerance,
+		expectClosed: opts.expectClosed,
+		minArea: opts.minArea,
+		volumeTolPct: opts.volumeTolPct
+	});
+
+	return {
+		soup: finished.soup,
+		ok: finished.ok,
+		operation: operation,
+		report: finished,
+		verification: res.verification,
+		classifier: res.classifier,
+		boolean: res
+	};
 }
 
 /**
@@ -6316,7 +11938,6 @@ function cleanCrossingTriangles(tris) {
  */
 function extractBoundaryLoops(tris) {
 	var edgeMap = {};
-	var halfEdges = {};
 
 	for (var i = 0; i < tris.length; i++) {
 		var tri = tris[i];
@@ -6330,7 +11951,6 @@ function extractBoundaryLoops(tris) {
 				edgeMap[ek] = { count: 0, v0: verts[e], v1: verts[ne], k0: keys[e], k1: keys[ne] };
 			}
 			edgeMap[ek].count++;
-			halfEdges[keys[e] + "|" + keys[ne]] = true;
 		}
 	}
 
@@ -6348,61 +11968,104 @@ function extractBoundaryLoops(tris) {
 		return { loops: [], boundaryEdgeCount: 0, overSharedEdgeCount: overSharedCount };
 	}
 
-	var adj = {};
-
+	// Chain boundary edges into loops by consuming UNDIRECTED edges.
+	//
+	// Two hard-won lessons baked in here (2026-06-11, real mine data):
+	// 1. Don't mark VERTICES used — a pinch vertex where 2+ loops meet
+	//    (degree 4, 6, ...) gets consumed by the first loop and the other
+	//    petals can never close. Consume EDGES; a pinch vertex then resolves
+	//    into separate simple loops naturally.
+	// 2. Don't walk by triangle WINDING — merged boolean results can contain
+	//    regions of opposite winding (user-flipped normals, mixed Z+/Z-
+	//    regions), so directed half-edges dead-end. Chain undirected edges;
+	//    triangulateLoop() corrects cap orientation via the Newell normal.
+	var edges = [];
+	var incident = {}; // vertex key -> array of edge indices
 	for (var b = 0; b < boundaryEdges.length; b++) {
 		var be = boundaryEdges[b];
-		var fromKey, toKey, fromVert, toVert;
-		if (halfEdges[be.k0 + "|" + be.k1]) {
-			fromKey = be.k1; toKey = be.k0;
-			fromVert = be.v1; toVert = be.v0;
-		} else {
-			fromKey = be.k0; toKey = be.k1;
-			fromVert = be.v0; toVert = be.v1;
-		}
-		if (!adj[fromKey]) adj[fromKey] = [];
-		adj[fromKey].push({ key: toKey, vertex: toVert, fromVertex: fromVert });
+		edges.push({ k0: be.k0, k1: be.k1, v0: be.v0, v1: be.v1, used: false });
+		(incident[be.k0] = incident[be.k0] || []).push(b);
+		(incident[be.k1] = incident[be.k1] || []).push(b);
 	}
 
-	var used = {};
 	var loops = [];
 
-	for (var startKey in adj) {
-		if (used[startKey]) continue;
+	for (var startEi = 0; startEi < edges.length; startEi++) {
+		if (edges[startEi].used) continue;
 
-		var loop = [];
-		var currentKey = startKey;
-		var safety = boundaryEdges.length + 1;
+		var first = edges[startEi];
+		first.used = true;
+		var startKey = first.k0;
+		var loop = [first.v0];
+		var curKey = first.k1;
+		var curVert = first.v1;
+		var safety = edges.length + 1;
+		var closed = false;
 
 		while (safety-- > 0) {
-			if (used[currentKey]) break;
-			used[currentKey] = true;
+			if (curKey === startKey) { closed = true; break; }
+			loop.push(curVert);
 
-			var neighbors = adj[currentKey];
-			if (!neighbors || neighbors.length === 0) break;
-
+			var inc = incident[curKey];
 			var next = null;
-			for (var n = 0; n < neighbors.length; n++) {
-				if (!used[neighbors[n].key] || (neighbors[n].key === startKey && loop.length > 2)) {
-					next = neighbors[n];
-					break;
-				}
+			for (var ii = 0; ii < (inc ? inc.length : 0); ii++) {
+				var cand = edges[inc[ii]];
+				if (cand.used) continue;
+				next = cand;
+				break;
 			}
+			if (!next) break; // dead end — dangling chain, not closable
 
-			if (!next) break;
-
-			loop.push(next.fromVertex);
-			currentKey = next.key;
-
-			if (currentKey === startKey) break;
+			next.used = true;
+			if (next.k0 === curKey) { curKey = next.k1; curVert = next.v1; }
+			else { curKey = next.k0; curVert = next.v0; }
 		}
 
-		if (loop.length >= 3) {
-			loops.push(loop);
+		if (closed && loop.length >= 3) {
+			// A walk that routes THROUGH a pinch vertex merges two petals into one
+			// self-touching loop (repeated vertex). Downstream CDT (Constrainautor)
+			// infinite-loops on duplicate points, so split into simple loops here.
+			var simple = _splitSelfTouching(loop);
+			for (var si = 0; si < simple.length; si++) {
+				loops.push(simple[si]);
+			}
 		}
 	}
 
 	return { loops: loops, boundaryEdgeCount: boundaryEdges.length, overSharedEdgeCount: overSharedCount };
+}
+
+/**
+ * Split a closed (cyclic) vertex loop containing repeated vertices into
+ * simple sub-loops. Standard stack-based cycle extraction: when a vertex key
+ * repeats, the segment between its two occurrences is one simple loop.
+ * @private
+ * @param {Array<{x,y,z}>} loop
+ * @returns {Array<Array<{x,y,z}>>} Simple loops (each >= 3 verts, no repeats)
+ */
+function _splitSelfTouching(loop) {
+	var out = [];
+	var stack = [];
+	var indexOf = {};
+
+	for (var i = 0; i < loop.length; i++) {
+		var k = vKey(loop[i]);
+		if (indexOf[k] !== undefined) {
+			var at = indexOf[k];
+			var cycle = stack.splice(at);
+			for (var c = 0; c < cycle.length; c++) delete indexOf[cycle[c].k];
+			if (cycle.length >= 3) {
+				out.push(cycle.map(function (e) { return e.v; }));
+			}
+		}
+		indexOf[k] = stack.length;
+		stack.push({ k: k, v: loop[i] });
+	}
+
+	if (stack.length >= 3) {
+		out.push(stack.map(function (e) { return e.v; }));
+	}
+	return out;
 }
 
 /**
@@ -6496,17 +12159,46 @@ function triangulateLoop(loop) {
 		coords[j * 2 + 1] = projV(loop[j]);
 	}
 
+	// Guard against the Constrainautor infinite-loop on coincident projected
+	// points: two DISTINCT 3D loop vertices can collapse to the SAME 2D point
+	// after projection (a pinhole on/near a vertical wall). _splitSelfTouching
+	// dedups in 3D (vKey), so it cannot catch this 2D-only collision, and the
+	// try/catch below only guards THROWS, not hangs. Detect coincident projected
+	// points up front (n2 is small, so O(n^2) is trivial); if any exist, skip the
+	// constrain step — the unconstrained Delaunay is robust to duplicates and
+	// completes. (Fixes an order-dependent closeSolid hang on real mine data.)
+	var bbU0 = Infinity, bbV0 = Infinity, bbU1 = -Infinity, bbV1 = -Infinity;
+	for (var bi = 0; bi < n2; bi++) {
+		var bu = coords[bi * 2], bv = coords[bi * 2 + 1];
+		if (bu < bbU0) bbU0 = bu; if (bu > bbU1) bbU1 = bu;
+		if (bv < bbV0) bbV0 = bv; if (bv > bbV1) bbV1 = bv;
+	}
+	var diag2 = (bbU1 - bbU0) * (bbU1 - bbU0) + (bbV1 - bbV0) * (bbV1 - bbV0);
+	var coincidentEps2 = Math.max(diag2 * 1e-14, 1e-18); // relative + absolute floor
+	var hasDup2D = false;
+	for (var pi = 0; pi < n2 && !hasDup2D; pi++) {
+		for (var pj = pi + 1; pj < n2; pj++) {
+			var ddu = coords[pi * 2] - coords[pj * 2];
+			var ddv = coords[pi * 2 + 1] - coords[pj * 2 + 1];
+			if (ddu * ddu + ddv * ddv <= coincidentEps2) { hasDup2D = true; break; }
+		}
+	}
+
 	var del, con;
 	try {
 		del = new Delaunator(coords);
-		con = new Constrainautor(del);
+		// Only constrain when the projection is non-degenerate — Constrainautor
+		// can HANG (not throw) on coincident points or an empty triangulation.
+		if (!hasDup2D && del.triangles.length > 0) {
+			con = new Constrainautor(del);
 
-		for (var ci = 0; ci < n2; ci++) {
-			var ni = (ci + 1) % n2;
-			try {
-				con.constrainOne(ci, ni);
-			} catch (e) {
-				// Skip problematic constraint edges
+			for (var ci = 0; ci < n2; ci++) {
+				var ni = (ci + 1) % n2;
+				try {
+					con.constrainOne(ci, ni);
+				} catch (e) {
+					// Skip problematic constraint edges
+				}
 			}
 		}
 	} catch (e) {
@@ -6738,6 +12430,126 @@ function removeOverlappingTriangles(tris, tolerance) {
 }
 
 /**
+ * @module repair/closeSolid
+ *
+ * Honest, conservative solid closing — the antidote to "smart" closing.
+ *
+ * Philosophy (born from a real failure: KNOWN_ISSUES #14 and the 2026-06-11
+ * Kirra session where stitch+cap+forceClose draped ~3,350 invented panels
+ * across a terrain floor):
+ *
+ *   1. A boolean result built on a shared vertex pool (BMS) already has
+ *      coincident seam vertices. WELDING ALONE should close it. No bridging,
+ *      no proximity stitching, no force-closing.
+ *   2. Small boundary loops (pinholes) are capped LOCALLY — triangles whose
+ *      vertices all lie ON that loop. Nothing is ever drawn across the mesh.
+ *   3. Large boundary loops indicate a REAL upstream problem (classification,
+ *      missing region, intentional open boundary). They are NEVER capped —
+ *      they are reported in the diagnostics so the caller can see the truth.
+ *   4. The result always carries diagnostics: the caller can display
+ *      "Closed: 0 open edges" or "NOT closed: N edges in M loops" instead of
+ *      trusting the operation blind.
+ *
+ * This function never deletes input triangles and never adds a triangle whose
+ * vertices are not all on a single small boundary loop.
+ */
+
+
+/**
+ * Close a triangle soup into a solid by welding and capping pinhole loops only.
+ *
+ * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soup - Triangle soup
+ * @param {Object} [options]
+ * @param {number} [options.snapTolerance=0.001] - Weld tolerance in metres
+ * @param {number} [options.maxCapLoopVerts=32] - Loops with more vertices than
+ *        this are considered structural problems and are reported, not capped
+ * @param {number} [options.maxPasses=3] - Re-extract/cap passes (capping one
+ *        loop can reveal another after re-welding)
+ * @returns {{
+ *   points: Array<{x,y,z}>,
+ *   triangles: Array,
+ *   soup: Array,
+ *   diagnostics: {
+ *     closed: boolean,
+ *     openEdges: number,
+ *     openLoops: number,
+ *     loopSizes: number[],
+ *     skippedLargeLoops: number[],
+ *     cappedLoops: number,
+ *     capTriangles: number,
+ *     nonManifoldEdges: number
+ *   }
+ * }}
+ */
+function closeSolid(soup, options) {
+	var opts = options || {};
+	var snapTol = opts.snapTolerance !== undefined ? opts.snapTolerance : 0.001;
+	var maxCapLoopVerts = opts.maxCapLoopVerts !== undefined ? opts.maxCapLoopVerts : 32;
+	var maxPasses = opts.maxPasses !== undefined ? opts.maxPasses : 3;
+
+	// Step 1) Weld. With shared-pool (BMS) seams this alone closes the mesh.
+	var welded = weldVertices(soup, snapTol);
+	soup = weldedToSoup(welded.triangles);
+
+	var cappedLoops = 0;
+	var capTriangles = 0;
+	var skippedLargeLoops = [];
+
+	// Step 2) Cap pinhole loops only. Never bridge, never force-close.
+	for (var pass = 0; pass < maxPasses; pass++) {
+		var loopResult = extractBoundaryLoops(soup);
+		if (loopResult.loops.length === 0) break;
+
+		var addedThisPass = 0;
+		skippedLargeLoops = [];
+
+		for (var li = 0; li < loopResult.loops.length; li++) {
+			var loop = loopResult.loops[li];
+			if (loop.length < 3) continue;
+			if (loop.length > maxCapLoopVerts) {
+				// Structural opening — report, never drape a lid across it.
+				skippedLargeLoops.push(loop.length);
+				continue;
+			}
+			var caps = triangulateLoop(loop);
+			if (caps.length === 0) continue;
+			for (var ct = 0; ct < caps.length; ct++) soup.push(caps[ct]);
+			cappedLoops++;
+			addedThisPass += caps.length;
+		}
+
+		capTriangles += addedThisPass;
+		if (addedThisPass === 0) break;
+
+		// Re-weld so cap triangles fuse with the loop edges before re-checking.
+		var rewelded = weldVertices(soup, snapTol);
+		soup = weldedToSoup(rewelded.triangles);
+	}
+
+	// Step 3) Final state + honest diagnostics.
+	var finalWeld = weldVertices(soup, snapTol);
+	var finalSoup = weldedToSoup(finalWeld.triangles);
+	var stats = countOpenEdges(finalSoup);
+	var finalLoops = extractBoundaryLoops(finalSoup);
+
+	return {
+		points: finalWeld.points,
+		triangles: finalWeld.triangles,
+		soup: finalSoup,
+		diagnostics: {
+			closed: stats.openEdges === 0,
+			openEdges: stats.openEdges,
+			openLoops: finalLoops.loops.length,
+			loopSizes: finalLoops.loops.map(function (l) { return l.length; }),
+			skippedLargeLoops: skippedLargeLoops,
+			cappedLoops: cappedLoops,
+			capTriangles: capTriangles,
+			nonManifoldEdges: stats.overShared
+		}
+	};
+}
+
+/**
  * @module repair/repairMesh
  *
  * High-level async mesh repair pipeline.
@@ -6755,7 +12567,12 @@ function removeOverlappingTriangles(tris, tolerance) {
  *
  * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soup - Triangle soup
  * @param {Object} [config]
- * @param {string}  [config.closeMode="none"] - "none" | "weld" | "stitch"
+ * @param {string}  [config.closeMode="none"] - "none" | "weld" | "stitch" | "closeSolid"
+ *        "closeSolid" bypasses the entire pipeline and runs closeSolid():
+ *        weld + pinhole-loop capping only — no dedup, no T-junction splitting,
+ *        no proximity stitching, no force-close. Returns honest diagnostics.
+ * @param {number}  [config.maxCapLoopVerts=32] - closeSolid only: loops larger
+ *        than this are reported as structural openings, never capped
  * @param {number}  [config.snapTolerance=0] - Weld tolerance in metres
  * @param {number}  [config.stitchTolerance=1.0] - Stitch tolerance
  * @param {boolean} [config.removeDegenerate=true] - Remove degenerate/sliver triangles
@@ -6786,15 +12603,44 @@ async function repairMesh(soup, config, onProgress) {
 		return new Promise(function (r) { setTimeout(r, 0); });
 	}
 
+	// closeSolid mode: PURE path. The boolean output (especially BMS, whose
+	// shared vertex pool guarantees coincident seams) must not be "repaired" —
+	// dedup/T-junction/stitch/force-close can manufacture geometry. Weld, cap
+	// pinholes locally, report the truth.
+	if (closeMode === "closeSolid") {
+		progress("Closing solid (weld + pinhole caps)...");
+		await yieldUI();
+		var closed = closeSolid(soup, {
+			snapTolerance: snapTol,
+			maxCapLoopVerts: config.maxCapLoopVerts
+		});
+		progress(closed.diagnostics.closed
+			? "Closed: 0 open edges."
+			: "NOT closed: " + closed.diagnostics.openEdges + " open edges in " +
+			closed.diagnostics.openLoops + " loop(s)" +
+			(closed.diagnostics.skippedLargeLoops.length
+				? " — large structural opening(s): " + closed.diagnostics.skippedLargeLoops.join(", ") + " verts"
+				: ""));
+		return closed;
+	}
+
 	// Step 1: Deduplicate seam vertices
 	progress("Deduplicating vertices...");
 	await yieldUI();
 	soup = deduplicateSeamVertices(soup, 1e-4);
 
 	// Step 1.5: Resolve T-junctions
+	//
+	// Hole-free, not the legacy resolveTJunctions. The legacy pass keys vertices
+	// with toFixed(6) strings and samples each edge independently, so triangles
+	// sharing an edge can disagree about its split points and the mesh tears
+	// open. It also takes Delaunator's output order as-is, which does not
+	// preserve the source triangle's orientation — about a third of the
+	// sub-triangles came back wound backwards, flipping the surface normal.
+	// See test/repairWinding.test.js.
 	progress("Resolving T-junctions...");
 	await yieldUI();
-	soup = resolveTJunctions(soup, 1e-4);
+	soup = resolveTJunctionsHoleFree(soup, 1e-4);
 
 	// Step 2: Weld vertices
 	progress("Welding vertices...");
@@ -6977,29 +12823,55 @@ function meshToSoup(object) {
 /**
  * Convert triangle soup to a THREE.Mesh with BufferGeometry.
  *
+ * The geometry is built in a LOCAL frame — vertices are translated by the soup
+ * centroid and the centroid is put on `mesh.position`, so the mesh lands in the
+ * same world place. This is not cosmetic. THREE stores positions as Float32,
+ * whose spacing at a UTM northing of 7.4e6 is 0.5 m; writing absolute survey
+ * coordinates straight in silently collapses any two vertices closer together
+ * than that. Measured on realistic coordinates: 7444123.456 lands on 7444123.5,
+ * an error of 0.044 m, and 6771845.678 lands on 6771845.5, an error of 0.178 m.
+ * In the local frame the same values carry ~1e-6 m of error.
+ *
+ * Pass `{ recenter: false }` for the pre-0.7.1 behaviour (absolute coordinates
+ * in the attribute, mesh at the origin). Only safe near the origin.
+ *
  * @param {Array<{ v0: {x,y,z}, v1: {x,y,z}, v2: {x,y,z} }>} soup
  * @param {Object} [options]
  * @param {number|string} [options.color=0x4488FF] - Mesh color
  * @param {boolean} [options.doubleSide=true] - Use DoubleSide material
  * @param {boolean} [options.wireframe=false] - Wireframe mode
+ * @param {boolean} [options.recenter=true] - Build in a local frame (see above)
  * @returns {THREE.Mesh}
  */
 function soupToMesh(soup, options) {
 	if (!options) options = {};
 
+	var cx = 0, cy = 0, cz = 0;
+	var recenter = options.recenter !== false;
+	if (recenter && soup.length > 0) {
+		for (var c = 0; c < soup.length; c++) {
+			var t = soup[c];
+			cx += t.v0.x + t.v1.x + t.v2.x;
+			cy += t.v0.y + t.v1.y + t.v2.y;
+			cz += t.v0.z + t.v1.z + t.v2.z;
+		}
+		var n = soup.length * 3;
+		cx /= n; cy /= n; cz /= n;
+	}
+
 	var positions = new Float32Array(soup.length * 9);
 	for (var i = 0; i < soup.length; i++) {
 		var tri = soup[i];
 		var offset = i * 9;
-		positions[offset] = tri.v0.x;
-		positions[offset + 1] = tri.v0.y;
-		positions[offset + 2] = tri.v0.z;
-		positions[offset + 3] = tri.v1.x;
-		positions[offset + 4] = tri.v1.y;
-		positions[offset + 5] = tri.v1.z;
-		positions[offset + 6] = tri.v2.x;
-		positions[offset + 7] = tri.v2.y;
-		positions[offset + 8] = tri.v2.z;
+		positions[offset] = tri.v0.x - cx;
+		positions[offset + 1] = tri.v0.y - cy;
+		positions[offset + 2] = tri.v0.z - cz;
+		positions[offset + 3] = tri.v1.x - cx;
+		positions[offset + 4] = tri.v1.y - cy;
+		positions[offset + 5] = tri.v1.z - cz;
+		positions[offset + 6] = tri.v2.x - cx;
+		positions[offset + 7] = tri.v2.y - cy;
+		positions[offset + 8] = tri.v2.z - cz;
 	}
 
 	var geometry = new THREE.BufferGeometry();
@@ -7012,26 +12884,53 @@ function soupToMesh(soup, options) {
 		wireframe: !!options.wireframe
 	});
 
-	return new THREE.Mesh(geometry, material);
+	var mesh = new THREE.Mesh(geometry, material);
+	if (recenter) mesh.position.set(cx, cy, cz);
+	return mesh;
 }
 
 /**
  * Perform a boolean operation on two THREE.Mesh/Group objects.
  *
+ * Runs the BMS pipeline through {@link booleanAuto}: shared Steiner vertex pool,
+ * hybrid classification with auto heffalump fallback, and gated finishing so the
+ * result is correctly wound with no duplicate triangles or T-junctions.
+ *
+ * Before 0.7.1 this called the classic flood-fill/half-space path, which does
+ * not target open or non-manifold surfaces — so the documented Three.js
+ * one-liner missed the engine the library exists for. Pass
+ * `{ engine: "classic" }` for the old behaviour.
+ *
  * @param {THREE.Object3D} meshA - First mesh
  * @param {THREE.Object3D} meshB - Second mesh
  * @param {"subtract"|"union"|"intersect"} operation
- * @param {Object} [options] - Options passed to soupToMesh for the result
+ * @param {Object} [options] - Passed to soupToMesh, plus:
+ * @param {"bms"|"classic"} [options.engine="bms"] - Pipeline to use
+ * @param {"strict"|"raw"} [options.quality="strict"] - Finishing level (BMS only)
+ * @param {number} [options.tolerance] - Vertex tolerance
  * @returns {THREE.Mesh|null} Result mesh, or null on failure
  */
 function booleanFromMeshes(meshA, meshB, operation, options) {
+	var opts = options || {};
 	var soupA = meshToSoup(meshA);
 	var soupB = meshToSoup(meshB);
 
-	var result = boolean(soupA, soupB, operation);
-	if (!result) return null;
+	if (opts.engine === "classic") {
+		var classic = boolean(soupA, soupB, operation);
+		if (!classic) return null;
+		return soupToMesh(classic.soup, opts);
+	}
 
-	return soupToMesh(result.soup, options);
+	var result = booleanAuto(soupA, soupB, operation, {
+		quality: opts.quality,
+		classifier: opts.classifier,
+		tolerance: opts.tolerance,
+		preRepair: opts.preRepair,
+		coplanar: opts.coplanar
+	});
+	if (!result || !result.soup || result.soup.length === 0) return null;
+
+	return soupToMesh(result.soup, opts);
 }
 
 /**
@@ -7062,5 +12961,5 @@ async function repairFromMesh(mesh, config, onProgress, meshOptions) {
 	return soupToMesh(result.soup, meshOptions);
 }
 
-export { boolean, booleanFromMeshes, intersectMeshPairTagged as intersect, intersectFromMeshes, meshToSoup, repairMesh as repair, repairFromMesh, soupToMesh };
+export { boolean, booleanAuto, booleanFromMeshes, intersectMeshPairTagged as intersect, intersectFromMeshes, meshToSoup, repairMesh as repair, repairFromMesh, soupToMesh };
 //# sourceMappingURL=trimesh-boolean-three.esm.js.map

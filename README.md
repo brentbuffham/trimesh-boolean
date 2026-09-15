@@ -32,6 +32,12 @@ Or use the CDN for browser scripts:
 
 ### Live demo (GitHub Pages)
 
+
+Two pages:
+
+- **[Workflows](https://brentbuffham.github.io/trimesh-boolean/workflows.html)** — every pipeline as a runnable walkthrough. Each one shows the code it actually runs (the listing is generated from the function itself, so it cannot drift), the geometry before and after, and the measured effect. Includes the T-junction repair comparison: the legacy resolver leaves 66.7% of triangles correctly wound, the hole-free one leaves 100%.
+- **[Boolean playground](https://brentbuffham.github.io/trimesh-boolean/)** — load surfaces, run operations, inspect and re-classify the splits by hand.
+
 The [live demo](https://brentbuffham.github.io/trimesh-boolean/) is **built and deployed automatically** on every push to `main` or `master` by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) (`npm run build:docs` in CI). You do **not** need to commit the `docs/` folder for the site to update.
 
 **One-time repo setting:** GitHub → **Settings** → **Pages** → **Build and deployment** → **Source:** **GitHub Actions** (not “Deploy from a branch”). After that, each push runs the workflow and refreshes the demo.

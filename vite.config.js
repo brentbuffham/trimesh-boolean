@@ -19,7 +19,8 @@ export default defineConfig(function (ctx) {
 			rollupOptions: {
 				input: {
 					index: resolve(__dirname, "examples/index.html"),
-					"2d": resolve(__dirname, "examples/2d.html")
+					"2d": resolve(__dirname, "examples/2d.html"),
+					workflows: resolve(__dirname, "examples/workflows.html")
 				}
 			}
 		}

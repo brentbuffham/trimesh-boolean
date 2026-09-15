@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>trimesh-boolean — workflows</title>
+<style>
+	:root {
+		--bg: #1a1a1a; --panel: #222; --edge: #333; --ink: #ddd; --dim: #888;
+		--accent: #F47920; --blue: #4472C4; --good: #4CAF50; --bad: #E05252;
+	}
+	* { box-sizing: border-box; }
+	body { margin: 0; background: var(--bg); color: var(--ink);
+		font: 13px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; }
+	a { color: var(--accent); }
+
+	header { padding: 10px 16px; border-bottom: 1px solid var(--edge);
+		display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+	header h1 { margin: 0; font-size: 18px; }
+	header .v { color: var(--dim); font-size: 12px; }
+	header nav { margin-left: auto; display: flex; gap: 12px; }
+
+	.wrap { display: grid; grid-template-columns: 260px 1fr; min-height: calc(100vh - 47px); }
+	@media (max-width: 860px) { .wrap { grid-template-columns: 1fr; } }
+
+	/* ── index ── */
+	aside { border-right: 1px solid var(--edge); padding: 10px 0; overflow-y: auto; }
+	aside .group { color: var(--dim); font-size: 11px; text-transform: uppercase;
+		letter-spacing: .06em; padding: 12px 14px 4px; }
+	aside button { display: block; width: 100%; text-align: left; padding: 7px 14px;
+		background: none; border: 0; border-left: 3px solid transparent;
+		color: var(--ink); cursor: pointer; font: inherit; }
+	aside button:hover { background: #2a2a2a; }
+	aside button.on { background: #2d2d2d; border-left-color: var(--accent); color: #fff; }
+
+	/* ── stage ── */
+	main { padding: 16px 20px 40px; max-width: 1100px; }
+	h2 { margin: 0 0 4px; font-size: 20px; }
+	.why { color: var(--dim); margin: 0 0 14px; max-width: 70ch; }
+	.why strong { color: var(--ink); }
+
+	.bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+	button.run { background: var(--accent); color: #111; border: 0; padding: 7px 16px;
+		border-radius: 3px; font: 600 13px inherit; cursor: pointer; }
+	button.run:hover { filter: brightness(1.1); }
+	button.ghost { background: #2c2c2c; color: var(--ink); border: 1px solid var(--edge);
+		padding: 6px 12px; border-radius: 3px; cursor: pointer; font: inherit; }
+	button.ghost.on { border-color: var(--accent); color: #fff; }
+
+	pre { background: #151515; border: 1px solid var(--edge); border-radius: 4px;
+		padding: 12px 14px; overflow-x: auto; margin: 0 0 14px;
+		font: 12px/1.6 "Cascadia Code", Consolas, monospace; color: #cfcfcf; }
+	pre .cm { color: #6a9955; }
+	pre .kw { color: #569cd6; }
+	pre .st { color: #ce9178; }
+
+	.cols { display: grid; grid-template-columns: 1fr 340px; gap: 16px; }
+	@media (max-width: 1000px) { .cols { grid-template-columns: 1fr; } }
+
+	#view { width: 100%; height: 420px; background: #111;
+		border: 1px solid var(--edge); border-radius: 4px; }
+
+	table { border-collapse: collapse; width: 100%; font-size: 12px; }
+	th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #2b2b2b; }
+	th { color: var(--dim); font-weight: 600; }
+	td.num { text-align: right; font-family: Consolas, monospace; }
+	.good { color: var(--good); } .bad { color: var(--bad); } .dim { color: var(--dim); }
+
+	.note { border-left: 3px solid var(--accent); background: #262117;
+		padding: 9px 12px; margin: 12px 0 0; color: #e8d8c4; }
+	.legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0 0; font-size: 12px; }
+	.legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px;
+		margin-right: 5px; vertical-align: -1px; }
+	.status { color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+	<h1>trimesh-boolean</h1>
+	<span class="v" id="ver">…</span>
+	<span class="status">workflows — every pipeline, with the code that runs it</span>
+	<nav>
+		<a href="./index.html">Boolean playground</a>
+		<a href="./2d.html">2D demo</a>
+		<a href="https://github.com/brentbuffham/trimesh-boolean">GitHub</a>
+	</nav>
+</header>
+
+<div class="wrap">
+	<aside id="index"></aside>
+	<main>
+		<h2 id="title">…</h2>
+		<p class="why" id="why"></p>
+
+		<div class="bar">
+			<button class="run" id="run">Run it</button>
+			<span id="views"></span>
+			<span class="status" id="status"></span>
+		</div>
+
+		<pre id="code"></pre>
+
+		<div class="cols">
+			<div>
+				<div id="view"></div>
+				<div class="legend" id="legend"></div>
+			</div>
+			<div>
+				<table id="metrics"><tbody></tbody></table>
+				<div id="note"></div>
+			</div>
+		</div>
+	</main>
+</div>
+
+<script type="importmap">
+{ "imports": {
+	"three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+	"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import * as TB from '../src/index.js';
+import pkg from '../package.json';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Every workflow below shows the code it RUNS, not a copy of it: the panel is
+// filled from fn.toString(). The listing cannot drift from the behaviour.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Version comes from package.json at build time, so it cannot go stale.
+document.getElementById('ver').textContent = 'v' + pkg.version;
+
+// Real Kirra survey surfaces, when they are available.
+var kirra = {};
+try {
+	var kd = await (await fetch('./kirra-surfaces.json')).json();
+	Object.keys(kd).forEach(function (k) { if (kd[k] && kd[k].soup) kirra[k] = kd[k].soup; });
+} catch (e) { /* demo still works on synthetic geometry */ }
+
+// ── Geometry builders ────────────────────────────────────────────────────────
+
+function grid(n, ox, oy, oz, step) {
+	var s = [], d = step || 1;
+	for (var i = 0; i < n; i++) for (var j = 0; j < n; j++) {
+		var x0 = ox + i * d, x1 = x0 + d, y0 = oy + j * d, y1 = y0 + d;
+		s.push({ v0: { x: x0, y: y0, z: oz }, v1: { x: x1, y: y0, z: oz }, v2: { x: x1, y: y1, z: oz } });
+		s.push({ v0: { x: x0, y: y0, z: oz }, v1: { x: x1, y: y1, z: oz }, v2: { x: x0, y: y1, z: oz } });
+	}
+	return s;
+}
+
+function box(cx, cy, cz, r) {
+	var p = function (x, y, z) { return { x: x, y: y, z: z }; };
+	var v = [p(cx-r,cy-r,cz-r), p(cx+r,cy-r,cz-r), p(cx+r,cy+r,cz-r), p(cx-r,cy+r,cz-r),
+	         p(cx-r,cy-r,cz+r), p(cx+r,cy-r,cz+r), p(cx+r,cy+r,cz+r), p(cx-r,cy+r,cz+r)];
+	var q = function (a,b,c,d) { return [{v0:v[a],v1:v[b],v2:v[c]}, {v0:v[a],v1:v[c],v2:v[d]}]; };
+	return [].concat(q(0,3,2,1), q(4,5,6,7), q(0,1,5,4), q(1,2,6,5), q(2,3,7,6), q(3,0,4,7));
+}
+
+/** A big triangle whose bottom edge is subdivided by a finer strip: T-junctions. */
+function tJunctionSheet(n) {
+	var s = [{ v0: {x:0,y:0,z:0}, v1: {x:10,y:0,z:0}, v2: {x:5,y:8,z:0} }];
+	for (var i = 0; i < n; i++) {
+		var x0 = i * 10 / n, x1 = (i + 1) * 10 / n;
+		s.push({ v0:{x:x0,y:0,z:0}, v1:{x:x1,y:-3,z:0}, v2:{x:x1,y:0,z:0} });
+		s.push({ v0:{x:x0,y:0,z:0}, v1:{x:x0,y:-3,z:0}, v2:{x:x1,y:-3,z:0} });
+	}
+	return s;
+}
+
+/** Triangles centred on the x=y diagonal — the seam an axis-aligned ray grazes. */
+function sheetOnDiagonal(half, n) {
+	var s = [];
+	for (var i = 0; i < n; i++) {
+		var t = (i / n) * 2 - 1, x = t * half, y = t * half, d = half / n;
+		s.push({ v0:{x:x-d,y:y-d,z:0}, v1:{x:x+d,y:y-d,z:0}, v2:{x:x+d,y:y+d,z:0} });
+		s.push({ v0:{x:x-d,y:y-d,z:0}, v1:{x:x+d,y:y+d,z:0}, v2:{x:x-d,y:y+d,z:0} });
+	}
+	return s;
+}
+
+function quad(ox, oy) {
+	return [
+		{ v0:{x:ox,y:oy,z:0}, v1:{x:ox+10,y:oy,z:0}, v2:{x:ox+10,y:oy+10,z:0} },
+		{ v0:{x:ox,y:oy,z:0}, v1:{x:ox+10,y:oy+10,z:0}, v2:{x:ox,y:oy+10,z:0} }
+	];
+}
+
+function upFraction(soup) {
+	if (!soup.length) return 1;
+	var up = 0;
+	for (var i = 0; i < soup.length; i++) {
+		var t = soup[i];
+		var ax=t.v1.x-t.v0.x, ay=t.v1.y-t.v0.y, az=t.v1.z-t.v0.z;
+		var bx=t.v2.x-t.v0.x, by=t.v2.y-t.v0.y, bz=t.v2.z-t.v0.z;
+		if (ax*by - ay*bx > 0) up++;
+	}
+	return up / soup.length;
+}
+
+function fails(report) {
+	var f = report.checks.filter(function (c) { return !c.ok; });
+	return f.length ? f.map(function (c) { return c.check + ':' + c.count; }).join('  ') : 'clean';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKFLOWS
+// Each `run` returns { views, rows, note }.
+//   views: [{ label, soup, color, wire? }] — toggled buttons over the viewport
+//   rows : [[label, value, className?]]    — the metrics table
+// ─────────────────────────────────────────────────────────────────────────────
+
+var WORKFLOWS = [
+
+{ group: 'Start here', id: 'auto', title: 'One-call boolean',
+  why: 'Pick two surfaces and an operation. <strong>booleanAuto</strong> runs the BMS pipeline, merges for the operation, and finishes the result — correct winding, no duplicate triangles, no T-junctions. Quality is an invariant here, not a checkbox.',
+  run: function () {
+	var terrain = grid(6, 0, 0, 0);
+	var cutter  = box(3, 3, 0, 1.5);   // edges fall INSIDE grid cells
+
+	var result = TB.booleanAuto(terrain, cutter, 'subtract');
+
+	var raw = TB.booleanAuto(terrain, cutter, 'subtract', { quality: 'raw' });
+	return {
+		views: [
+			{ label: 'Result', soup: result.soup, color: 0xF47920 },
+			{ label: 'Inputs', soup: terrain.concat(cutter), color: 0x4472C4, wire: true }
+		],
+		rows: [
+			['Output triangles', result.soup.length],
+			['Every invariant holds', result.ok ? 'yes' : 'no', result.ok ? 'good' : 'bad'],
+			['Repairs applied', result.report.applied.join(', ') || 'none needed'],
+			['— without finishing', fails(TB.verifyOutput(raw.soup)), 'bad'],
+			['— with finishing', fails(result.report.after), 'good']
+		],
+		note: 'The raw boolean introduces T-junctions even from clean input: the box corner splits one side of a quad while its neighbour keeps the long edge. Finishing removes them.'
+	};
+  } },
+
+{ group: 'Start here', id: 'verify', title: 'Inspect a surface',
+  why: '<strong>verifyOutput</strong> measures geometry and reports. It mutates nothing. Use it on anything — inputs, outputs, a file someone emailed you.',
+  run: function () {
+	var damaged = tJunctionSheet(8);
+
+	var report = TB.verifyOutput(damaged);
+
+	var rows = report.checks.map(function (c) {
+		return [c.check, c.ok ? 'ok' : c.count + ' found', c.ok ? 'good' : 'bad'];
+	});
+	rows.push(['—', '', 'dim']);
+	rows.push(['triangles', report.stats.triangles]);
+	rows.push(['vertices', report.stats.vertices]);
+	rows.push(['open edges', report.stats.openEdges]);
+	rows.push(['components', report.stats.components]);
+	rows.push(['surface area', report.stats.area.toFixed(3)]);
+	return {
+		views: [{ label: 'Surface', soup: damaged, color: 0x4472C4, wire: true }],
+		rows: rows,
+		note: 'Identity is a neighbourhood weld, not rounded string keys — so two vertices a nanometre apart are not split by a grid boundary. Volume is measured after translating to the centroid, because at UTM scale the raw sum is catastrophic cancellation.'
+	};
+  } },
+
+{ group: 'Repair', id: 'tjunc', title: 'T-junction repair, and what it does to winding',
+  why: 'A T-junction is a vertex sitting on another triangle’s edge without splitting it — the mesh looks joined but cracks open. There are two resolvers. They fix the cracks equally. <strong>Only one preserves winding.</strong>',
+  run: function () {
+	var cracked = tJunctionSheet(8);          // uniformly wound, genuine T-junctions
+
+	var legacy   = TB.resolveTJunctions(cracked, 1e-4, 3);
+	var holeFree = TB.resolveTJunctionsHoleFree(cracked, 1e-4, 3);
+
+	var vIn = TB.verifyOutput(cracked), vL = TB.verifyOutput(legacy), vH = TB.verifyOutput(holeFree);
+	var pct = function (s) { return (upFraction(s) * 100).toFixed(1) + '%'; };
+	return {
+		views: [
+			{ label: 'Before', soup: cracked, color: 0x4472C4, wire: true },
+			{ label: 'Hole-free', soup: holeFree, color: 0x4CAF50, wire: true },
+			{ label: 'Legacy', soup: legacy, color: 0xE05252, wire: true }
+		],
+		rows: [
+			['input triangles', cracked.length],
+			['input consistently wound', pct(cracked), 'good'],
+			['input T-junctions', vIn.checks.filter(function(c){return c.check==='noTJunctions';})[0].count, 'bad'],
+			['—', '', 'dim'],
+			['legacy triangles', legacy.length],
+			['legacy wound', pct(legacy), 'bad'],
+			['legacy verdict', fails(vL), 'bad'],
+			['—', '', 'dim'],
+			['hole-free triangles', holeFree.length],
+			['hole-free wound', pct(holeFree), 'good'],
+			['hole-free verdict', fails(vH), 'good']
+		],
+		note: 'The legacy pass re-triangulates through Delaunator in a flat local frame and keeps whatever order comes back, so about a third of the new triangles face the wrong way. On terrain that flips the surface normal — lighting, and inside/outside for anything downstream. repairMesh and the BMS pre-repair both use the hole-free version since 0.6.7.'
+	};
+  } },
+
+{ group: 'Repair', id: 'gate', title: 'A repair that gets refused',
+  why: 'Repair is not automatically improvement. <strong>finishMesh</strong> runs each stage on a copy, measures it, and keeps it only if it strictly reduces violations. Here a deliberately damaging stage is offered and turned down.',
+  run: function () {
+	var soup = box(0, 0, 0, 3);           // already a valid closed solid
+
+	var vandal = { name: 'duplicate a face', run: function (s) { return s.concat([s[0]]); } };
+	var gated  = TB.finishMesh(soup, { stages: [vandal] });
+	var forced = TB.finishMesh(soup, { stages: [vandal], force: true });
+
+	var assessment = TB.assessRepair(soup, vandal.run(soup));
+	return {
+		views: [{ label: 'Solid', soup: gated.soup, color: 0xF47920, wire: true }],
+		rows: [
+			['stage offered', 'duplicate a face'],
+			['verdict', assessment.recommend, assessment.recommend === 'discard' ? 'good' : 'bad'],
+			['reported damage', assessment.damage.join('; '), 'bad'],
+			['—', '', 'dim'],
+			['gated: applied', gated.applied.join(', ') || 'nothing', 'good'],
+			['gated: result', fails(gated.after), 'good'],
+			['forced: applied', forced.applied.join(', '), 'bad'],
+			['forced: result', fails(forced.after), 'bad']
+		],
+		note: 'This is not defensive programming. On real survey data — a shell against a presplit block — hole-free T-junction resolution turns 4 violations into 6, trading T-junctions for degenerate and non-manifold edges. Ungated, that ships as "repaired".'
+	};
+  } },
+
+{ group: 'Booleans', id: 'stages', title: 'The BMS pipeline, stage by stage',
+  why: 'What <strong>booleanAuto</strong> does underneath. Every stage is exported, so you can stop anywhere and look.',
+  run: function () {
+	var A = grid(8, 0, 0, 0);
+	var B = box(4, 4, 0, 2);
+
+	var isect  = TB.bmsIntersect(A, B);              // 1. cross-mesh intersections
+	var soup   = TB.bmsSplit(A, B, isect);           // 2. split both into one mega soup
+	var chains = TB.bmsChain(isect.segments);        // 3. chain segments into polylines
+	var result = TB.bmsBooleanOp(A, B, 'subtract', { classifier: 'auto' });  // 4. classify
+
+	return {
+		views: [
+			{ label: 'A outside B', soup: result.groups.aOutside, color: 0xF47920 },
+			{ label: 'A inside B', soup: result.groups.aInside, color: 0xE05252 },
+			{ label: 'B inside A', soup: result.groups.bInside, color: 0x4472C4 },
+			{ label: 'Mega soup', soup: soup, color: 0x888888, wire: true }
+		],
+		rows: [
+			['1. intersection segments', isect.segments.length],
+			['   of those, coplanar', isect.coplanarPairs],
+			['2. mega soup triangles', soup.length],
+			['3. chained polylines', chains.length],
+			['4. A inside / outside', result.groups.aInside.length + ' / ' + result.groups.aOutside.length],
+			['   B inside / outside', result.groups.bInside.length + ' / ' + result.groups.bOutside.length],
+			['classifier used', result.classifier.A],
+			['post-conditions', result.verification ? (result.verification.ok ? 'verified' : 'FAILED') : 'n/a',
+				result.verification && result.verification.ok ? 'good' : 'dim']
+		],
+		note: 'Every intersection point goes through one shared vertex pool, so both meshes get the SAME vertex object at each crossing. That is what keeps the seam watertight on open surfaces.'
+	};
+  } },
+
+{ group: 'Booleans', id: 'graze', title: 'Surfaces that barely cross',
+  why: 'A bench face and a cut can meet at a fraction of a degree. Before 0.6.6 anything shallower than ~0.81° was silently dropped — <strong>zero</strong> intersection segments, reported as "these do not touch".',
+  run: function () {
+	var A = quad(0, 0);                                    // flat on z = 0
+	var tilt = function (t, slope) {                       // tilted about the overlap centre
+		return t.map(function (x) {
+			var f = function (v) { return { x: v.x, y: v.y, z: v.z + (v.x - 7.5) * slope }; };
+			return { v0: f(x.v0), v1: f(x.v1), v2: f(x.v2) };
+		});
+	};
+
+	var rows = [];
+	[0.2, 0.05, 0.01, 0.001, 0.00001].forEach(function (slope) {
+		var B = tilt(quad(5, 5), slope);
+		var segs = TB.bmsIntersect(A, B).segments.length;
+		var deg = (Math.atan(slope) * 180 / Math.PI);
+		rows.push([deg.toFixed(4) + '° crossing', segs + ' segments', segs ? 'good' : 'bad']);
+	});
+	var coplanar = TB.bmsIntersect(A, quad(5, 5));
+	rows.push(['exactly coplanar', coplanar.segments.length + ' segments', 'good']);
+
+	return {
+		views: [
+			{ label: 'Crossing pair', soup: A.concat(tilt(quad(5, 5), 0.05)), color: 0x4472C4, wire: true }
+		],
+		rows: rows,
+		note: 'The reject gate moved from 0.9999 to 1 - 1e-14. The exact-sign tests above it had already proven the triangles cross; the gate was throwing that away. Exactly coplanar pairs now emit their overlap polygon instead, so classification still has a barrier to work against.'
+	};
+  } },
+
+{ group: 'Classification', id: 'classifiers', title: 'Three classifiers, one disagreement',
+  why: 'Inside/outside on an open surface is genuinely hard. There are three strategies, and on seam-aligned geometry they do <strong>not</strong> agree — which is exactly why <code>auto</code> verifies and falls back.',
+  run: function () {
+	var sheet = sheetOnDiagonal(12, 10);   // triangles centred on a diagonal seam
+	var solid = box(0, 0, 0, 5);
+
+	var hybrid = TB.bmsBooleanOp(sheet, solid, null, { classifier: 'hybrid' });
+	var heff   = TB.bmsBooleanOp(sheet, solid, null, { classifier: 'heffalump' });
+	var auto   = TB.bmsBooleanOp(sheet, solid, null, { classifier: 'auto' });
+
+	// Ground truth: the cutter is an axis-aligned box, so "inside" is computable.
+	var inBox = function (t) {
+		var cx=(t.v0.x+t.v1.x+t.v2.x)/3, cy=(t.v0.y+t.v1.y+t.v2.y)/3, cz=(t.v0.z+t.v1.z+t.v2.z)/3;
+		return Math.abs(cx)<5 && Math.abs(cy)<5 && Math.abs(cz)<5;
+	};
+	var wrong = function (r) {
+		return r.groups.aInside.filter(function (t) { return !inBox(t); }).length +
+		       r.groups.aOutside.filter(inBox).length;
+	};
+	return {
+		views: [
+			{ label: 'heffalump inside', soup: heff.groups.aInside, color: 0x4CAF50 },
+			{ label: 'hybrid inside', soup: hybrid.groups.aInside, color: 0xE05252 },
+			{ label: 'Sheet + box', soup: sheet.concat(solid), color: 0x666666, wire: true }
+		],
+		rows: [
+			['hybrid — inside', hybrid.groups.aInside.length],
+			['hybrid — misclassified', wrong(hybrid), wrong(hybrid) ? 'bad' : 'good'],
+			['—', '', 'dim'],
+			['heffalump — inside', heff.groups.aInside.length],
+			['heffalump — misclassified', wrong(heff), wrong(heff) ? 'bad' : 'good'],
+			['—', '', 'dim'],
+			['auto — inside', auto.groups.aInside.length],
+			['auto — misclassified', wrong(auto), wrong(auto) ? 'bad' : 'good'],
+			['auto matched', auto.groups.aInside.length === heff.groups.aInside.length ? 'heffalump' : 'hybrid', 'good']
+		],
+		note: 'The hybrid reads boundary topology; the heffalump ray-casts. Here the hybrid puts every inside triangle on the outside. auto runs the hybrid, verifies its post-conditions, sees the failure, and re-runs classification with the heffalump on the existing mega soup — milliseconds, no re-split.'
+	};
+  } }
+];
+
+// Real-data workflow, only when the survey file loaded.
+if (kirra.terrain && kirra.cylinder) {
+	WORKFLOWS.push({
+		group: 'Real data', id: 'kirra', title: 'A real survey surface',
+		why: 'The same pipeline on real Kirra survey data — an 11,200-triangle terrain against a cylinder. This is the geometry the library exists for.',
+		run: function () {
+			var terrain = kirra.terrain;
+			var cutter  = kirra.cylinder;
+
+			var result = TB.booleanAuto(terrain, cutter, 'subtract');
+
+			var raw = TB.booleanAuto(terrain, cutter, 'subtract', { quality: 'raw' });
+			return {
+				views: [
+					{ label: 'Result', soup: result.soup, color: 0xF47920 },
+					{ label: 'Terrain', soup: terrain, color: 0x4472C4, wire: true },
+					{ label: 'Cutter', soup: cutter, color: 0x4CAF50, wire: true }
+				],
+				rows: [
+					['terrain triangles', terrain.length],
+					['cutter triangles', cutter.length],
+					['result triangles', result.soup.length],
+					['classifier', result.classifier.A],
+					['—', '', 'dim'],
+					['before finishing', fails(TB.verifyOutput(raw.soup)), 'bad'],
+					['after finishing', fails(result.report.after), result.ok ? 'good' : 'bad'],
+					['repairs applied', result.report.applied.join(', ') || 'none']
+				],
+				note: 'The raw boolean inherits winding inconsistencies from the source terrain, which itself carries them. Finishing resolves them without touching anything that was already correct.'
+			};
+		}
+	});
+}
+
+// ── Viewer ───────────────────────────────────────────────────────────────────
+
+var host = document.getElementById('view');
+var renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+host.appendChild(renderer.domElement);
+var scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+var camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1e7);
+var controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+var key = new THREE.DirectionalLight(0xffffff, 0.9); key.position.set(1, 1, 2); scene.add(key);
+var shown = new THREE.Group(); scene.add(shown);
+
+function sizeView() {
+	var w = host.clientWidth, h = host.clientHeight;
+	renderer.setSize(w, h, false);
+	camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', sizeView);
+
+function clearView() { while (shown.children.length) shown.remove(shown.children[0]); }
+
+function addSoup(soup, color, wire) {
+	if (!soup || !soup.length) return null;
+	// Local frame: Float32 attributes cannot hold UTM coordinates (0.5 m spacing
+	// at a 7.4e6 northing), so translate by the centroid and offset the object.
+	var cx=0, cy=0, cz=0;
+	for (var c = 0; c < soup.length; c++) {
+		var q = soup[c];
+		cx += q.v0.x+q.v1.x+q.v2.x; cy += q.v0.y+q.v1.y+q.v2.y; cz += q.v0.z+q.v1.z+q.v2.z;
+	}
+	var n = soup.length * 3; cx/=n; cy/=n; cz/=n;
+
+	var pos = new Float32Array(soup.length * 9);
+	for (var i = 0; i < soup.length; i++) {
+		var t = soup[i], o = i * 9;
+		pos[o]=t.v0.x-cx; pos[o+1]=t.v0.y-cy; pos[o+2]=t.v0.z-cz;
+		pos[o+3]=t.v1.x-cx; pos[o+4]=t.v1.y-cy; pos[o+5]=t.v1.z-cz;
+		pos[o+6]=t.v2.x-cx; pos[o+7]=t.v2.y-cy; pos[o+8]=t.v2.z-cz;
+	}
+	var g = new THREE.BufferGeometry();
+	g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+	g.computeVertexNormals();
+	var m = new THREE.MeshPhongMaterial({
+		color: color, side: THREE.DoubleSide, flatShading: true,
+		transparent: !!wire, opacity: wire ? 0.55 : 1
+	});
+	var mesh = new THREE.Mesh(g, m);
+	mesh.position.set(cx, cy, cz);
+	shown.add(mesh);
+	if (wire) {
+		var w = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: color, wireframe: true, transparent: true, opacity: 0.35 }));
+		w.position.set(cx, cy, cz);
+		shown.add(w);
+	}
+	return mesh;
+}
+
+function frameAll() {
+	var bb = new THREE.Box3().setFromObject(shown);
+	if (bb.isEmpty()) return;
+	var c = bb.getCenter(new THREE.Vector3());
+	var r = bb.getSize(new THREE.Vector3()).length() * 0.6 || 1;
+	camera.position.set(c.x + r, c.y - r, c.z + r * 0.8);
+	camera.up.set(0, 0, 1);
+	camera.near = r / 1000; camera.far = r * 1000; camera.updateProjectionMatrix();
+	controls.target.copy(c); controls.update();
+}
+
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+
+// ── Code listing, straight from the function itself ──────────────────────────
+
+function sourceOf(fn) {
+	var src = fn.toString();
+	var body = src.slice(src.indexOf('{') + 1, src.lastIndexOf('}'));
+	var lines = body.replace(/\r/g, '').split('\n');
+	// Drop everything from the presentation return onwards — it is scaffolding
+	// for this page, not part of the workflow being shown.
+	var cut = lines.findIndex(function (l) { return /^\s*return \{/.test(l); });
+	if (cut > 0) lines = lines.slice(0, cut);
+	while (lines.length && !lines[0].trim()) lines.shift();
+	while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+	var indent = Math.min.apply(null, lines.filter(function (l) { return l.trim(); })
+		.map(function (l) { return l.match(/^\t*/)[0].length; }));
+	return lines.map(function (l) { return l.slice(indent); }).join('\n');
+}
+
+function highlight(src) {
+	return src
+		.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+		.replace(/(\/\/[^\n]*)/g, '<span class="cm">$1</span>')
+		.replace(/('[^']*')/g, '<span class="st">$1</span>')
+		.replace(/\b(var|function|return|if|else|for)\b/g, '<span class="kw">$1</span>');
+}
+
+// ── Wiring ───────────────────────────────────────────────────────────────────
+
+var current = null;
+var elTitle = document.getElementById('title'), elWhy = document.getElementById('why');
+var elCode = document.getElementById('code'), elRows = document.querySelector('#metrics tbody');
+var elNote = document.getElementById('note'), elViews = document.getElementById('views');
+var elLegend = document.getElementById('legend'), elStatus = document.getElementById('status');
+
+var idx = document.getElementById('index');
+var lastGroup = null;
+WORKFLOWS.forEach(function (w) {
+	if (w.group !== lastGroup) {
+		lastGroup = w.group;
+		var g = document.createElement('div'); g.className = 'group'; g.textContent = w.group;
+		idx.appendChild(g);
+	}
+	var b = document.createElement('button');
+	b.textContent = w.title; b.dataset.id = w.id;
+	b.onclick = function () { select(w); };
+	idx.appendChild(b);
+});
+
+function select(w) {
+	current = w;
+	[].forEach.call(idx.querySelectorAll('button'), function (b) {
+		b.classList.toggle('on', b.dataset.id === w.id);
+	});
+	elTitle.textContent = w.title;
+	elWhy.innerHTML = w.why;
+	elCode.innerHTML = highlight(sourceOf(w.run));
+	elRows.innerHTML = '';
+	elNote.innerHTML = '';
+	elViews.innerHTML = '';
+	elLegend.innerHTML = '';
+	elStatus.textContent = 'ready — press Run it';
+	clearView();
+	location.hash = w.id;
+}
+
+function render(out) {
+	elRows.innerHTML = '';
+	out.rows.forEach(function (r) {
+		var tr = document.createElement('tr');
+		if (r[0] === '—') { tr.innerHTML = '<td colspan="2" class="dim">&nbsp;</td>'; elRows.appendChild(tr); return; }
+		var td1 = document.createElement('td'); td1.textContent = r[0];
+		var td2 = document.createElement('td'); td2.className = 'num ' + (r[2] || '');
+		td2.textContent = r[1];
+		tr.appendChild(td1); tr.appendChild(td2); elRows.appendChild(tr);
+	});
+	elNote.innerHTML = out.note ? '<div class="note">' + out.note + '</div>' : '';
+
+	// View toggles
+	elViews.innerHTML = '';
+	elLegend.innerHTML = '';
+	var active = out.views.map(function (_, i) { return i === 0; });
+	function draw() {
+		clearView();
+		out.views.forEach(function (v, i) { if (active[i]) addSoup(v.soup, v.color, v.wire); });
+		frameAll();
+	}
+	out.views.forEach(function (v, i) {
+		var b = document.createElement('button');
+		b.className = 'ghost' + (active[i] ? ' on' : '');
+		b.textContent = v.label + (v.soup ? ' (' + v.soup.length + ')' : '');
+		b.onclick = function () { active[i] = !active[i]; b.classList.toggle('on', active[i]); draw(); };
+		elViews.appendChild(b);
+		var l = document.createElement('span');
+		l.innerHTML = '<i style="background:#' + v.color.toString(16).padStart(6, '0') + '"></i>' + v.label;
+		elLegend.appendChild(l);
+	});
+	draw();
+}
+
+document.getElementById('run').onclick = function () {
+	if (!current) return;
+	elStatus.textContent = 'running…';
+	setTimeout(function () {
+		var t0 = performance.now();
+		try {
+			var out = current.run();
+			render(out);
+			elStatus.textContent = 'done in ' + (performance.now() - t0).toFixed(1) + ' ms';
+		} catch (err) {
+			elStatus.textContent = 'error: ' + err.message;
+			elRows.innerHTML = '<tr><td colspan="2" class="bad">' + err.message + '</td></tr>';
+			console.error(err);
+		}
+	}, 10);
+};
+
+sizeView();
+var fromHash = WORKFLOWS.filter(function (w) { return '#' + w.id === location.hash; })[0];
+select(fromHash || WORKFLOWS[0]);
+</script>
+</body>
+</html>
