@@ -30,10 +30,11 @@ import { vKey, edgeKey, countOpenEdges } from "../util/math.js";
 // normal at the cut. Positive dot = facing same way = outside.
 // Negative dot = facing opposite = inside the other mesh.
 
-function classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris) {
+function barrierNormalVote(comp, megaSoup, barrierEdges, edgeToTris) {
 	var compMesh = comp.mesh;
 	var dotSum = 0;
 	var sampleCount = 0;
+	var negCount = 0, posCount = 0;
 	var seenEdges = {};
 
 	for (var ti = 0; ti < comp.triIndices.length; ti++) {
@@ -91,13 +92,29 @@ function classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris) {
 			if (otherLen < 1e-12) continue;
 			otherNx /= otherLen; otherNy /= otherLen; otherNz /= otherLen;
 
-			dotSum += intoX * otherNx + intoY * otherNy + intoZ * otherNz;
+			var dotHere = intoX * otherNx + intoY * otherNy + intoZ * otherNz;
+			dotSum += dotHere;
+			if (dotHere < -0.05) negCount++; else if (dotHere > 0.05) posCount++;
 			sampleCount++;
 		}
 	}
 
-	if (sampleCount === 0) return false;
-	return (dotSum / sampleCount) < 0;
+	if (sampleCount === 0) return { inside: false, samples: 0, agreement: 0 };
+	var decided = negCount + posCount;
+	var insideVote = negCount > posCount;
+	return {
+		inside: (dotSum / sampleCount) < 0,
+		samples: sampleCount,
+		// Share of the barrier edges that agree with the winning side. A region
+		// bounded by one clean loop agrees almost unanimously; a mixed region
+		// (a gap the flood fill leaked through) does not.
+		agreement: decided === 0 ? 0 : Math.max(negCount, posCount) / decided,
+		insideByCount: insideVote
+	};
+}
+
+function classifyByBarrierNormal(comp, megaSoup, barrierEdges, edgeToTris) {
+	return barrierNormalVote(comp, megaSoup, barrierEdges, edgeToTris).inside;
 }
 
 // ── The Heffalump's trunk: ray casting for closed mesh classification ──
@@ -189,6 +206,20 @@ function parityAlongAxis(px, py, pz, tris, axis) {
  * vote is taken anyway — a wrong answer beats no answer, and the caller's
  * majority-snap pass can still correct a lone straggler.
  */
+// A region whose inside-area share is within this of 0 or 1 is unanimous.
+var REGION_AREA_MINORITY = 0.02;
+
+// Share of a region's barrier edges that must agree for the region to be
+// decided by them alone.
+var REGION_BARRIER_AGREEMENT = 0.9;
+
+function triangleArea(t) {
+	var ux = t.v1.x - t.v0.x, uy = t.v1.y - t.v0.y, uz = t.v1.z - t.v0.z;
+	var vx = t.v2.x - t.v0.x, vy = t.v2.y - t.v0.y, vz = t.v2.z - t.v0.z;
+	var x = uy * vz - uz * vy, y = uz * vx - ux * vz, z = ux * vy - uy * vx;
+	return Math.sqrt(x * x + y * y + z * z) * 0.5;
+}
+
 function isPointInsideClosedMesh(px, py, pz, tris) {
 	// +Z first. On a closed mesh every axis agrees, so trusting a clean +Z ray
 	// costs nothing. On a NEARLY closed mesh (a cutter with one open hole) it
@@ -588,6 +619,31 @@ export function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
 	var aInside = [], aOutside = [];
 	var bInside = [], bOutside = [];
 	var componentWalks = [];
+	var mixedRegions = 0;
+
+	// Region-first. When the intersection loop really does split a mesh into
+	// regions, each region is one side, and the other mesh's normals along its
+	// boundary say which. That works for an OPEN cutter too, where casting rays
+	// through the holes in the cutter cannot: a hole lets a ray escape, so a
+	// perfectly good region gets voted triangle by triangle into fragments.
+	// Only when the regions do not split cleanly does the per-triangle vote run.
+	var regionSide = {}; // component id -> true (inside) / false (outside)
+	var meshNames = ["A", "B"];
+	for (var mn = 0; mn < 2; mn++) {
+		var mComps = components.filter(function (c) { return c.mesh === meshNames[mn] && c.triCount > 0; });
+		if (mComps.length < 2) continue;
+		var votes = [], sound = true, sawIn = false, sawOut = false;
+		for (var vc = 0; vc < mComps.length; vc++) {
+			var bv = barrierNormalVote(mComps[vc], megaSoup, barrierEdges, edgeToTris);
+			if (bv.samples === 0 || bv.agreement < REGION_BARRIER_AGREEMENT) { sound = false; break; }
+			votes.push(bv.insideByCount);
+			if (bv.insideByCount) sawIn = true; else sawOut = true;
+		}
+		// A loop has two sides: a mesh whose regions all vote the same way has not
+		// been separated, whatever each vote says on its own.
+		if (!sound || !sawIn || !sawOut) continue;
+		for (var vc2 = 0; vc2 < mComps.length; vc2++) regionSide[mComps[vc2].id] = votes[vc2];
+	}
 
 	for (var gi = 0; gi < components.length; gi++) {
 		var comp = components[gi];
@@ -598,18 +654,34 @@ export function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
 		var insideArr = comp.mesh === "A" ? aInside : bInside;
 		var outsideArr = comp.mesh === "A" ? aOutside : bOutside;
 
+		if (regionSide[comp.id] !== undefined) {
+			var regionIn = regionSide[comp.id];
+			for (var rr = 0; rr < comp.triIndices.length; rr++) {
+				var rtri = megaSoup[comp.triIndices[rr]];
+				(regionIn ? insideArr : outsideArr).push({ v0: rtri.v0, v1: rtri.v1, v2: rtri.v2 });
+			}
+			componentWalks.push({
+				mesh: comp.mesh, side: regionIn ? "inside" : "outside", triCount: comp.triCount,
+				segments: extractBoundaryWalk(comp, megaSoup, barrierEdges)
+			});
+			continue;
+		}
+
 		// Per-triangle vote — trunk (ray cast) or tail (nearest surface)
 		var flags = new Uint8Array(comp.triIndices.length);
 		var insideVotes = 0;
+		var insideArea = 0, totalArea = 0;
 		for (var ri = 0; ri < comp.triIndices.length; ri++) {
 			var rt = megaSoup[comp.triIndices[ri]];
+			var triArea = triangleArea(rt);
+			totalArea += triArea;
 			var px = (rt.v0.x + rt.v1.x + rt.v2.x) / 3;
 			var py = (rt.v0.y + rt.v1.y + rt.v2.y) / 3;
 			var pz = (rt.v0.z + rt.v1.z + rt.v2.z) / 3;
 			var isIn = otherIsClosed
 				? isPointInsideClosedMesh(px, py, pz, otherTris)
 				: isPointInsideOpenSurface(px, py, pz, otherTris);
-			if (isIn) { flags[ri] = 1; insideVotes++; }
+			if (isIn) { flags[ri] = 1; insideVotes++; insideArea += triArea; }
 		}
 
 		// Majority snap — only collapse a TINY absolute minority (genuine spur
@@ -625,6 +697,18 @@ export function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
 		if (minority <= maxSnapStragglers) {
 			if (ratio >= snapThreshold) snapTo = 1;
 			else if (ratio <= 1 - snapThreshold) snapTo = 0;
+		}
+		// A region is one side of the intersection loop, so it is all inside or
+		// all outside. Per-triangle votes disagree with that only where a
+		// centroid hugs the other surface: needles and slivers, which carry no
+		// area. Vote by AREA, so a hundred slivers cannot outvote the region,
+		// while a genuinely mixed region (a barrier gap the flood fill leaked
+		// through) still has a large area minority and stays per-triangle.
+		if (snapTo === -1 && totalArea > 0) {
+			var areaIn = insideArea / totalArea;
+			if (areaIn >= 1 - REGION_AREA_MINORITY) snapTo = 1;
+			else if (areaIn <= REGION_AREA_MINORITY) snapTo = 0;
+			else mixedRegions++;
 		}
 
 		for (var pi = 0; pi < comp.triIndices.length; pi++) {
@@ -649,9 +733,16 @@ export function heffalumpClassify(megaSoup, segments, trisA, trisB, opts) {
 		aOutside.length + " outside. B: " + bInside.length + " inside, " +
 		bOutside.length + " outside. Components: " + components.length + ".");
 
+	if (mixedRegions > 0) {
+		console.warn("[heffalump] " + mixedRegions + " region(s) are genuinely mixed: the barrier " +
+			"does not separate inside from outside there (a gap in the intersection loop). " +
+			"Those regions are voted per triangle; treat the result as suspect.");
+	}
+
 	return {
 		aInside: aInside, aOutside: aOutside, bInside: bInside, bOutside: bOutside,
-		componentWalks: componentWalks
+		componentWalks: componentWalks,
+		mixedRegions: mixedRegions
 	};
 }
 

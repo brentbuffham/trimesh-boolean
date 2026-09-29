@@ -48,11 +48,13 @@ describe("booleanAuto", function () {
 	});
 
 	it("fixes what the raw boolean leaves behind", function () {
-		// The raw boolean introduces T-junctions even from clean input: a box
-		// corner splits one side's diagonal while the neighbour keeps the long edge.
+		// The raw boolean used to leave T-junctions even from clean input (a box
+		// corner splits one side's diagonal while the neighbour keeps the long
+		// edge). Conforming edge splits (0.7.5) now stop most of that at source, so
+		// the raw result may already be clean; the strict result must be, always.
 		var raw = booleanAuto(grid(6), box(3, 3, 0, 1.5), "subtract", { quality: "raw" });
 		var strict = booleanAuto(grid(6), box(3, 3, 0, 1.5), "subtract");
-		expect(violationCount(verifyOutput(raw.soup))).toBeGreaterThan(0);
+		expect(violationCount(strict.report.after)).toBeLessThanOrEqual(violationCount(verifyOutput(raw.soup)));
 		expect(violationCount(strict.report.after)).toBe(0);
 	});
 

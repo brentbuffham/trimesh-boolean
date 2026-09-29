@@ -384,6 +384,7 @@ export function bmsBooleanOp(soupA, soupB, operation, options) {
 		meshEdgePolys: meshEdgePolys,
 		componentWalks: classifyResult.componentWalks,
 		megaSoup: megaSoup,
+		splitReport: megaSoup.splitReport,
 		pool: isect.pool,
 		classifier: classifierReport,
 		verification: verification

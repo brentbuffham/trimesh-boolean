@@ -30,7 +30,7 @@ import { needsSliverGuard, interiorLatticePoints } from "../boolean/sliverGuard.
  *        the mesh's own manifold edges; A-vs-B booleans never hit this.)
  * @returns {Array<{ v0: Object, v1: Object, v2: Object }>} Sub-triangles
  */
-function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
+function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints, edgeTol, canon) {
 	var hasEdgePts = edgePoolPoints && edgePoolPoints.length > 0;
 	if ((!segments || segments.length === 0) && !hasEdgePts) return [tri];
 	segments = segments || [];
@@ -135,6 +135,27 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
 	}
 	var BARY_TOL = -1e-4; // float fallback tolerance
 
+	// Within edgeTol of one of this triangle's edges? Such a point is on the edge
+	// as far as the pool is concerned (it merges points that close), so the
+	// "1% of the triangle" drift test below - meaningless on a needle, where 1%
+	// of the height is under a millimetre - must not reject it.
+	var nearEdgeTolSq = edgeTol > 0 ? edgeTol * edgeTol : 0;
+	function nearOwnEdge(p) {
+		if (nearEdgeTolSq === 0) return false;
+		var cs = [tri.v0, tri.v1, tri.v2];
+		for (var q = 0; q < 3; q++) {
+			var ea = cs[q], eb = cs[(q + 1) % 3];
+			var ex = eb.x - ea.x, ey = eb.y - ea.y, ez = eb.z - ea.z;
+			var el2 = ex * ex + ey * ey + ez * ez;
+			if (el2 < 1e-30) continue;
+			var et = ((p.x - ea.x) * ex + (p.y - ea.y) * ey + (p.z - ea.z) * ez) / el2;
+			if (et < 0) et = 0; else if (et > 1) et = 1;
+			var fx = ea.x + et * ex - p.x, fy = ea.y + et * ey - p.y, fz = ea.z + et * ez - p.z;
+			if (fx * fx + fy * fy + fz * fz <= nearEdgeTolSq) return true;
+		}
+		return false;
+	}
+
 	for (var s = 0; s < segments.length; s++) {
 		var seg = segments[s];
 		var endpts = [seg.p0, seg.p1];
@@ -157,7 +178,7 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
 			// Primary: exact rational test on original 3D coords (projected to best plane)
 			// Fallback: float barycentric with tolerance (handles near-edge Steiner points
 			// whose computed position drifted slightly outside due to float intersection math)
-			if (!exactPointInTri3D(p)) {
+			if (!exactPointInTri3D(p) && !nearOwnEdge(p)) {
 				var lp = toLocal(p);
 				var bc = baryCoords(lp[0], lp[1]);
 				if (bc[0] < BARY_TOL || bc[1] < BARY_TOL || bc[2] < BARY_TOL) {
@@ -197,7 +218,7 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
 
 			// Accept on-edge / inside points (on-edge passes exactPointInTri3D since
 			// one determinant is exactly 0 → not both-signs). Reject far-outside drift.
-			if (!exactPointInTri3D(ep)) {
+			if (!exactPointInTri3D(ep) && !nearOwnEdge(ep)) {
 				var elp = toLocal(ep);
 				var ebc = baryCoords(elp[0], elp[1]);
 				if (Math.min(ebc[0], ebc[1], ebc[2]) < -0.01) continue;
@@ -223,10 +244,76 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
 	// -- Step 3: Project all to local 2D, run Delaunator --
 	var n = pts.length;
 	var coords = new Float64Array(n * 2);
+	// Pool vertices within edgeTol of a parent EDGE are placed ON that edge in
+	// the 2D triangulation (the 3D vertex is untouched). Two hosts sharing the
+	// edge then split it at the same place, and no needle is built between a
+	// point 1-2 mm off the edge and the edge itself.
+	var nPool = pts.length - (extraPoints ? extraPoints.length : 0);
+	var edgeTolSq = edgeTol > 0 ? edgeTol * edgeTol : 0;
+	var corners3 = [tri.v0, tri.v1, tri.v2];
+	var corners2 = [l0, l1, l2];
+	var cornerKeys = [v0Key, v1Key, v2Key];
+
+	// 2D position of pool point j when placed on parent edge pe, or null.
+	function onEdge2D(j, pe, wantKeys) {
+		var ea = corners3[pe], eb = corners3[(pe + 1) % 3], pp = pts[j];
+		if (wantKeys) {
+			var ka = cornerKeys[pe], kb = cornerKeys[(pe + 1) % 3];
+			if (wantKeys.indexOf(ka < kb ? ka + "|" + kb : kb + "|" + ka) < 0) return null;
+		}
+		var ex = eb.x - ea.x, ey = eb.y - ea.y, ez = eb.z - ea.z;
+		var el2 = ex * ex + ey * ey + ez * ez;
+		if (el2 < 1e-30) return null;
+		var et = ((pp.x - ea.x) * ex + (pp.y - ea.y) * ey + (pp.z - ea.z) * ez) / el2;
+		if (et <= 0 || et >= 1) return null;
+		var fx = ea.x + et * ex - pp.x, fy = ea.y + et * ey - pp.y, fz = ea.z + et * ez - pp.z;
+		if (fx * fx + fy * fy + fz * fz > edgeTolSq) return null;
+		var c2a = corners2[pe], c2b = corners2[(pe + 1) % 3];
+		var qu = c2a[0] + et * (c2b[0] - c2a[0]), qv = c2a[1] + et * (c2b[1] - c2a[1]);
+		return [qu, qv];
+	}
+
+	// A point within tolerance of TWO of this triangle's edges sits in a needle
+	// narrower than the tolerance. It is placed on both edges (a second 2D copy
+	// of the same pool vertex); the sliver between the copies collapses to a
+	// degenerate triangle that is dropped below, pinching the needle at the point.
+	var pinchCopies = [];
+	var onEdgeIdx = {};
 	for (var j = 0; j < n; j++) {
 		var lj = toLocal(pts[j]);
+		if (edgeTolSq > 0 && j >= 3 && j < nPool) {
+			var want = canon && pts[j].id !== undefined ? (canon[pts[j].id] || []) : undefined;
+			var placed = [];
+			if (!canon || want.length > 0) {
+				for (var pe = 0; pe < 3; pe++) {
+					var pl = onEdge2D(j, pe, want);
+					if (pl) placed.push(pl);
+				}
+			}
+			if (!canon && placed.length > 1) {
+				// No agreed edge set (self-arrange callers): keep the old single placement.
+				placed = [placed[0]];
+			}
+			if (placed.length > 0) {
+				lj = placed[0];
+				onEdgeIdx[j] = true;
+				if (placed.length > 1) pinchCopies.push({ of: j, at: placed[1] });
+			}
+		}
 		coords[j * 2] = lj[0];
 		coords[j * 2 + 1] = lj[1];
+	}
+	if (pinchCopies.length > 0) {
+		var grown = new Float64Array((n + pinchCopies.length) * 2);
+		grown.set(coords);
+		for (var pci = 0; pci < pinchCopies.length; pci++) {
+			grown[(n + pci) * 2] = pinchCopies[pci].at[0];
+			grown[(n + pci) * 2 + 1] = pinchCopies[pci].at[1];
+			pts.push(pts[pinchCopies[pci].of]);
+			onEdgeIdx[n + pci] = true;
+		}
+		coords = grown;
+		n = pts.length;
 	}
 
 	var del;
@@ -257,7 +344,7 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
 			}
 
 			if (idx0 !== undefined && idx1 !== undefined && idx0 !== idx1) {
-				try { con.constrainOne(idx0, idx1); } catch (ce2) { /* skip */ }
+				try { con.constrainOne(idx0, idx1); } catch (ce2) { /* surfaced by splitChecked: the segment will not be an edge */ }
 			}
 		}
 	} catch (ce) {
@@ -289,6 +376,7 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
 
 		// Check winding consistency with original triangle
 		var pa = pts[a], pb = pts[b], pc = pts[c];
+		if (pa === pb || pb === pc || pa === pc) continue; // pinched needle
 		var se1x = pb.x - pa.x, se1y = pb.y - pa.y, se1z = pb.z - pa.z;
 		var se2x = pc.x - pa.x, se2y = pc.y - pa.y, se2z = pc.z - pa.z;
 		var snx = se1y * se2z - se1z * se2y;
@@ -308,6 +396,30 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
 }
 
 /**
+ * Does any INTERIOR point of the chain lie within tol of one of the triangle's
+ * edges (or on a corner)? The first and last points are the entry and exit and
+ * are expected to sit on edges.
+ */
+function chainTouchesEdge(tri, chain, tol) {
+	var tolSq = tol * tol;
+	var cs = [tri.v0, tri.v1, tri.v2];
+	for (var i = 1; i < chain.length - 1; i++) {
+		var p = chain[i];
+		for (var e = 0; e < 3; e++) {
+			var a = cs[e], b = cs[(e + 1) % 3];
+			var abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+			var l2 = abx * abx + aby * aby + abz * abz;
+			if (l2 < 1e-30) continue;
+			var t = ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / l2;
+			if (t < 0) t = 0; else if (t > 1) t = 1;
+			var dx = a.x + t * abx - p.x, dy = a.y + t * aby - p.y, dz = a.z + t * abz - p.z;
+			if (dx * dx + dy * dy + dz * dz <= tolSq) return true;
+		}
+	}
+	return false;
+}
+
+/**
  * Fan-based re-triangulation using pool vertices.
  * Chains segments using bmsChain (identity-based), then fans from original
  * vertices to consecutive chain points. GUARANTEES intersection segments
@@ -320,10 +432,10 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints) {
  *        bmsRetriangulate). When present, fan cannot place arbitrary edge points,
  *        so re-triangulation goes straight to CDT (bmsRetriangulate).
  */
-function bmsFanTriangulate(tri, segments, edgePoolPoints) {
+function bmsFanTriangulate(tri, segments, edgePoolPoints, edgeTol, canon) {
 	// Fan can't honour arbitrary edge points — CDT them in with the segments.
 	if (edgePoolPoints && edgePoolPoints.length > 0) {
-		return bmsRetriangulate(tri, segments, undefined, edgePoolPoints);
+		return bmsRetriangulate(tri, segments, undefined, edgePoolPoints, edgeTol, canon);
 	}
 	if (!segments || segments.length === 0) return [tri];
 
@@ -331,9 +443,17 @@ function bmsFanTriangulate(tri, segments, edgePoolPoints) {
 	var chains = bmsChain(segments);
 
 	if (chains.length !== 1 || chains[0].length < 2) {
-		return bmsRetriangulate(tri, segments);
+		return bmsRetriangulate(tri, segments, undefined, undefined, edgeTol, canon);
 	}
 	var chain = chains[0];
+
+	// The fan needs a chain whose interior points are genuinely interior. A chain
+	// that runs along one of the triangle's own edges (a cutter wall a few mm
+	// from a mesh edge) makes the fan emit needles between the chain and the
+	// edge; the CDT places those points ON the edge and drops the degenerates.
+	if (edgeTol > 0 && chainTouchesEdge(tri, chain, edgeTol)) {
+		return bmsRetriangulate(tri, segments, undefined, undefined, edgeTol, canon);
+	}
 
 	// Sliver guard (KNOWN_ISSUES #21): a giant triangle against a dense chain
 	// would fan into needle slivers from the far corners to every chain point.
@@ -342,7 +462,7 @@ function bmsFanTriangulate(tri, segments, edgePoolPoints) {
 	if (needsSliverGuard(tri, chain)) {
 		var lattice = interiorLatticePoints(tri, chain);
 		if (lattice.length > 0) {
-			return bmsRetriangulate(tri, segments, lattice);
+			return bmsRetriangulate(tri, segments, lattice, undefined, edgeTol, canon);
 		}
 	}
 
@@ -351,14 +471,14 @@ function bmsFanTriangulate(tri, segments, edgePoolPoints) {
 	var e1x = tri.v1.x - tri.v0.x, e1y = tri.v1.y - tri.v0.y, e1z = tri.v1.z - tri.v0.z;
 	var e2x = tri.v2.x - tri.v0.x, e2y = tri.v2.y - tri.v0.y, e2z = tri.v2.z - tri.v0.z;
 	var e1Len = Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
-	if (e1Len < 1e-12) return bmsRetriangulate(tri, segments);
+	if (e1Len < 1e-12) return bmsRetriangulate(tri, segments, undefined, undefined, edgeTol, canon);
 	var lux = e1x / e1Len, luy = e1y / e1Len, luz = e1z / e1Len;
 	var lnx = e1y * e2z - e1z * e2y, lny = e1z * e2x - e1x * e2z, lnz = e1x * e2y - e1y * e2x;
 	var lnLen = Math.sqrt(lnx * lnx + lny * lny + lnz * lnz);
-	if (lnLen < 1e-12) return bmsRetriangulate(tri, segments);
+	if (lnLen < 1e-12) return bmsRetriangulate(tri, segments, undefined, undefined, edgeTol, canon);
 	var lvx = lny * luz - lnz * luy, lvy = lnz * lux - lnx * luz, lvz = lnx * luy - lny * lux;
 	var lvLen = Math.sqrt(lvx * lvx + lvy * lvy + lvz * lvz);
-	if (lvLen < 1e-12) return bmsRetriangulate(tri, segments);
+	if (lvLen < 1e-12) return bmsRetriangulate(tri, segments, undefined, undefined, edgeTol, canon);
 	lvx /= lvLen; lvy /= lvLen; lvz /= lvLen;
 
 	function toLocal(p) {
@@ -367,7 +487,7 @@ function bmsFanTriangulate(tri, segments, edgePoolPoints) {
 	}
 	var l0 = toLocal(tri.v0), l1 = toLocal(tri.v1), l2 = toLocal(tri.v2);
 	var baryD = (l1[1] - l2[1]) * (l0[0] - l2[0]) + (l2[0] - l1[0]) * (l0[1] - l2[1]);
-	if (Math.abs(baryD) < 1e-12) return bmsRetriangulate(tri, segments);
+	if (Math.abs(baryD) < 1e-12) return bmsRetriangulate(tri, segments, undefined, undefined, edgeTol, canon);
 
 	function baryCoords(pu, pv) {
 		var u = ((l1[1] - l2[1]) * (pu - l2[0]) + (l2[0] - l1[0]) * (pv - l2[1])) / baryD;
@@ -389,7 +509,7 @@ function bmsFanTriangulate(tri, segments, edgePoolPoints) {
 		return nearZero >= 2;
 	}
 	if (isAtVertex(entryBary) || isAtVertex(exitBary)) {
-		return bmsRetriangulate(tri, segments);
+		return bmsRetriangulate(tri, segments, undefined, undefined, edgeTol, canon);
 	}
 
 	function edgeOf(bc) {
@@ -402,7 +522,7 @@ function bmsFanTriangulate(tri, segments, edgePoolPoints) {
 	var exitOpp = edgeOf(exitBary);
 
 	if (entryOpp < 0 || exitOpp < 0 || entryOpp === exitOpp) {
-		return bmsRetriangulate(tri, segments);
+		return bmsRetriangulate(tri, segments, undefined, undefined, edgeTol, canon);
 	}
 
 	// Step 4: Corner, vA, vB
@@ -410,7 +530,7 @@ function bmsFanTriangulate(tri, segments, edgePoolPoints) {
 	for (var ci = 0; ci < 3; ci++) {
 		if (ci !== entryOpp && ci !== exitOpp) { cornerIdx = ci; break; }
 	}
-	if (cornerIdx < 0) return bmsRetriangulate(tri, segments);
+	if (cornerIdx < 0) return bmsRetriangulate(tri, segments, undefined, undefined, edgeTol, canon);
 
 	var corner = verts[cornerIdx];
 	var vA = verts[exitOpp];
@@ -484,6 +604,37 @@ function bmsFanTriangulate(tri, segments, edgePoolPoints) {
 }
 
 /**
+ * Intersection segments that did not become an edge of the split mesh, per mesh.
+ * A segment that is not an edge is a hole in the barrier: the flood fill walks
+ * straight through it and both sides of the intersection become one region.
+ *
+ * Checked over the whole mesh, not per triangle: a segment that runs along a
+ * shared edge is legitimately an edge of the neighbour, and where a needle is
+ * pinched shut its two sides meet across the collapsed sliver.
+ */
+function checkSegmentsAreEdges(megaSoup, segments) {
+	var have = { A: {}, B: {} };
+	for (var i = 0; i < megaSoup.length; i++) {
+		var t = megaSoup[i];
+		var k = [vKey(t.v0), vKey(t.v1), vKey(t.v2)];
+		var h = have[t.mesh];
+		for (var e = 0; e < 3; e++) {
+			var a = k[e], b = k[(e + 1) % 3];
+			h[a < b ? a + "|" + b : b + "|" + a] = true;
+		}
+	}
+	var lost = [];
+	for (var s = 0; s < segments.length; s++) {
+		var ka = vKey(segments[s].p0), kb = vKey(segments[s].p1);
+		if (ka === kb) continue;
+		var key = ka < kb ? ka + "|" + kb : kb + "|" + ka;
+		if (!have.A[key]) lost.push({ mesh: "A", triIdx: segments[s].idxA });
+		if (!have.B[key]) lost.push({ mesh: "B", triIdx: segments[s].idxB });
+	}
+	return lost;
+}
+
+/**
  * Split both meshes and produce a unified mega soup where Steiner point
  * vertices are shared pool vertex objects.
  *
@@ -498,7 +649,10 @@ export function bmsSplit(trisA, trisB, intersectResult) {
 	// Optional edge-Steiner maps (conforming edge splits for self-intersection).
 	var edgePointsA = intersectResult.edgePointsA || {};
 	var edgePointsB = intersectResult.edgePointsB || {};
+	var edgeTol = intersectResult.tolerance || 0;
 	var megaSoup = [];
+	var report = { lostSegments: 0, lost: [] };
+	megaSoup.splitReport = report;
 
 	// Process mesh A
 	for (var i = 0; i < trisA.length; i++) {
@@ -515,7 +669,7 @@ export function bmsSplit(trisA, trisB, intersectResult) {
 			});
 		} else {
 			// Crossed and/or edge-point-bearing: re-triangulate with pool vertices
-			var subTris = bmsFanTriangulate(trisA[i], segsA || [], epsA);
+			var subTris = bmsFanTriangulate(trisA[i], segsA || [], epsA, edgeTol, intersectResult.canonEdgeA);
 			for (var si = 0; si < subTris.length; si++) {
 				megaSoup.push({
 					v0: subTris[si].v0,
@@ -541,7 +695,7 @@ export function bmsSplit(trisA, trisB, intersectResult) {
 				origIdx: j
 			});
 		} else {
-			var subTrisB = bmsFanTriangulate(trisB[j], segsB || [], epsB);
+			var subTrisB = bmsFanTriangulate(trisB[j], segsB || [], epsB, edgeTol, intersectResult.canonEdgeB);
 			for (var sj = 0; sj < subTrisB.length; sj++) {
 				megaSoup.push({
 					v0: subTrisB[sj].v0,
@@ -552,6 +706,13 @@ export function bmsSplit(trisA, trisB, intersectResult) {
 				});
 			}
 		}
+	}
+
+	report.lost = checkSegmentsAreEdges(megaSoup, intersectResult.segments || []);
+	report.lostSegments = report.lost.length;
+	if (report.lostSegments > 0) {
+		console.warn("[BMS] bmsSplit: " + report.lostSegments + " intersection segment(s) could not be made an edge; " +
+			"the barrier has a gap and the regions may not separate.");
 	}
 
 	return megaSoup;

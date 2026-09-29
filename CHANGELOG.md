@@ -3,6 +3,36 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## 0.7.5
+
+### Fixed — open cutter through a closed solid split into ~10 pieces plus slivers
+
+Test pair: a closed solid (1282 tris) and an OPEN cutter (24 open edges) whose
+walls pass a few mm from the solid's edges. One clean 1190-segment loop, yet the
+flood fill found ONE region per mesh and the classifier voted each triangle alone.
+
+- **bmsIntersect** snaps crossing points that land within tolerance of a mesh
+  corner onto that corner's exact coordinates.
+- **Conforming edge splits.** A crossing within tolerance of a mesh edge splits
+  that edge on every triangle sharing it. The edge set is chosen once per point,
+  so both neighbours agree; `edgePointsA/B`, `canonEdgeA/B`, `tolerance` are now
+  returned by `bmsIntersect`.
+- **bmsSplit** places such points ON the edge in its 2D triangulation (the 3D
+  vertex is untouched), pinches needles narrower than the tolerance, no longer
+  rejects near-edge points as "drift" (1% of a needle is under a millimetre),
+  and sends chains that run along a triangle's own edge to the CDT, not the fan.
+- **bmsSplit never loses a segment silently.** `megaSoup.splitReport` /
+  `bmsBooleanOp(...).splitReport` lists any segment that did not become an edge,
+  with a console warning.
+- **heffalumpClassify** decides per REGION first (barrier normals) when the loop
+  really separates a mesh, and votes by AREA otherwise, so slivers cannot outvote
+  a region. Genuinely mixed regions are reported (`mixedRegions`), not guessed.
+- Result: 4 surfaces, each one connected region; slivers under 5 mm altitude
+  754 -> 75 (12 of them are in the solid's own input).
+- New regression test on the real pair (`test/openCutterSplit.test.js`).
+- `booleanAuto` test updated: the raw boolean no longer leaves T-junctions on
+  its clean-input case, so it asserts strict <= raw instead of raw > 0.
+
 ## 0.7.4
 
 ### Fixed — 0.7.2 regression: a leaky cutter flipped inside triangles to outside
