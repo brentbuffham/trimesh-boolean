@@ -135,3 +135,39 @@ describe("heffalump closed-mesh classification", function () {
 		expect(violationCount(verifyOutput(all))).toBeLessThan(all.length);
 	});
 });
+
+describe("heffalump closed-mesh test with a leaky cutter", function () {
+	// Regression: 0.7.2 made the test a plain three-axis vote. A cutter with
+	// open edges (real survey/DXF solids often have a few unwelded walls) lets
+	// the X and Y rays escape and out-vote a perfectly clean +Z ray, flipping
+	// inside triangles to outside. A clean +Z ray must win.
+	it("a clean +Z ray is not out-voted by X/Y rays leaking through open walls", function () {
+		var solid = box(0, 0, 0, 5);
+		// Drop the +X wall (v1,v2,v6,v5) and +Y wall (v2,v3,v7,v6): triangles 6-7 and 8-9.
+		solid = solid.filter(function (t, i) { return i < 6 || i > 9; });
+
+		// Flat sheet through the box, kept off the cutter's diagonal seams.
+		var sheet = [];
+		for (var i = -6; i < 6; i++) {
+			for (var j = -6; j < 6; j++) {
+				var x = i * 2 + 0.37, y = j * 2 + 0.61, s = 2;
+				sheet.push({ v0: { x: x, y: y, z: 0 }, v1: { x: x + s, y: y, z: 0 }, v2: { x: x + s, y: y + s, z: 0 } });
+				sheet.push({ v0: { x: x, y: y, z: 0 }, v1: { x: x + s, y: y + s, z: 0 }, v2: { x: x, y: y + s, z: 0 } });
+			}
+		}
+
+		var res = bmsBooleanOp(sheet, solid, null, { classifier: "heffalump" });
+		expect(res).not.toBeNull();
+
+		function centroidInBox(t) {
+			var cx = (t.v0.x + t.v1.x + t.v2.x) / 3;
+			var cy = (t.v0.y + t.v1.y + t.v2.y) / 3;
+			return Math.abs(cx) < 5 && Math.abs(cy) < 5;
+		}
+		var wrongInside = res.groups.aInside.filter(function (t) { return !centroidInBox(t); });
+		var wrongOutside = res.groups.aOutside.filter(centroidInBox);
+		expect(res.groups.aInside.length).toBeGreaterThan(0);
+		expect(wrongInside.length).toBe(0);
+		expect(wrongOutside.length).toBe(0);
+	});
+});

@@ -175,7 +175,7 @@ function parityAlongAxis(px, py, pz, tris, axis) {
 /**
  * Is a point inside a CLOSED mesh?
  *
- * Three-axis majority vote, not a single +Z ray.
+ * +Z ray when it is clean; three-axis vote only when +Z grazes an edge.
  *
  * A single axis-aligned parity ray is not robust: when it grazes an edge shared
  * by two triangles the hit is counted twice or not at all, and the parity — and
@@ -190,10 +190,16 @@ function parityAlongAxis(px, py, pz, tris, axis) {
  * majority-snap pass can still correct a lone straggler.
  */
 function isPointInsideClosedMesh(px, py, pz, tris) {
-	var inside = 0, total = 0;
-	var shakyInside = 0, shakyTotal = 0;
+	// +Z first. On a closed mesh every axis agrees, so trusting a clean +Z ray
+	// costs nothing. On a NEARLY closed mesh (a cutter with one open hole) it
+	// matters: X/Y rays can leak through the hole and out-vote a correct +Z.
+	var z = parityAlongAxis(px, py, pz, tris, 2);
+	if (!z.shaky) return z.inside;
 
-	for (var axis = 0; axis < 3; axis++) {
+	var inside = 0, total = 0;
+	var shakyInside = z.inside ? 1 : 0, shakyTotal = 1;
+
+	for (var axis = 0; axis < 2; axis++) {
 		var r = parityAlongAxis(px, py, pz, tris, axis);
 		if (r.inside) shakyInside++;
 		shakyTotal++;

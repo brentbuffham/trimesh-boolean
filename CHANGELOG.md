@@ -3,6 +3,16 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## 0.7.4
+
+### Fixed — 0.7.2 regression: a leaky cutter flipped inside triangles to outside
+
+0.7.2 made the heffalump's closed-mesh test a plain three-axis vote. A cutter
+with a few open walls lets the X/Y rays escape and out-vote a clean +Z ray.
+On the Kirra TRIM_nuts x cut DXF pair, `aInside` jumped 1410 -> 1996. The test
+now trusts +Z when it is clean and only votes when +Z grazes an edge. The pair
+is back to 1412 inside. Regression test added.
+
 ## 0.7.3
 
 ### Added — a workflows demo: every pipeline, with the code that runs it
