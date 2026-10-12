@@ -3,6 +3,29 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## 0.7.6
+
+### Fixed — a needle across a split edge where two meshes' corners nearly meet
+
+Kirra pair: a pit WALL surface split against a solid extruded from a polygon
+drawn on that wall. One of the solid's corners sits ~2 µm off a WALL vertex.
+The vertex pool merged the two (well inside its tolerance), but
+`bmsRetriangulate` matched pool vertices to the host triangle's own corners by
+EXACT key only, so the merged vertex entered the triangulation as a separate
+point a hair from the corner. The CDT capped it across a split edge: a
+28.24 m x 1 µm needle (and a 24.85 m one), seen in Kirra as a white line
+hanging off the cut.
+
+- **bmsSplit** treats a pool vertex within the pool tolerance of one of the
+  triangle's corners AS that corner (the same tolerance the edge placement
+  already uses). It adds no new point, and the vertex's id maps to the corner.
+- On the pair: both split-made needles gone under auto, hybrid and heffalump;
+  the solid's regions unchanged (60 / 76); the wall loses only the two needles
+  and their two caps (52 / 148 -> 50 / 146).
+- New regression test on the real pair, shifted to a local origin
+  (`test/cornerNearMissNeedle.test.js`, `test/fixtures/kirra-wall-extruded-corner.json`).
+  The wall's own two 37 m input needles are excluded by identity with the input.
+
 ## 0.7.5
 
 ### Fixed — open cutter through a closed solid split into ~10 pieces plus slivers

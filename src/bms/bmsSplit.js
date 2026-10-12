@@ -156,17 +156,44 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints, edgeTol, c
 		return false;
 	}
 
+	// Index of THIS triangle's corner that pool vertex p is, or -1. An exact key
+	// match, or — new in 0.7.6 — a corner within edgeTol: the pool merges points
+	// that close, so such a vertex IS the corner as far as the pool is concerned.
+	//
+	// Without the tolerance a crossing snapped to the OTHER mesh's corner, a few
+	// microns from this one (two meshes whose corners nearly coincide: an
+	// extruded solid built on a wall's vertex), entered the triangulation as a
+	// separate point a hair from the corner. The CDT then built a needle from it
+	// to the far corner across a split edge — 28 m long, 1 µm wide on Kirra's
+	// WALL x EXTRUDED405 split. Edge placement below cannot catch it: it only
+	// places points strictly between an edge's ends.
+	var cornerTolSq = edgeTol > 0 ? edgeTol * edgeTol : 0;
+	var cornerPts = [tri.v0, tri.v1, tri.v2];
+	function cornerIndexOf(p, pk) {
+		if (pk === v0Key || pk === v1Key || pk === v2Key) return keyToIndex[pk];
+		if (cornerTolSq === 0) return -1;
+		var best = -1, bestD = cornerTolSq;
+		for (var ci = 0; ci < 3; ci++) {
+			var cv = cornerPts[ci];
+			var cdx = p.x - cv.x, cdy = p.y - cv.y, cdz = p.z - cv.z;
+			var cd = cdx * cdx + cdy * cdy + cdz * cdz;
+			if (cd <= bestD) { bestD = cd; best = ci; }
+		}
+		return best;
+	}
+
 	for (var s = 0; s < segments.length; s++) {
 		var seg = segments[s];
 		var endpts = [seg.p0, seg.p1];
 		for (var e = 0; e < 2; e++) {
 			var p = endpts[e];
 
-			// Check if this pool vertex is an original vertex (by vKey match)
+			// Is this pool vertex one of the original corners (exactly, or within
+			// the pool tolerance)? Map its id to that corner, add no new point.
 			var pk = vKey(p);
-			if (pk === v0Key || pk === v1Key || pk === v2Key) {
-				// Map the pool vertex id to the original vertex index
-				if (p.id !== undefined) idToIndex[p.id] = keyToIndex[pk];
+			var cIdx = cornerIndexOf(p, pk);
+			if (cIdx >= 0) {
+				if (p.id !== undefined) idToIndex[p.id] = cIdx;
 				continue;
 			}
 
@@ -209,8 +236,9 @@ function bmsRetriangulate(tri, segments, extraPoints, edgePoolPoints, edgeTol, c
 		for (var ei = 0; ei < edgePoolPoints.length; ei++) {
 			var ep = edgePoolPoints[ei];
 			var epk = vKey(ep);
-			if (epk === v0Key || epk === v1Key || epk === v2Key) {
-				if (ep.id !== undefined) idToIndex[ep.id] = keyToIndex[epk];
+			var ecIdx = cornerIndexOf(ep, epk);
+			if (ecIdx >= 0) {
+				if (ep.id !== undefined) idToIndex[ep.id] = ecIdx;
 				continue;
 			}
 			if (ep.id !== undefined && seenIds[ep.id]) continue;
