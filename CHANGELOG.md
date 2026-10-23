@@ -3,6 +3,16 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## 0.7.7
+
+### Performance: the BMS vertex pool no longer builds strings per lookup
+
+`createVertexPool` keyed its spatial grid with `"cx,cy,cz"` strings in a plain object. A lookup searches 27 cells, so it built 27 strings, which dominated large builds. The grid is now a `Map` keyed by a 32-bit hash of the integer cell coordinates.
+
+- **Correctness is unchanged.** Cells that share a hash share a bucket, and every candidate is still tested against the real tolerance. A collision only costs a distance check.
+- **Speed:** 2,010,228 lookups at UTM coordinates (trimesh-build-js, a 1M-point cloud) take 6.6 s, down from 30.4 s, with identical vertices.
+- **New tests** in `test/vertexPool.test.js`: merging across a cell border, separation, the nearest of several candidates, UTM coordinates with millimetre tolerance, and triRefs recorded once.
+
 ## 0.7.6
 
 ### Fixed — a needle across a split edge where two meshes' corners nearly meet

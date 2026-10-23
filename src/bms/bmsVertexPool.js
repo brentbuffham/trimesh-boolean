@@ -33,24 +33,39 @@ export function createVertexPool(tolerance) {
 	var cellSize = tolerance * 2;
 	if (cellSize < 1e-12) cellSize = 1e-6;
 
-	/** @type {Object.<string, PoolVertex[]>} */
-	var grid = {};
+	// Cells are keyed by a 32-bit hash of their integer coordinates in a Map,
+	// not a "cx,cy,cz" string: the 27-cell search built 27 strings per
+	// lookup, which dominated large builds. Cells that share a hash share a
+	// bucket; that only costs distance checks, never correctness, because
+	// every candidate is tested against the real tolerance.
+	/** @type {Map<number, PoolVertex[]>} */
+	var grid = new Map();
 	var allVertices = [];
 	var nextId = 0;
 	var tolSq = tolerance * tolerance;
+
+	/**
+	 * Hash integer cell coordinates (any size; ToInt32 wraps) to a cell key.
+	 * @param {number} cx
+	 * @param {number} cy
+	 * @param {number} cz
+	 * @returns {number}
+	 */
+	function cellHash(cx, cy, cz) {
+		var h = Math.imul(cx | 0, 0x9E3779B1) ^ Math.imul(cy | 0, 0x85EBCA6B) ^ Math.imul(cz | 0, 0xC2B2AE35);
+		h ^= h >>> 15;
+		return Math.imul(h, 0x2C1B3C6D) >>> 0;
+	}
 
 	/**
 	 * Hash a point into a cell key.
 	 * @param {number} x
 	 * @param {number} y
 	 * @param {number} z
-	 * @returns {string}
+	 * @returns {number}
 	 */
 	function cellKey(x, y, z) {
-		var cx = Math.floor(x / cellSize);
-		var cy = Math.floor(y / cellSize);
-		var cz = Math.floor(z / cellSize);
-		return cx + "," + cy + "," + cz;
+		return cellHash(Math.floor(x / cellSize), Math.floor(y / cellSize), Math.floor(z / cellSize));
 	}
 
 	/**
@@ -72,8 +87,7 @@ export function createVertexPool(tolerance) {
 		for (var dx = -1; dx <= 1; dx++) {
 			for (var dy = -1; dy <= 1; dy++) {
 				for (var dz = -1; dz <= 1; dz++) {
-					var key = (cx + dx) + "," + (cy + dy) + "," + (cz + dz);
-					var bucket = grid[key];
+					var bucket = grid.get(cellHash(cx + dx, cy + dy, cz + dz));
 					if (!bucket) continue;
 					for (var i = 0; i < bucket.length; i++) {
 						var v = bucket[i];
@@ -133,8 +147,9 @@ export function createVertexPool(tolerance) {
 
 		// Insert into spatial hash
 		var key = cellKey(x, y, z);
-		if (!grid[key]) grid[key] = [];
-		grid[key].push(vertex);
+		var cell = grid.get(key);
+		if (cell) cell.push(vertex);
+		else grid.set(key, [vertex]);
 
 		allVertices.push(vertex);
 		return vertex;
