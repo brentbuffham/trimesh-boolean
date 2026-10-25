@@ -38,7 +38,8 @@
 </head>
 <body>
 <header>
-	<h1>trimesh-boolean</h1>
+	<h1>trimesh-boolean <span id="lib-version" style="font-size:0.5em;color:#888">…</span></h1>
+	<span class="trimesh-family" style="font-size:0.75rem;color:#888;white-space:nowrap" title="The trimesh family of mesh libraries">family: <b style="color:#ddd">trimesh-boolean</b> &middot; <a href="https://brentbuffham.github.io/trimesh-build-js/" style="color:#cc2222" title="Build meshes from point clouds (caves, drives, voids) - demo">trimesh-build-js</a> &middot; <a href="https://brentbuffham.github.io/trimesh-repair-js/" style="color:#cc2222" title="Find, patch and check mesh problems - demo">trimesh-repair-js</a></span>
 	<p>Triangle mesh boolean operations — the only JS library that supports open surfaces</p>
 	<a href="index.html" class="three-link">3D Demo (Three.js) &rarr;</a>
 </header>
@@ -118,6 +119,11 @@
 
 <script type="module">
 import { boolean, countOpenEdges, weldVertices, weldedToSoup } from '../src/index.js';
+import pkg from '../package.json';
+
+// ── Version badge, read from package.json so it cannot go stale ──
+var vEl = document.getElementById('lib-version');
+if (vEl) vEl.textContent = 'v' + pkg.version;
 
 // ── Mesh Generators ──
 
