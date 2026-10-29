@@ -3,6 +3,15 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## 0.7.8
+
+### Performance: the BMS vertex pool searches 8 cells, not 27
+
+`createVertexPool`'s lookup scanned the 27 cells around a point's own cell. Cells are two tolerances wide, so a tolerance ball touches at most 2 cells per axis. `findNearest` now scans just the cells the ball covers (widened by a hair, plus a few ulps of the coordinate, so floating-point rounding can never drop a candidate), in the same ascending order, so among equally near vertices the same one wins.
+
+- **Same vertices.** `test/vertexPool.test.js` runs the 27-cell search as a reference beside the new one on random points with near-duplicates, UTM coordinates at millimetre tolerance, lattices at fractions and multiples of the tolerance, points a hair either side of a cell border, and a flat sheet at tolerance 1e-6: every answer is identical. 1.5M UTM points: 3.8 s to 1.65 s, 958,505 vertices both ways.
+- The weld in trimesh-repair-js (`ingestToBMS`) is one `getOrCreate` per vertex, so a million-point build gets the saving there.
+
 ## 0.7.7
 
 ### Performance: the BMS vertex pool no longer builds strings per lookup

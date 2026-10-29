@@ -69,25 +69,40 @@ export function createVertexPool(tolerance) {
 	}
 
 	/**
-	 * Search the 27 neighboring cells for the nearest existing vertex
-	 * within tolerance.
+	 * How far from a coordinate a vertex inside tolerance can sit, for choosing cells:
+	 * the tolerance, a hair more, and a few ulps of the coordinate itself (the distance
+	 * test and the cell index are both rounded, and a UTM easting has ulps near 1e-9).
+	 * @param {number} v
+	 * @returns {number}
+	 */
+	function reach(v) {
+		return tolerance * 1.000001 + Math.abs(v) * 2e-15;
+	}
+
+	/**
+	 * Search the cells a tolerance ball around the point can touch for the
+	 * nearest existing vertex within tolerance. Cells are two tolerances wide,
+	 * so that is 2 cells per axis (8 in all), not the 27 around the point's own
+	 * cell. The cells are visited in the same ascending order, so among equally
+	 * near vertices the same one wins.
 	 * @param {number} x
 	 * @param {number} y
 	 * @param {number} z
 	 * @returns {PoolVertex|null}
 	 */
 	function findNearest(x, y, z) {
-		var cx = Math.floor(x / cellSize);
-		var cy = Math.floor(y / cellSize);
-		var cz = Math.floor(z / cellSize);
+		var rx = reach(x), ry = reach(y), rz = reach(z);
+		var x0 = Math.floor((x - rx) / cellSize), x1 = Math.floor((x + rx) / cellSize);
+		var y0 = Math.floor((y - ry) / cellSize), y1 = Math.floor((y + ry) / cellSize);
+		var z0 = Math.floor((z - rz) / cellSize), z1 = Math.floor((z + rz) / cellSize);
 
 		var bestDist = tolSq;
 		var bestVert = null;
 
-		for (var dx = -1; dx <= 1; dx++) {
-			for (var dy = -1; dy <= 1; dy++) {
-				for (var dz = -1; dz <= 1; dz++) {
-					var bucket = grid.get(cellHash(cx + dx, cy + dy, cz + dz));
+		for (var cx = x0; cx <= x1; cx++) {
+			for (var cy = y0; cy <= y1; cy++) {
+				for (var cz = z0; cz <= z1; cz++) {
+					var bucket = grid.get(cellHash(cx, cy, cz));
 					if (!bucket) continue;
 					for (var i = 0; i < bucket.length; i++) {
 						var v = bucket[i];
