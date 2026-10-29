@@ -3,6 +3,10 @@
 Notable changes to `trimesh-boolean`. Versions before 0.6.6 are recorded in the
 git history and in `KNOWN_ISSUES.md`.
 
+## 0.7.9
+
+- `repairMesh`: a `stitchTolerance` of 0 is used as given. It was written `config.stitchTolerance || 1.0`, so 0 became 1.0 without a word; the default applies only when the option is not passed. (The final mesh is the same either way on the fixtures I tried, because the capping step that follows closes what stitching leaves; the call to `stitchByProximity` is what changes.)
+
 ## 0.7.8
 
 ### Performance: the BMS vertex pool searches 8 cells, not 27

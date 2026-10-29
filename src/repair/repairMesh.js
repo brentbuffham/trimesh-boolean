@@ -47,7 +47,7 @@ export async function repairMesh(soup, config, onProgress) {
 	if (!config) config = {};
 	var closeMode = config.closeMode || "none";
 	var snapTol = config.snapTolerance || 0;
-	var stitchTol = config.stitchTolerance || 1.0;
+	var stitchTol = config.stitchTolerance !== undefined ? config.stitchTolerance : 1.0;
 	var removeDegenerate = config.removeDegenerate !== false;
 	var sliverRatio = config.sliverRatio !== undefined ? config.sliverRatio : 0.01;
 	var doCleanCrossings = config.cleanCrossings !== false;
